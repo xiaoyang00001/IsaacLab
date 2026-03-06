@@ -142,7 +142,11 @@ class InteractiveScene:
         self.physics_backend = self.sim.physics_manager.__name__.lower()
         visualizer_clone_fn = None
         requested_viz_types = set(self.sim.resolve_visualizer_types())
-        if "physx" in self.physics_backend:
+        if "ovphysx" in self.physics_backend:
+            from isaaclab_ovphysx.cloner import ovphysx_replicate
+
+            physics_clone_fn = ovphysx_replicate
+        elif "physx" in self.physics_backend:
             from isaaclab_physx.cloner import physx_replicate
 
             physics_clone_fn = physx_replicate
@@ -163,6 +167,10 @@ class InteractiveScene:
             device=self.device,
             physics_clone_fn=physics_clone_fn,
             visualizer_clone_fn=None,
+            # For ovphysx: env_1..N are created by physx.clone() in the physics
+            # runtime after add_usd().  USD replication of the asset hierarchy
+            # to env_1..N is skipped — only env_0 needs physics prims in the USD.
+            clone_usd="ovphysx" not in self.physics_backend,
         )
 
         # create source prim
@@ -235,12 +243,12 @@ class InteractiveScene:
                 self._default_env_origins,
             )
 
-            if not copy_from_source:
-                # skip physx cloning, this means physx will walk and parse the stage one by one faithfully
+            if not copy_from_source and self.cloner_cfg.physics_clone_fn is not None:
                 self.cloner_cfg.physics_clone_fn(self.stage, *replicate_args, device=self.cloner_cfg.device)
             if self.cloner_cfg.visualizer_clone_fn is not None:
                 self.cloner_cfg.visualizer_clone_fn(self.stage, *replicate_args, device=self.cloner_cfg.device)
-            cloner.usd_replicate(self.stage, *replicate_args)
+            if self.cloner_cfg.clone_usd:
+                cloner.usd_replicate(self.stage, *replicate_args, positions=self._default_env_origins)
 
     def _sensor_renderer_types(self) -> list[str]:
         """Return renderer type names used by scene sensors."""
