@@ -142,15 +142,15 @@ class InteractiveScene:
         self.physics_backend = self.sim.physics_manager.__name__.lower()
         visualizer_clone_fn = None
         requested_viz_types = set(self.sim.resolve_visualizer_types())
-        if "ovphysx" in self.physics_backend:
+        if self.physics_backend.startswith("ovphysx"):
             from isaaclab_ovphysx.cloner import ovphysx_replicate
 
             physics_clone_fn = ovphysx_replicate
-        elif "physx" in self.physics_backend:
+        elif self.physics_backend.startswith("physx"):
             from isaaclab_physx.cloner import physx_replicate
 
             physics_clone_fn = physx_replicate
-        elif "newton" in self.physics_backend:
+        elif self.physics_backend.startswith("newton"):
             from isaaclab_newton.cloner import newton_physics_replicate
 
             physics_clone_fn = newton_physics_replicate
@@ -170,7 +170,7 @@ class InteractiveScene:
             # For ovphysx: env_1..N are created by physx.clone() in the physics
             # runtime after add_usd().  USD replication of the asset hierarchy
             # to env_1..N is skipped — only env_0 needs physics prims in the USD.
-            clone_usd="ovphysx" not in self.physics_backend,
+            clone_usd=not self.physics_backend.startswith("ovphysx"),
         )
 
         # create source prim
@@ -214,6 +214,7 @@ class InteractiveScene:
         if has_scene_cfg_entities:
             self.clone_environments(copy_from_source=(not self.cfg.replicate_physics))
             # Collision filtering is PhysX-specific (PhysxSchema.PhysxSceneAPI)
+            # Intentionally matches both physx and ovphysx (both are PhysX-based)
             if self.cfg.filter_collisions and "physx" in self.physics_backend:
                 self.filter_collisions(self._global_prim_paths)
 
@@ -226,6 +227,7 @@ class InteractiveScene:
             may increase). Defaults to False.
         """
         # PhysX-only: set env id bit count for replicated physics. Newton handles env separation in its own API.
+        # Intentionally matches both physx and ovphysx (both are PhysX-based)
         if self.cfg.replicate_physics and "physx" in self.physics_backend:
             prim = self.stage.GetPrimAtPath("/physicsScene")
             prim.CreateAttribute("physxScene:envIdInBoundsBitCount", Sdf.ValueTypeNames.Int).Set(4)
