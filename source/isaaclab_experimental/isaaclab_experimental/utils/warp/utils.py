@@ -12,6 +12,7 @@ import torch
 import warp as wp
 
 
+
 @wp.kernel
 def _set_mask_from_ids(
     mask: wp.array(dtype=wp.bool),
