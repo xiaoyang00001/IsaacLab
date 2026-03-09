@@ -11,7 +11,10 @@ import torch
 
 import warp as wp
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> ef7b3710f44 (Add warp Cartpole task configuration)
 
 @wp.kernel
 def _set_mask_from_ids(
