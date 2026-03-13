@@ -11,7 +11,6 @@ import warnings
 from typing import Any
 
 import numpy as np
-
 import warp as wp
 
 from isaaclab.assets.articulation.base_articulation_data import BaseArticulationData
@@ -483,9 +482,7 @@ class ArticulationData(BaseArticulationData):
         """
         # ovphysx ROOT_VELOCITY is COM velocity; link velocity comes from the first
         # element of the per-link velocity tensor.
-        self._read_spatial_vector_binding(
-            TT.LINK_VELOCITY, self._body_link_vel_w
-        )
+        self._read_spatial_vector_binding(TT.LINK_VELOCITY, self._body_link_vel_w)
         if self._root_link_vel_w.timestamp < self._sim_timestamp:
             wp.launch(
                 _copy_first_body,
@@ -524,9 +521,7 @@ class ArticulationData(BaseArticulationData):
         This quantity contains the linear and angular velocities of the articulation root's center of mass frame
         relative to the world.
         """
-        self._read_spatial_vector_binding(
-            TT.ROOT_VELOCITY, self._root_com_vel_w
-        )
+        self._read_spatial_vector_binding(TT.ROOT_VELOCITY, self._root_com_vel_w)
         return self._root_com_vel_w.data
 
     """
@@ -574,9 +569,7 @@ class ArticulationData(BaseArticulationData):
         This quantity contains the linear and angular velocities of the articulation links' actor frame
         relative to the world.
         """
-        self._read_spatial_vector_binding(
-            TT.LINK_VELOCITY, self._body_link_vel_w
-        )
+        self._read_spatial_vector_binding(TT.LINK_VELOCITY, self._body_link_vel_w)
         return self._body_link_vel_w.data
 
     @property
@@ -622,9 +615,7 @@ class ArticulationData(BaseArticulationData):
 
         All values are relative to the world.
         """
-        self._read_spatial_vector_binding(
-            TT.LINK_ACCELERATION, self._body_com_acc_w
-        )
+        self._read_spatial_vector_binding(TT.LINK_ACCELERATION, self._body_com_acc_w)
         return self._body_com_acc_w.data
 
     @property
@@ -636,9 +627,7 @@ class ArticulationData(BaseArticulationData):
         This quantity is the pose of the center of mass frame of the rigid body relative to the body's link frame.
         The orientation is provided in (x, y, z, w) format.
         """
-        self._read_transform_binding(
-            TT.BODY_COM_POSE, self._body_com_pose_b
-        )
+        self._read_transform_binding(TT.BODY_COM_POSE, self._body_com_pose_b)
         return self._body_com_pose_b.data
 
     @property
@@ -1012,10 +1001,13 @@ class ArticulationData(BaseArticulationData):
         """Deprecated. Use :attr:`default_root_pose` and :attr:`default_root_vel` instead."""
         warnings.warn(
             "default_root_state is deprecated. Use default_root_pose and default_root_vel.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         if self._root_state_w_buf is None:
-            self._root_state_w_buf = wp.zeros(self._num_instances, dtype=wp.types.vector(13, wp.float32), device=self.device)
+            self._root_state_w_buf = wp.zeros(
+                self._num_instances, dtype=wp.types.vector(13, wp.float32), device=self.device
+            )
         return self._root_state_w_buf
 
     @property
@@ -1023,7 +1015,8 @@ class ArticulationData(BaseArticulationData):
         """Deprecated. Use :attr:`root_link_pose_w` and :attr:`root_com_vel_w` instead."""
         warnings.warn(
             "root_state_w is deprecated. Use root_link_pose_w and root_com_vel_w.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         return self.root_link_pose_w
 
@@ -1032,7 +1025,8 @@ class ArticulationData(BaseArticulationData):
         """Deprecated. Use :attr:`root_link_pose_w` and :attr:`root_link_vel_w` instead."""
         warnings.warn(
             "root_link_state_w is deprecated. Use root_link_pose_w and root_link_vel_w.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         return self.root_link_pose_w
 
@@ -1041,7 +1035,8 @@ class ArticulationData(BaseArticulationData):
         """Deprecated. Use :attr:`root_com_pose_w` and :attr:`root_com_vel_w` instead."""
         warnings.warn(
             "root_com_state_w is deprecated. Use root_com_pose_w and root_com_vel_w.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         return self.root_com_pose_w
 
@@ -1050,7 +1045,8 @@ class ArticulationData(BaseArticulationData):
         """Deprecated. Use :attr:`body_link_pose_w` and :attr:`body_com_vel_w` instead."""
         warnings.warn(
             "body_state_w is deprecated. Use body_link_pose_w and body_com_vel_w.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         return self.body_link_pose_w
 
@@ -1059,7 +1055,8 @@ class ArticulationData(BaseArticulationData):
         """Deprecated. Use :attr:`body_link_pose_w` and :attr:`body_link_vel_w` instead."""
         warnings.warn(
             "body_link_state_w is deprecated. Use body_link_pose_w and body_link_vel_w.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         return self.body_link_pose_w
 
@@ -1068,7 +1065,8 @@ class ArticulationData(BaseArticulationData):
         """Deprecated. Use :attr:`body_com_pose_w` and :attr:`body_com_vel_w` instead."""
         warnings.warn(
             "body_com_state_w is deprecated. Use body_com_pose_w and body_com_vel_w.",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
         return self.body_com_pose_w
 
@@ -1195,6 +1193,7 @@ class ArticulationData(BaseArticulationData):
         mode, so we read them via CPU numpy buffers and then copy to the
         simulation device.
         """
+
         # Property reads always use CPU numpy (property tensors are host-side).
         def _read_cpu(tensor_type):
             binding = self._get_binding(tensor_type)
@@ -1231,9 +1230,7 @@ class ArticulationData(BaseArticulationData):
         # Friction: [N, D, 3] -> extract static friction (column 0)
         np_fric = _read_cpu(TT.DOF_FRICTION_PROPERTIES)
         if np_fric is not None:
-            self._joint_friction_coeff = wp.from_numpy(
-                np_fric[..., 0].copy(), dtype=wp.float32, device=self.device
-            )
+            self._joint_friction_coeff = wp.from_numpy(np_fric[..., 0].copy(), dtype=wp.float32, device=self.device)
 
         # Fixed tendon properties (CPU-side, read once)
         T_fix = getattr(self, "_num_fixed_tendons", 0)
@@ -1298,94 +1295,102 @@ class ArticulationData(BaseArticulationData):
         if binding is None:
             return None
         from isaaclab_ovphysx.tensor_types import _CPU_ONLY_TYPES
+
         dev = "cpu" if tensor_type in _CPU_ONLY_TYPES else self.device
         buf = wp.zeros(binding.shape, dtype=wp.float32, device=dev)
         self._read_scratch[tensor_type] = buf
         return buf
 
+    def _get_direct_read_callable(self, tensor_type: int, wp_array: wp.array, floats_per_elem: int = 0):
+        """Return a zero-overhead callable that reads from a binding into a buffer.
+
+        Builds everything once: DLTensor, ctypes pointer, C function reference,
+        SDK handle, binding handle.  The returned callable does ONE thing:
+        invoke the C function.  No Python lock, no destroyed check, no SDK
+        validity check, no DLPack protocol -- just the raw ctypes call.
+
+        The old tensorAPI achieves similar speed via cached TensorDesc + pybind.
+        """
+        if not hasattr(self, "_direct_read_cache"):
+            self._direct_read_cache = {}
+        cache_key = (tensor_type, wp_array.ptr)
+        cached = self._direct_read_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        binding = self._get_binding(tensor_type)
+        if binding is None:
+            self._direct_read_cache[cache_key] = None
+            return None
+
+        if floats_per_elem > 0:
+            view = wp.array(
+                ptr=wp_array.ptr,
+                shape=binding.shape,
+                dtype=wp.float32,
+                device=str(wp_array.device),
+                copy=False,
+            )
+        else:
+            view = wp_array
+
+        import ctypes
+
+        from ovphysx._dlpack_utils import acquire_dltensor
+
+        dl_tensor, keepalive = acquire_dltensor(view)
+        dl_ptr = ctypes.byref(dl_tensor)
+        c_func = binding._sdk._lib.ovphysx_read_tensor_binding
+        sdk_handle = binding._sdk._omni_physx_sdk_handle.value
+        binding_handle = binding._handle
+
+        def _fast_read():
+            c_func(sdk_handle, binding_handle, dl_ptr)
+
+        self._direct_read_cache[cache_key] = (_fast_read, keepalive, view, dl_tensor)
+        return self._direct_read_cache[cache_key]
+
     def _read_binding_into_flat(self, tensor_type: int, wp_array: wp.array) -> None:
         """Read a flat binding (no structured dtype) into an existing warp array.
 
-        Full GPU path: ovphysx reads via DLPack into the scratch buffer on
-        the simulation device, then wp.copy stays on the same device.
+        Reads directly into the target array -- no scratch buffer, no extra copy.
         """
         binding = self._get_binding(tensor_type)
         if binding is None:
             return
-        scratch = self._get_read_scratch(tensor_type)
-        binding.read(scratch)
-        wp.copy(wp_array, scratch)
+        binding.read(wp_array)
 
     def _read_binding_into_buf(self, tensor_type: int, buf: TimestampedBuffer) -> None:
-        """Read from an ovphysx binding into a TimestampedBuffer, skipping if fresh."""
+        """Read from an ovphysx binding into a TimestampedBuffer, skipping if fresh.
+
+        Uses a direct C call -- no Python lock, no DLPack, no validation.
+        """
         if buf.timestamp >= self._sim_timestamp:
             return
-        binding = self._get_binding(tensor_type)
-        if binding is None:
+        cached = self._get_direct_read_callable(tensor_type, buf.data)
+        if cached is None:
             return
-        scratch = self._get_read_scratch(tensor_type)
-        binding.read(scratch)
-        wp.copy(buf.data, scratch)
+        cached[0]()
         buf.timestamp = self._sim_timestamp
 
     def _read_transform_binding(self, tensor_type: int, buf: TimestampedBuffer) -> None:
-        """Read a pose binding ([N, 7] or [N, L, 7]) into a wp.transformf buffer.
-
-        GPU-native path: ovphysx reads via DLPack into a flat float32 scratch
-        buffer on the sim device, then we copy the raw bytes directly into the
-        transformf destination buffer (same memory layout: 7 contiguous floats
-        per element).  No CPU roundtrip, no numpy.
-        """
+        """Read a pose binding directly via cached C call."""
         if buf.timestamp >= self._sim_timestamp:
             return
-        binding = self._get_binding(tensor_type)
-        if binding is None:
+        cached = self._get_direct_read_callable(tensor_type, buf.data, 7)
+        if cached is None:
             return
-        scratch = self._get_read_scratch(tensor_type)
-        binding.read(scratch)
-        # scratch is [N, 7] or [N, L, 7] float32; buf.data is [N] or [N, L] transformf.
-        # Both have identical byte layouts (7 contiguous float32 per element).
-        # Use wp.copy with a flat float32 view of the destination to avoid
-        # dtype mismatch.  The flat view aliases buf.data's memory.
-        n_elements = 1
-        for s in buf.data.shape:
-            n_elements *= s
-        dst_flat = wp.array(
-            ptr=buf.data.ptr, shape=(n_elements * 7,),
-            dtype=wp.float32, device=str(buf.data.device), copy=False,
-        )
-        src_flat = wp.array(
-            ptr=scratch.ptr, shape=(n_elements * 7,),
-            dtype=wp.float32, device=str(scratch.device), copy=False,
-        )
-        wp.copy(dst_flat, src_flat)
+        cached[0]()
         buf.timestamp = self._sim_timestamp
 
     def _read_spatial_vector_binding(self, tensor_type: int, buf: TimestampedBuffer) -> None:
-        """Read a velocity binding ([N, 6] or [N, L, 6]) into a spatial_vectorf buffer.
-
-        Same byte-copy path as _read_transform_binding. wp.copy handles
-        cross-device transfer when scratch is CPU and buf is GPU.
-        """
+        """Read a velocity binding directly via cached C call."""
         if buf.timestamp >= self._sim_timestamp:
             return
-        binding = self._get_binding(tensor_type)
-        if binding is None:
+        cached = self._get_direct_read_callable(tensor_type, buf.data, 6)
+        if cached is None:
             return
-        scratch = self._get_read_scratch(tensor_type)
-        binding.read(scratch)
-        n_elements = 1
-        for s in buf.data.shape:
-            n_elements *= s
-        dst_flat = wp.array(
-            ptr=buf.data.ptr, shape=(n_elements * 6,),
-            dtype=wp.float32, device=str(buf.data.device), copy=False,
-        )
-        src_flat = wp.array(
-            ptr=scratch.ptr, shape=(n_elements * 6,),
-            dtype=wp.float32, device=str(scratch.device), copy=False,
-        )
-        wp.copy(dst_flat, src_flat)
+        cached[0]()
         buf.timestamp = self._sim_timestamp
 
     # ------------------------------------------------------------------
@@ -1394,32 +1399,45 @@ class ArticulationData(BaseArticulationData):
 
     def _get_pos_from_transform(self, transform: wp.array) -> wp.array:
         return wp.array(
-            ptr=transform.ptr, shape=transform.shape, dtype=wp.vec3f,
-            strides=transform.strides, device=self.device,
+            ptr=transform.ptr,
+            shape=transform.shape,
+            dtype=wp.vec3f,
+            strides=transform.strides,
+            device=self.device,
         )
 
     def _get_quat_from_transform(self, transform: wp.array) -> wp.array:
         return wp.array(
-            ptr=transform.ptr + 3 * 4, shape=transform.shape, dtype=wp.quatf,
-            strides=transform.strides, device=self.device,
+            ptr=transform.ptr + 3 * 4,
+            shape=transform.shape,
+            dtype=wp.quatf,
+            strides=transform.strides,
+            device=self.device,
         )
 
     def _get_lin_vel_from_spatial_vector(self, sv: wp.array) -> wp.array:
         return wp.array(
-            ptr=sv.ptr, shape=sv.shape, dtype=wp.vec3f,
-            strides=sv.strides, device=self.device,
+            ptr=sv.ptr,
+            shape=sv.shape,
+            dtype=wp.vec3f,
+            strides=sv.strides,
+            device=self.device,
         )
 
     def _get_ang_vel_from_spatial_vector(self, sv: wp.array) -> wp.array:
         return wp.array(
-            ptr=sv.ptr + 3 * 4, shape=sv.shape, dtype=wp.vec3f,
-            strides=sv.strides, device=self.device,
+            ptr=sv.ptr + 3 * 4,
+            shape=sv.shape,
+            dtype=wp.vec3f,
+            strides=sv.strides,
+            device=self.device,
         )
 
 
 # ======================================================================
 # Warp kernels
 # ======================================================================
+
 
 @wp.kernel
 def _fd_joint_acc(

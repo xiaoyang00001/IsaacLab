@@ -15,19 +15,16 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-
 import warp as wp
 
 from isaaclab.assets.articulation.base_articulation import BaseArticulation
 from isaaclab.physics import PhysicsManager
 
-from .articulation_data import ArticulationData
-
 from isaaclab_ovphysx import tensor_types as TT
 
-if TYPE_CHECKING:
-    import ovphysx
+from .articulation_data import ArticulationData
 
+if TYPE_CHECKING:
     from isaaclab.actuators import ActuatorBase
     from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
     from isaaclab.utils.wrench_composer import WrenchComposer
@@ -175,10 +172,11 @@ class Articulation(BaseArticulation):
         # The binding API accepts full buffers and uses indices/mask to
         # select which rows to write.
         if env_ids is not None:
-            self._write_root_state(TT.ROOT_POSE, self._data.default_root_pose, env_ids=env_ids)
-            self._write_root_state(TT.ROOT_VELOCITY, self._data.default_root_vel, env_ids=env_ids)
-            self._write_flat_tensor(TT.DOF_POSITION, self._data.default_joint_pos, env_ids=env_ids)
-            self._write_flat_tensor(TT.DOF_VELOCITY, self._data.default_joint_vel, env_ids=env_ids)
+            ids_gpu = self._env_ids_to_gpu_warp(env_ids)
+            self._write_root_state(TT.ROOT_POSE, self._data.default_root_pose, _ids_gpu=ids_gpu)
+            self._write_root_state(TT.ROOT_VELOCITY, self._data.default_root_vel, _ids_gpu=ids_gpu)
+            self._write_flat_tensor(TT.DOF_POSITION, self._data.default_joint_pos, _ids_gpu=ids_gpu)
+            self._write_flat_tensor(TT.DOF_VELOCITY, self._data.default_joint_vel, _ids_gpu=ids_gpu)
         elif env_mask is not None:
             self._write_root_state(TT.ROOT_POSE, self._data.default_root_pose, mask=env_mask)
             self._write_root_state(TT.ROOT_VELOCITY, self._data.default_root_vel, mask=env_mask)
@@ -202,16 +200,33 @@ class Articulation(BaseArticulation):
                 if act.joint_indices is not None:
                     self._write_joint_subset(
                         TT.DOF_POSITION_TARGET,
-                        self._data.joint_pos_target, act.joint_indices,
+                        self._data.joint_pos_target,
+                        act.joint_indices,
                     )
                     self._write_joint_subset(
                         TT.DOF_VELOCITY_TARGET,
-                        self._data.joint_vel_target, act.joint_indices,
+                        self._data.joint_vel_target,
+                        act.joint_indices,
                     )
 
-        effort_binding = self._get_binding(TT.DOF_ACTUATION_FORCE)
-        if effort_binding is not None:
-            effort_binding.write(self._data.applied_torque)
+        if not hasattr(self, "_effort_fast_write"):
+            effort_binding = self._get_binding(TT.DOF_ACTUATION_FORCE)
+            if effort_binding is not None:
+                import ctypes
+
+                from ovphysx._dlpack_utils import acquire_dltensor
+
+                dl, keepalive = acquire_dltensor(self._data.applied_torque)
+                dl_ptr = ctypes.byref(dl)
+                c_func = effort_binding._sdk._lib.ovphysx_write_tensor_binding
+                sdk_h = effort_binding._sdk._omni_physx_sdk_handle.value
+                bnd_h = effort_binding._handle
+                self._effort_fast_write = lambda: c_func(sdk_h, bnd_h, dl_ptr, None)
+                self._effort_keepalive = (dl, keepalive)
+            else:
+                self._effort_fast_write = None
+        if self._effort_fast_write is not None:
+            self._effort_fast_write()
 
     def update(self, dt: float) -> None:
         """Update internal data buffers after a simulation step.
@@ -225,9 +240,7 @@ class Articulation(BaseArticulation):
     # Finders
     # ------------------------------------------------------------------
 
-    def find_bodies(
-        self, name_keys: str | Sequence[str], preserve_order: bool = False
-    ) -> tuple[list[int], list[str]]:
+    def find_bodies(self, name_keys: str | Sequence[str], preserve_order: bool = False) -> tuple[list[int], list[str]]:
         """Find bodies in the articulation based on the name keys.
 
         Please check the :func:`isaaclab.utils.string.resolve_matching_names` function for more
@@ -322,7 +335,10 @@ class Articulation(BaseArticulation):
         return env_ids.shape[0] if hasattr(env_ids, "shape") else len(env_ids)
 
     def write_root_pose_to_sim_index(
-        self, *, root_pose: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        *,
+        root_pose: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Set the root pose over selected environment indices into the simulation.
 
@@ -335,7 +351,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_POSE, root_pose, env_ids)
 
     def write_root_pose_to_sim_mask(
-        self, *, root_pose: wp.array, env_mask: wp.array | None = None,
+        self,
+        *,
+        root_pose: wp.array,
+        env_mask: wp.array | None = None,
     ) -> None:
         """Set the root pose over masked environments into the simulation.
 
@@ -347,7 +366,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_POSE, root_pose, mask=env_mask)
 
     def write_root_link_pose_to_sim_index(
-        self, *, root_pose: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        *,
+        root_pose: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Set the root link pose over selected environment indices into the simulation.
 
@@ -360,7 +382,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_POSE, root_pose, env_ids)
 
     def write_root_link_pose_to_sim_mask(
-        self, *, root_pose: wp.array, env_mask: wp.array | None = None,
+        self,
+        *,
+        root_pose: wp.array,
+        env_mask: wp.array | None = None,
     ) -> None:
         """Set the root link pose over masked environments into the simulation.
 
@@ -372,7 +397,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_POSE, root_pose, mask=env_mask)
 
     def write_root_com_pose_to_sim_index(
-        self, *, root_pose: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        *,
+        root_pose: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Set the root center of mass pose over selected environment indices into the simulation.
 
@@ -385,7 +413,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_POSE, root_pose, env_ids)
 
     def write_root_com_pose_to_sim_mask(
-        self, *, root_pose: wp.array, env_mask: wp.array | None = None,
+        self,
+        *,
+        root_pose: wp.array,
+        env_mask: wp.array | None = None,
     ) -> None:
         """Set the root center of mass pose over masked environments into the simulation.
 
@@ -397,7 +428,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_POSE, root_pose, mask=env_mask)
 
     def write_root_velocity_to_sim_index(
-        self, *, root_velocity: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        *,
+        root_velocity: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Set the root velocity over selected environment indices into the simulation.
 
@@ -411,7 +445,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_VELOCITY, root_velocity, env_ids)
 
     def write_root_velocity_to_sim_mask(
-        self, *, root_velocity: wp.array, env_mask: wp.array | None = None,
+        self,
+        *,
+        root_velocity: wp.array,
+        env_mask: wp.array | None = None,
     ) -> None:
         """Set the root velocity over masked environments into the simulation.
 
@@ -424,7 +461,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_VELOCITY, root_velocity, mask=env_mask)
 
     def write_root_com_velocity_to_sim_index(
-        self, *, root_velocity: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        *,
+        root_velocity: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Set the root center of mass velocity over selected environment indices into the simulation.
 
@@ -437,7 +477,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_VELOCITY, root_velocity, env_ids)
 
     def write_root_com_velocity_to_sim_mask(
-        self, *, root_velocity: wp.array, env_mask: wp.array | None = None,
+        self,
+        *,
+        root_velocity: wp.array,
+        env_mask: wp.array | None = None,
     ) -> None:
         """Set the root center of mass velocity over masked environments into the simulation.
 
@@ -449,7 +492,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_VELOCITY, root_velocity, mask=env_mask)
 
     def write_root_link_velocity_to_sim_index(
-        self, *, root_velocity: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        *,
+        root_velocity: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Set the root link velocity over selected environment indices into the simulation.
 
@@ -462,7 +508,10 @@ class Articulation(BaseArticulation):
         self._write_root_state(TT.ROOT_VELOCITY, root_velocity, env_ids)
 
     def write_root_link_velocity_to_sim_mask(
-        self, *, root_velocity: wp.array, env_mask: wp.array | None = None,
+        self,
+        *,
+        root_velocity: wp.array,
+        env_mask: wp.array | None = None,
     ) -> None:
         """Set the root link velocity over masked environments into the simulation.
 
@@ -576,7 +625,10 @@ class Articulation(BaseArticulation):
     # ------------------------------------------------------------------
 
     def write_joint_stiffness_to_sim_index(
-        self, *, stiffness: wp.array, joint_ids: Sequence[int] | None = None,
+        self,
+        *,
+        stiffness: wp.array,
+        joint_ids: Sequence[int] | None = None,
         env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Write joint stiffness over selected indices into the simulation.
@@ -592,7 +644,10 @@ class Articulation(BaseArticulation):
         self._write_flat_tensor(TT.DOF_STIFFNESS, stiffness, env_ids, joint_ids)
 
     def write_joint_stiffness_to_sim_mask(
-        self, *, stiffness: wp.array, joint_mask: wp.array | None = None,
+        self,
+        *,
+        stiffness: wp.array,
+        joint_mask: wp.array | None = None,
         env_mask: wp.array | None = None,
     ) -> None:
         """Write joint stiffness over masked environments into the simulation.
@@ -606,7 +661,10 @@ class Articulation(BaseArticulation):
         self._write_flat_tensor_mask(TT.DOF_STIFFNESS, stiffness, env_mask, joint_mask)
 
     def write_joint_damping_to_sim_index(
-        self, *, damping: wp.array, joint_ids: Sequence[int] | None = None,
+        self,
+        *,
+        damping: wp.array,
+        joint_ids: Sequence[int] | None = None,
         env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Write joint damping over selected indices into the simulation.
@@ -622,7 +680,10 @@ class Articulation(BaseArticulation):
         self._write_flat_tensor(TT.DOF_DAMPING, damping, env_ids, joint_ids)
 
     def write_joint_damping_to_sim_mask(
-        self, *, damping: wp.array, joint_mask: wp.array | None = None,
+        self,
+        *,
+        damping: wp.array,
+        joint_mask: wp.array | None = None,
         env_mask: wp.array | None = None,
     ) -> None:
         """Write joint damping over masked environments into the simulation.
@@ -1041,11 +1102,15 @@ class Articulation(BaseArticulation):
     # Tendon operations
     # ------------------------------------------------------------------
 
-    def _nft(self): return getattr(self, "_num_fixed_tendons", 0)
-    def _nst(self): return getattr(self, "_num_spatial_tendons", 0)
+    def _nft(self):
+        return getattr(self, "_num_fixed_tendons", 0)
+
+    def _nst(self):
+        return getattr(self, "_num_spatial_tendons", 0)
 
     def set_fixed_tendon_stiffness_index(self, *, stiffness, fixed_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
+        n = self._n_envs_index(env_ids)
+        t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
         self.assert_shape_and_dtype(stiffness, (n, t), wp.float32, "stiffness")
         if self._data._fixed_tendon_stiffness is not None:
             self._set_target_into_buffer(self._data._fixed_tendon_stiffness, stiffness, env_ids, fixed_tendon_ids)
@@ -1053,10 +1118,13 @@ class Articulation(BaseArticulation):
     def set_fixed_tendon_stiffness_mask(self, *, stiffness, fixed_tendon_mask=None, env_mask=None):
         self.assert_shape_and_dtype(stiffness, (self._num_instances, self._nft()), wp.float32, "stiffness")
         if self._data._fixed_tendon_stiffness is not None:
-            self._set_target_into_buffer_mask(self._data._fixed_tendon_stiffness, stiffness, env_mask, fixed_tendon_mask)
+            self._set_target_into_buffer_mask(
+                self._data._fixed_tendon_stiffness, stiffness, env_mask, fixed_tendon_mask
+            )
 
     def set_fixed_tendon_damping_index(self, *, damping, fixed_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
+        n = self._n_envs_index(env_ids)
+        t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
         self.assert_shape_and_dtype(damping, (n, t), wp.float32, "damping")
         if self._data._fixed_tendon_damping is not None:
             self._set_target_into_buffer(self._data._fixed_tendon_damping, damping, env_ids, fixed_tendon_ids)
@@ -1067,18 +1135,24 @@ class Articulation(BaseArticulation):
             self._set_target_into_buffer_mask(self._data._fixed_tendon_damping, damping, env_mask, fixed_tendon_mask)
 
     def set_fixed_tendon_limit_stiffness_index(self, *, limit_stiffness, fixed_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
+        n = self._n_envs_index(env_ids)
+        t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
         self.assert_shape_and_dtype(limit_stiffness, (n, t), wp.float32, "limit_stiffness")
         if self._data._fixed_tendon_limit_stiffness is not None:
-            self._set_target_into_buffer(self._data._fixed_tendon_limit_stiffness, limit_stiffness, env_ids, fixed_tendon_ids)
+            self._set_target_into_buffer(
+                self._data._fixed_tendon_limit_stiffness, limit_stiffness, env_ids, fixed_tendon_ids
+            )
 
     def set_fixed_tendon_limit_stiffness_mask(self, *, limit_stiffness, fixed_tendon_mask=None, env_mask=None):
         self.assert_shape_and_dtype(limit_stiffness, (self._num_instances, self._nft()), wp.float32, "limit_stiffness")
         if self._data._fixed_tendon_limit_stiffness is not None:
-            self._set_target_into_buffer_mask(self._data._fixed_tendon_limit_stiffness, limit_stiffness, env_mask, fixed_tendon_mask)
+            self._set_target_into_buffer_mask(
+                self._data._fixed_tendon_limit_stiffness, limit_stiffness, env_mask, fixed_tendon_mask
+            )
 
     def set_fixed_tendon_position_limit_index(self, *, limit, fixed_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
+        n = self._n_envs_index(env_ids)
+        t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
         self.assert_shape_and_dtype(limit, (n, t), wp.vec2f, "limit")
         if self._data._fixed_tendon_pos_limits is not None:
             self._set_target_into_buffer(self._data._fixed_tendon_pos_limits, limit, env_ids, fixed_tendon_ids)
@@ -1089,7 +1163,8 @@ class Articulation(BaseArticulation):
             self._set_target_into_buffer_mask(self._data._fixed_tendon_pos_limits, limit, env_mask, fixed_tendon_mask)
 
     def set_fixed_tendon_rest_length_index(self, *, rest_length, fixed_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
+        n = self._n_envs_index(env_ids)
+        t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
         self.assert_shape_and_dtype(rest_length, (n, t), wp.float32, "rest_length")
         if self._data._fixed_tendon_rest_length is not None:
             self._set_target_into_buffer(self._data._fixed_tendon_rest_length, rest_length, env_ids, fixed_tendon_ids)
@@ -1097,10 +1172,13 @@ class Articulation(BaseArticulation):
     def set_fixed_tendon_rest_length_mask(self, *, rest_length, fixed_tendon_mask=None, env_mask=None):
         self.assert_shape_and_dtype(rest_length, (self._num_instances, self._nft()), wp.float32, "rest_length")
         if self._data._fixed_tendon_rest_length is not None:
-            self._set_target_into_buffer_mask(self._data._fixed_tendon_rest_length, rest_length, env_mask, fixed_tendon_mask)
+            self._set_target_into_buffer_mask(
+                self._data._fixed_tendon_rest_length, rest_length, env_mask, fixed_tendon_mask
+            )
 
     def set_fixed_tendon_offset_index(self, *, offset, fixed_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
+        n = self._n_envs_index(env_ids)
+        t = len(fixed_tendon_ids) if fixed_tendon_ids else self._nft()
         self.assert_shape_and_dtype(offset, (n, t), wp.float32, "offset")
         if self._data._fixed_tendon_offset is not None:
             self._set_target_into_buffer(self._data._fixed_tendon_offset, offset, env_ids, fixed_tendon_ids)
@@ -1139,7 +1217,8 @@ class Articulation(BaseArticulation):
                 self._write_flat_tensor_mask(tt, buf, env_mask, fixed_tendon_mask)
 
     def set_spatial_tendon_stiffness_index(self, *, stiffness, spatial_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
+        n = self._n_envs_index(env_ids)
+        t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
         self.assert_shape_and_dtype(stiffness, (n, t), wp.float32, "stiffness")
         if self._data._spatial_tendon_stiffness is not None:
             self._set_target_into_buffer(self._data._spatial_tendon_stiffness, stiffness, env_ids, spatial_tendon_ids)
@@ -1147,10 +1226,13 @@ class Articulation(BaseArticulation):
     def set_spatial_tendon_stiffness_mask(self, *, stiffness, spatial_tendon_mask=None, env_mask=None):
         self.assert_shape_and_dtype(stiffness, (self._num_instances, self._nst()), wp.float32, "stiffness")
         if self._data._spatial_tendon_stiffness is not None:
-            self._set_target_into_buffer_mask(self._data._spatial_tendon_stiffness, stiffness, env_mask, spatial_tendon_mask)
+            self._set_target_into_buffer_mask(
+                self._data._spatial_tendon_stiffness, stiffness, env_mask, spatial_tendon_mask
+            )
 
     def set_spatial_tendon_damping_index(self, *, damping, spatial_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
+        n = self._n_envs_index(env_ids)
+        t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
         self.assert_shape_and_dtype(damping, (n, t), wp.float32, "damping")
         if self._data._spatial_tendon_damping is not None:
             self._set_target_into_buffer(self._data._spatial_tendon_damping, damping, env_ids, spatial_tendon_ids)
@@ -1158,21 +1240,29 @@ class Articulation(BaseArticulation):
     def set_spatial_tendon_damping_mask(self, *, damping, spatial_tendon_mask=None, env_mask=None):
         self.assert_shape_and_dtype(damping, (self._num_instances, self._nst()), wp.float32, "damping")
         if self._data._spatial_tendon_damping is not None:
-            self._set_target_into_buffer_mask(self._data._spatial_tendon_damping, damping, env_mask, spatial_tendon_mask)
+            self._set_target_into_buffer_mask(
+                self._data._spatial_tendon_damping, damping, env_mask, spatial_tendon_mask
+            )
 
     def set_spatial_tendon_limit_stiffness_index(self, *, limit_stiffness, spatial_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
+        n = self._n_envs_index(env_ids)
+        t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
         self.assert_shape_and_dtype(limit_stiffness, (n, t), wp.float32, "limit_stiffness")
         if self._data._spatial_tendon_limit_stiffness is not None:
-            self._set_target_into_buffer(self._data._spatial_tendon_limit_stiffness, limit_stiffness, env_ids, spatial_tendon_ids)
+            self._set_target_into_buffer(
+                self._data._spatial_tendon_limit_stiffness, limit_stiffness, env_ids, spatial_tendon_ids
+            )
 
     def set_spatial_tendon_limit_stiffness_mask(self, *, limit_stiffness, spatial_tendon_mask=None, env_mask=None):
         self.assert_shape_and_dtype(limit_stiffness, (self._num_instances, self._nst()), wp.float32, "limit_stiffness")
         if self._data._spatial_tendon_limit_stiffness is not None:
-            self._set_target_into_buffer_mask(self._data._spatial_tendon_limit_stiffness, limit_stiffness, env_mask, spatial_tendon_mask)
+            self._set_target_into_buffer_mask(
+                self._data._spatial_tendon_limit_stiffness, limit_stiffness, env_mask, spatial_tendon_mask
+            )
 
     def set_spatial_tendon_offset_index(self, *, offset, spatial_tendon_ids=None, env_ids=None):
-        n = self._n_envs_index(env_ids); t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
+        n = self._n_envs_index(env_ids)
+        t = len(spatial_tendon_ids) if spatial_tendon_ids else self._nst()
         self.assert_shape_and_dtype(offset, (n, t), wp.float32, "offset")
         if self._data._spatial_tendon_offset is not None:
             self._set_target_into_buffer(self._data._spatial_tendon_offset, offset, env_ids, spatial_tendon_ids)
@@ -1211,21 +1301,27 @@ class Articulation(BaseArticulation):
     # ------------------------------------------------------------------
 
     def write_root_state_to_sim(
-        self, root_state: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        root_state: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Deprecated in base class. Use :meth:`write_root_pose_to_sim_index` and
         :meth:`write_root_velocity_to_sim_index` instead."""
         self.write_root_pose_to_sim_index(root_pose=root_state, env_ids=env_ids)
 
     def write_root_com_state_to_sim(
-        self, root_state: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        root_state: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Deprecated in base class. Use :meth:`write_root_com_pose_to_sim_index` and
         :meth:`write_root_com_velocity_to_sim_index` instead."""
         self.write_root_com_pose_to_sim_index(root_pose=root_state, env_ids=env_ids)
 
     def write_root_link_state_to_sim(
-        self, root_state: wp.array, env_ids: Sequence[int] | wp.array | None = None,
+        self,
+        root_state: wp.array,
+        env_ids: Sequence[int] | wp.array | None = None,
     ) -> None:
         """Deprecated in base class. Use :meth:`write_root_link_pose_to_sim_index` and
         :meth:`write_root_link_velocity_to_sim_index` instead."""
@@ -1271,8 +1367,8 @@ class Articulation(BaseArticulation):
         # matching prim in the USD stage, walk its subtree for the articulation root, and
         # append the relative suffix to the glob pattern.
         from pxr import UsdPhysics
+
         from isaaclab.sim.utils.queries import find_first_matching_prim, get_all_matching_child_prims
-        from isaaclab.physics import PhysicsManager
 
         stage = PhysicsManager._sim.stage
         first_prim = find_first_matching_prim(prim_path, stage=stage)
@@ -1295,7 +1391,7 @@ class Articulation(BaseArticulation):
                 f"Multiple articulation roots found under '{first_prim_path}': {root_prims}."
                 " There must be exactly one articulation root per prim path."
             )
-        root_relative = root_prims[0].GetPath().pathString[len(first_prim_path):]
+        root_relative = root_prims[0].GetPath().pathString[len(first_prim_path) :]
         if root_relative:
             # e.g. first_prim_path=/World/envs/env_0/Robot, root_relative=/torso
             # pattern becomes /World/envs/env_*/Robot/torso
@@ -1311,16 +1407,22 @@ class Articulation(BaseArticulation):
         self._binding_pattern = pattern
 
         eager_types = [
-            TT.ROOT_POSE, TT.DOF_POSITION, TT.DOF_STIFFNESS,
-            TT.DOF_DAMPING, TT.DOF_LIMIT, TT.DOF_MAX_VELOCITY,
-            TT.DOF_MAX_FORCE, TT.DOF_ARMATURE, TT.DOF_FRICTION_PROPERTIES,
-            TT.BODY_MASS, TT.BODY_COM_POSE, TT.BODY_INERTIA,
+            TT.ROOT_POSE,
+            TT.DOF_POSITION,
+            TT.DOF_STIFFNESS,
+            TT.DOF_DAMPING,
+            TT.DOF_LIMIT,
+            TT.DOF_MAX_VELOCITY,
+            TT.DOF_MAX_FORCE,
+            TT.DOF_ARMATURE,
+            TT.DOF_FRICTION_PROPERTIES,
+            TT.BODY_MASS,
+            TT.BODY_COM_POSE,
+            TT.BODY_INERTIA,
         ]
         for tt in eager_types:
             try:
-                self._bindings[tt] = physx_instance.create_tensor_binding(
-                    pattern=pattern, tensor_type=tt
-                )
+                self._bindings[tt] = physx_instance.create_tensor_binding(pattern=pattern, tensor_type=tt)
             except Exception:
                 logger.debug("Could not create tensor binding for type %s on pattern %s", tt, pattern)
 
@@ -1352,11 +1454,10 @@ class Articulation(BaseArticulation):
         self._ALL_INDICES = wp.array(np.arange(self._num_instances, dtype=np.int32), device=self._device)
 
         from isaaclab.utils.wrench_composer import WrenchComposer
+
         self._instantaneous_wrench_composer = WrenchComposer(self)
         self._permanent_wrench_composer = WrenchComposer(self)
-        self._wrench_buf = wp.zeros(
-            (self._num_instances, self._num_bodies, 9), dtype=wp.float32, device=self._device
-        )
+        self._wrench_buf = wp.zeros((self._num_instances, self._num_bodies, 9), dtype=wp.float32, device=self._device)
 
         # Joint-index arrays for each actuator (filled by _process_actuators_cfg).
         self._joint_ids_per_actuator: dict[str, list[int]] = {}
@@ -1415,7 +1516,7 @@ class Articulation(BaseArticulation):
         These writes happen via TensorBinding (GPU-resident) after warmup has
         allocated the GPU buffers (MODEL_INIT fires post-warmup).
         """
-        from isaaclab.actuators import ActuatorBaseCfg, ImplicitActuator
+        from isaaclab.actuators import ImplicitActuator
 
         self.actuators: dict[str, ActuatorBase] = {}
         for name, act_cfg in self.cfg.actuators.items():
@@ -1442,7 +1543,7 @@ class Articulation(BaseArticulation):
             jids = list(joint_ids)
             if isinstance(act, ImplicitActuator):
                 stiffness = act.stiffness  # torch (N, J)
-                damping = act.damping      # torch (N, J)
+                damping = act.damping  # torch (N, J)
             else:
                 stiffness = wp.zeros((self._num_instances, len(jids)), dtype=wp.float32, device=self._device)
                 damping = wp.zeros((self._num_instances, len(jids)), dtype=wp.float32, device=self._device)
@@ -1468,10 +1569,12 @@ class Articulation(BaseArticulation):
 
         if self._num_fixed_tendons > 0 or self._num_spatial_tendons > 0:
             from isaaclab_ovphysx.physics.ovphysx_manager import OvPhysxManager
+
             stage_path = OvPhysxManager._stage_path
             if stage_path is not None:
                 try:
                     from pxr import Usd, UsdPhysics
+
                     stage = Usd.Stage.Open(stage_path)
                     for prim in stage.Traverse():
                         if not prim.HasAPI(UsdPhysics.Joint):
@@ -1480,7 +1583,10 @@ class Articulation(BaseArticulation):
                         name = prim.GetPath().name
                         if "PhysxTendonAxisRootAPI" in schemas_str:
                             self._fixed_tendon_names.append(name)
-                        elif "PhysxTendonAttachmentRootAPI" in schemas_str or "PhysxTendonAttachmentLeafAPI" in schemas_str:
+                        elif (
+                            "PhysxTendonAttachmentRootAPI" in schemas_str
+                            or "PhysxTendonAttachmentLeafAPI" in schemas_str
+                        ):
                             self._spatial_tendon_names.append(name)
                 except Exception:
                     logger.debug("Could not parse USD stage for tendon names at %s", stage_path)
@@ -1543,11 +1649,15 @@ class Articulation(BaseArticulation):
             if jids is None:
                 continue
             jids_t = jids if isinstance(jids, list) else list(jids)
+            all_joints = len(jids_t) == self._num_joints
 
             # warp -> torch (zero-copy on same device via DLPack)
-            jp_target = wp.to_torch(self._data.joint_pos_target)[:, jids_t]
-            jv_target = wp.to_torch(self._data.joint_vel_target)[:, jids_t]
-            je_target = wp.to_torch(self._data.joint_effort_target)[:, jids_t]
+            jp_target_full = wp.to_torch(self._data.joint_pos_target)
+            jv_target_full = wp.to_torch(self._data.joint_vel_target)
+            je_target_full = wp.to_torch(self._data.joint_effort_target)
+            jp_target = jp_target_full if all_joints else jp_target_full[:, jids_t]
+            jv_target = jv_target_full if all_joints else jv_target_full[:, jids_t]
+            je_target = je_target_full if all_joints else je_target_full[:, jids_t]
 
             control_action = ArticulationActions(
                 joint_positions=jp_target,
@@ -1555,16 +1665,22 @@ class Articulation(BaseArticulation):
                 joint_efforts=je_target,
             )
 
-            jp_cur = wp.to_torch(self._data.joint_pos)[:, jids_t]
-            jv_cur = wp.to_torch(self._data.joint_vel)[:, jids_t]
+            jp_cur_full = wp.to_torch(self._data.joint_pos)
+            jv_cur_full = wp.to_torch(self._data.joint_vel)
+            jp_cur = jp_cur_full if all_joints else jp_cur_full[:, jids_t]
+            jv_cur = jv_cur_full if all_joints else jv_cur_full[:, jids_t]
 
             control_action = act.compute(control_action, jp_cur, jv_cur)
 
             if act.computed_effort is not None:
                 ct = wp.to_torch(self._data._computed_torque)
                 at = wp.to_torch(self._data._applied_torque)
-                ct[:, jids_t] = act.computed_effort
-                at[:, jids_t] = act.applied_effort
+                if all_joints:
+                    ct[:] = act.computed_effort
+                    at[:] = act.applied_effort
+                else:
+                    ct[:, jids_t] = act.computed_effort
+                    at[:, jids_t] = act.applied_effort
 
     def _validate_cfg(self) -> None:
         pass
@@ -1572,7 +1688,10 @@ class Articulation(BaseArticulation):
     def _log_articulation_info(self) -> None:
         logger.info(
             "OvPhysX Articulation: instances=%d joints=%d bodies=%d fixed_base=%s",
-            self._num_instances, self._num_joints, self._num_bodies, self._is_fixed_base,
+            self._num_instances,
+            self._num_joints,
+            self._num_bodies,
+            self._is_fixed_base,
         )
 
     # ------------------------------------------------------------------
@@ -1592,9 +1711,7 @@ class Articulation(BaseArticulation):
         if binding is not None:
             return binding
         try:
-            binding = self._physx_instance.create_tensor_binding(
-                pattern=self._binding_pattern, tensor_type=tensor_type
-            )
+            binding = self._physx_instance.create_tensor_binding(pattern=self._binding_pattern, tensor_type=tensor_type)
             self._bindings[tensor_type] = binding
             return binding
         except Exception:
@@ -1630,10 +1747,15 @@ class Articulation(BaseArticulation):
             # transformf -> [N, 7], spatial_vectorf -> [N, 6], etc.
             floats_per_elem = data.strides[0] // 4
             return wp.array(
-                ptr=data.ptr, shape=(data.shape[0], floats_per_elem),
-                dtype=wp.float32, device=dev, copy=False,
+                ptr=data.ptr,
+                shape=(data.shape[0], floats_per_elem),
+                dtype=wp.float32,
+                device=dev,
+                copy=False,
             )
         elif isinstance(data, torch.Tensor):
+            if data.is_cuda and dev.startswith("cuda"):
+                return wp.from_torch(data.detach().contiguous().float())
             np_data = data.detach().cpu().numpy().astype(np.float32)
             return wp.from_numpy(np_data, dtype=wp.float32, device=dev)
         elif isinstance(data, np.ndarray):
@@ -1657,9 +1779,14 @@ class Articulation(BaseArticulation):
                 return data
             n = data.shape[0]
             return wp.array(
-                ptr=data.ptr, shape=(n, cols),
-                dtype=wp.float32, device=dev, copy=False,
+                ptr=data.ptr,
+                shape=(n, cols),
+                dtype=wp.float32,
+                device=dev,
+                copy=False,
             )
+        if isinstance(data, torch.Tensor) and data.is_cuda and dev.startswith("cuda"):
+            return wp.from_torch(data.detach().contiguous().float().reshape(-1, cols))
         np_data = self._to_cpu_numpy(data).reshape(-1, cols)
         return wp.from_numpy(np_data, dtype=wp.float32, device=dev)
 
@@ -1673,7 +1800,7 @@ class Articulation(BaseArticulation):
             self._write_scratch[tensor_type] = buf
         return buf
 
-    def _write_root_state(self, tensor_type: int, data, env_ids=None, mask=None) -> None:
+    def _write_root_state(self, tensor_type: int, data, env_ids=None, mask=None, _ids_gpu=None) -> None:
         """GPU-native write for root pose [N,7] or velocity [N,6].
 
         Three paths, fastest first:
@@ -1684,35 +1811,44 @@ class Articulation(BaseArticulation):
         - Indexed write with partial data [K,...]: scatter kernel into a GPU
           scratch buffer, then write with indices.
         - Masked write: data is always full [N,...], pass directly with mask.
+
+        Args:
+            _ids_gpu: Pre-converted GPU warp int32 array of env indices.
+                When provided, skips the per-call GPU->CPU->GPU conversion
+                of env_ids.
         """
         binding = self._get_binding(tensor_type)
         if binding is None:
             return
         N, C = binding.shape
 
-        if env_ids is None and mask is None:
+        if env_ids is None and _ids_gpu is None and mask is None:
             binding.write(self._to_flat_f32(data))
             self._invalidate_root_caches(tensor_type)
             return
 
         src = self._as_gpu_f32_2d(data, C)
 
-        if env_ids is not None:
-            ids_gpu = wp.array(self._to_cpu_indices(env_ids, np.int32), device=self._device)
-            K = len(env_ids)
+        if env_ids is not None or _ids_gpu is not None:
+            if _ids_gpu is None:
+                _ids_gpu = self._env_ids_to_gpu_warp(env_ids)
+            K = _ids_gpu.shape[0]
             if src.shape[0] == N:
-                binding.write(src, indices=ids_gpu)
+                binding.write(src, indices=_ids_gpu)
             else:
                 scratch = self._get_write_scratch(tensor_type, binding)
                 binding.read(scratch)
                 wp.launch(
-                    _scatter_rows_partial, dim=(K, C),
-                    inputs=[scratch, src, ids_gpu], device=self._device,
+                    _scatter_rows_partial,
+                    dim=(K, C),
+                    inputs=[scratch, src, _ids_gpu],
+                    device=self._device,
                 )
-                binding.write(scratch, indices=ids_gpu)
+                binding.write(scratch, indices=_ids_gpu)
         else:
             mask_u8 = wp.from_numpy(
-                self._to_cpu_numpy(mask).astype(np.uint8), device=self._device,
+                self._to_cpu_numpy(mask).astype(np.uint8),
+                device=self._device,
             )
             binding.write(src, mask=mask_u8)
         self._invalidate_root_caches(tensor_type)
@@ -1726,13 +1862,14 @@ class Articulation(BaseArticulation):
             self.data._root_link_vel_w.timestamp = -1.0
             self.data._root_com_vel_w.timestamp = -1.0
 
-    def _write_flat_tensor(self, tensor_type: int, data, env_ids=None, joint_ids=None) -> None:
+    def _write_flat_tensor(self, tensor_type: int, data, env_ids=None, joint_ids=None, _ids_gpu=None) -> None:
         if isinstance(data, (int, float)):
             return
         binding = self._get_binding(tensor_type)
         if binding is None:
             return
         from isaaclab_ovphysx.tensor_types import _CPU_ONLY_TYPES
+
         is_cpu_only = tensor_type in _CPU_ONLY_TYPES
 
         # CPU-only types or column scatter must go through numpy.
@@ -1740,7 +1877,6 @@ class Articulation(BaseArticulation):
             target_device = "cpu" if is_cpu_only else self._device
             np_data = self._to_cpu_numpy(data)
             if joint_ids is not None:
-                # GPU bindings cannot read into numpy directly.
                 if is_cpu_only:
                     full = np.zeros(binding.shape, dtype=np.float32)
                     binding.read(full)
@@ -1766,31 +1902,34 @@ class Articulation(BaseArticulation):
                 eids = self._to_cpu_indices(env_ids, np.intp)
                 full[eids] = np_data if np_data.shape[0] == len(eids) else np_data[eids]
                 flat = wp.from_numpy(full.astype(np.float32), dtype=wp.float32, device=target_device)
-                idx = wp.array(self._to_cpu_indices(env_ids, np.int32), device=target_device)
+                idx = _ids_gpu if _ids_gpu is not None else self._env_ids_to_gpu_warp(env_ids)
                 binding.write(flat, indices=idx)
             else:
                 binding.write(wp.from_numpy(np_data.astype(np.float32), dtype=wp.float32, device=target_device))
             return
 
         # GPU path: data stays on device.
-        if env_ids is None:
+        if env_ids is None and _ids_gpu is None:
             binding.write(self._to_flat_f32(data))
             return
 
         N, C = binding.shape[0], binding.shape[1]
         src = self._as_gpu_f32_2d(data, C)
-        ids_gpu = wp.array(self._to_cpu_indices(env_ids, np.int32), device=self._device)
-        K = len(env_ids)
+        if _ids_gpu is None:
+            _ids_gpu = self._env_ids_to_gpu_warp(env_ids)
+        K = _ids_gpu.shape[0]
         if src.shape[0] == N:
-            binding.write(src, indices=ids_gpu)
+            binding.write(src, indices=_ids_gpu)
         else:
             scratch = self._get_write_scratch(tensor_type, binding)
             binding.read(scratch)
             wp.launch(
-                _scatter_rows_partial, dim=(K, C),
-                inputs=[scratch, src, ids_gpu], device=self._device,
+                _scatter_rows_partial,
+                dim=(K, C),
+                inputs=[scratch, src, _ids_gpu],
+                device=self._device,
             )
-            binding.write(scratch, indices=ids_gpu)
+            binding.write(scratch, indices=_ids_gpu)
 
     def _write_flat_tensor_mask(self, tensor_type: int, data, env_mask=None, joint_mask=None) -> None:
         if isinstance(data, (int, float)):
@@ -1799,6 +1938,7 @@ class Articulation(BaseArticulation):
         if binding is None:
             return
         from isaaclab_ovphysx.tensor_types import _CPU_ONLY_TYPES
+
         is_cpu_only = tensor_type in _CPU_ONLY_TYPES
 
         # CPU-only types or column-mask scatter must go through numpy.
@@ -1827,7 +1967,8 @@ class Articulation(BaseArticulation):
             elif env_mask is not None:
                 flat = wp.from_numpy(np_data.astype(np.float32), dtype=wp.float32, device=target_device)
                 mask_u8 = wp.from_numpy(
-                    self._to_cpu_numpy(env_mask).astype(np.uint8), device=target_device,
+                    self._to_cpu_numpy(env_mask).astype(np.uint8),
+                    device=target_device,
                 )
                 binding.write(flat, mask=mask_u8)
             else:
@@ -1841,7 +1982,8 @@ class Articulation(BaseArticulation):
 
         # Data is full [N, D], the binding API selects rows via the mask.
         mask_u8 = wp.from_numpy(
-            self._to_cpu_numpy(env_mask).astype(np.uint8), device=self._device,
+            self._to_cpu_numpy(env_mask).astype(np.uint8),
+            device=self._device,
         )
         binding.write(self._to_flat_f32(data), mask=mask_u8)
 
@@ -1914,7 +2056,18 @@ class Articulation(BaseArticulation):
         binding = self._get_binding(tensor_type)
         if binding is None:
             return
-        binding.write(self._to_flat_f32(buffer))
+        if not hasattr(self, "_write_dltensor_cache"):
+            self._write_dltensor_cache = {}
+        cache_key = (tensor_type, buffer.ptr)
+        cached = self._write_dltensor_cache.get(cache_key)
+        if cached is None:
+            flat = self._to_flat_f32(buffer)
+            from ovphysx._dlpack_utils import acquire_dltensor
+
+            dl, keepalive = acquire_dltensor(flat)
+            self._write_dltensor_cache[cache_key] = (dl, keepalive, flat)
+            cached = self._write_dltensor_cache[cache_key]
+        binding.write(cached[0])
 
     @staticmethod
     def _to_cpu_numpy(data) -> np.ndarray:
@@ -1934,6 +2087,30 @@ class Articulation(BaseArticulation):
             return data.numpy().astype(dtype)
         return np.asarray(data, dtype=dtype)
 
+    def _env_ids_to_gpu_warp(self, env_ids) -> wp.array:
+        """Convert env_ids to a GPU int32 warp array, with single-entry caching.
+
+        The cache avoids repeated GPU -> CPU -> GPU round-trips when the same
+        ``env_ids`` object is passed to multiple binding writes in a single step
+        (e.g. reset writes root_pose, root_vel, joint_pos, joint_vel).  A new
+        object identity (``id()``) or shape change invalidates the cache.
+        """
+        if hasattr(env_ids, "data_ptr"):
+            key = (env_ids.data_ptr(), env_ids.shape[0])
+        elif isinstance(env_ids, wp.array):
+            key = (env_ids.ptr, env_ids.shape[0])
+        else:
+            key = None
+
+        if key is not None and hasattr(self, "_ids_cache_key") and self._ids_cache_key == key:
+            return self._ids_cache_val
+
+        result = wp.array(self._to_cpu_indices(env_ids, np.int32), device=self._device)
+        if key is not None:
+            self._ids_cache_key = key
+            self._ids_cache_val = result
+        return result
+
     def _set_target_into_buffer(self, buffer: wp.array, data, env_ids=None, joint_ids=None) -> None:
         """Set user-provided target data into a warp command buffer.
 
@@ -1941,6 +2118,12 @@ class Articulation(BaseArticulation):
         the simulation device.  Subset writes (specific env_ids or joint_ids)
         fall back to CPU because warp does not support scatter indexing.
         """
+        # Fast path: all-joints shortcut.  When joint_ids covers every joint
+        # and env_ids is None, the subset is equivalent to a full copy.
+        if joint_ids is not None and env_ids is None:
+            n_joints = buffer.shape[1] if len(buffer.shape) > 1 else 1
+            if hasattr(joint_ids, "__len__") and len(joint_ids) == n_joints:
+                joint_ids = None
         if env_ids is None and joint_ids is None:
             src = self._to_flat_f32(data)
             if isinstance(src, np.ndarray):
@@ -1982,9 +2165,7 @@ class Articulation(BaseArticulation):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _find_names(
-        names: list[str], keys: str | Sequence[str], preserve_order: bool
-    ) -> tuple[list[int], list[str]]:
+    def _find_names(names: list[str], keys: str | Sequence[str], preserve_order: bool) -> tuple[list[int], list[str]]:
         if isinstance(keys, str):
             keys = [keys]
         matched_indices: list[int] = []

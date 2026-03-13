@@ -53,8 +53,9 @@ class OvPhysxManager(PhysicsManager):
     _pending_clones: ClassVar[list[tuple[str, list[str], list[tuple[float, float, float]]]]] = []
 
     @classmethod
-    def register_clone(cls, source: str, targets: list[str],
-                       parent_positions: list[tuple[float, float, float]] | None = None) -> None:
+    def register_clone(
+        cls, source: str, targets: list[str], parent_positions: list[tuple[float, float, float]] | None = None
+    ) -> None:
         """Register a (source, targets, parent_positions) triple for replay via physx.clone().
 
         Called by :func:`~isaaclab_ovphysx.cloner.ovphysx_replicate` during
@@ -116,8 +117,18 @@ class OvPhysxManager(PhysicsManager):
             return
         dt = cls.get_physics_dt()
         sim_time = PhysicsManager._sim_time
-        op_idx = cls._physx.step(dt=dt, sim_time=sim_time)
-        cls._physx.wait_op(op_idx)
+        import time as _pt
+
+        _ps = _pt.perf_counter()
+        cls._physx.step_sync(dt=dt, sim_time=sim_time)
+        _pe = _pt.perf_counter()
+        if not hasattr(cls, "_step_acc"):
+            cls._step_acc = 0.0
+            cls._step_n = 0
+        cls._step_acc += _pe - _ps
+        cls._step_n += 1
+        if cls._step_n % 320 == 0:
+            print(f"[OVPHYSX-STEP] {cls._step_n} steps, avg={cls._step_acc / cls._step_n * 1000:.2f}ms/step")
         PhysicsManager._sim_time += dt
 
     @classmethod
@@ -180,6 +191,11 @@ class OvPhysxManager(PhysicsManager):
         sim.stage.Export(stage_file)
         cls._stage_path = stage_file
         logger.info("OvPhysxManager: exported USD stage to %s", stage_file)
+        # DEBUG: copy to a stable path for inspection in IsaacSim
+        import shutil
+
+        shutil.copy(stage_file, "/tmp/ovphysx_scene_debug.usda")
+        logger.info("OvPhysxManager: DEBUG copy at /tmp/ovphysx_scene_debug.usda")
 
         # HACK (temporary): hide pxr from sys.modules during ovphysx bootstrap.
         # IsaacSim's pxr reports version 0.25.5 (pip convention) while ovphysx
@@ -188,15 +204,29 @@ class OvPhysxManager(PhysicsManager):
         # check.  This should go away once ovphysx ships a namespaced USD
         # copy with isolated symbols (same "import pxr" API, no collision).
         import sys as _sys
+
         _hidden_pxr = {k: _sys.modules.pop(k) for k in list(_sys.modules) if k == "pxr" or k.startswith("pxr.")}
         try:
             import ovphysx as _ovphysx_bootstrap
+
             _ovphysx_bootstrap.bootstrap()
         finally:
             _sys.modules.update(_hidden_pxr)
 
         import ovphysx
+
         cls._physx = ovphysx.PhysX(device=ovphysx_device, gpu_index=gpu_index)
+
+        # Enable async PhysX stepping by configuring the CPU dispatcher thread count.
+        # Without this, PhysXStepper::launch() sees workerCount==0 and runs
+        # simulate()+fetchResults() synchronously on the calling thread, blocking
+        # for ~6ms per substep.  With threads, simulate() returns immediately and
+        # the stepper runs on a background thread (~0.1ms), matching Kit's behavior.
+        cls._physx.set_setting("/persistent/physics/numThreads", "8")
+        cls._physx.set_setting("/physics/physxDispatcher", "true")
+        cls._physx.set_setting("/physics/updateToUsd", "false")
+        cls._physx.set_setting("/physics/updateVelocitiesToUsd", "false")
+        cls._physx.set_setting("/physics/updateParticlesToUsd", "false")
 
         # FIXME(malesiani): re-evaluate this when carbonite ships an isolated copy.
         # At process exit, two Carbonite instances are in memory:
@@ -243,7 +273,10 @@ class OvPhysxManager(PhysicsManager):
             for source, targets, parent_positions in cls._pending_clones:
                 logger.info(
                     "OvPhysxManager: cloning %s -> %d targets (%s ... %s)",
-                    source, len(targets), targets[0], targets[-1],
+                    source,
+                    len(targets),
+                    targets[0],
+                    targets[-1],
                 )
                 if parent_positions:
                     transforms = [(x, y, z, 0.0, 0.0, 0.0, 1.0) for x, y, z in parent_positions]
@@ -255,6 +288,42 @@ class OvPhysxManager(PhysicsManager):
 
         if ovphysx_device == "gpu":
             cls._physx.warmup_gpu()
+
+        # #region agent log
+        import json as _json
+        import time as _time
+
+        _log_path = "/home/alex/IsaacLab/.cursor/debug-3bc2b5.log"
+        _settings_to_check = [
+            "/persistent/physics/numThreads",
+            "/physics/physxDispatcher",
+            "/physics/suppressReadback",
+            "/physics/updateToUsd",
+            "/physics/updateVelocitiesToUsd",
+            "/physics/updateParticlesToUsd",
+            "/physics/cudaDevice",
+        ]
+        _settings_vals = {}
+        for _sk in _settings_to_check:
+            try:
+                _settings_vals[_sk] = cls._physx.get_setting(_sk)
+            except Exception as _e:
+                _settings_vals[_sk] = f"ERROR: {_e}"
+        with open(_log_path, "a") as _lf:
+            _lf.write(
+                _json.dumps(
+                    {
+                        "sessionId": "3bc2b5",
+                        "hypothesisId": "H1-H4",
+                        "location": "ovphysx_manager.py:warmup_end",
+                        "message": "Settings after warmup",
+                        "data": _settings_vals,
+                        "timestamp": int(_time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+        # #endregion
 
         cls.dispatch_event(PhysicsEvent.MODEL_INIT, payload={})
         cls._warmup_done = True
@@ -292,3 +361,16 @@ class OvPhysxManager(PhysicsManager):
                 ("gpuCollisionStackSize", cfg.gpu_collision_stack_size),
             ]:
                 scene_prim.CreateAttribute(f"physxScene:{attr}", Sdf.ValueTypeNames.UInt).Set(val)
+
+        # Propagate scene query support setting.  physx_manager._configure_physics()
+        # normally writes this for the Kit backend, but OvPhysxManager skips that
+        # method entirely -- so the attribute was never authored and omni.physx fell
+        # back to the C++ default (supportSceneQueries=true), costing ~0.9ms/substep
+        # rebuilding the BVH tree for 36K bodies even though RL never uses scene queries.
+        # Read from SimulationCfg since OvPhysxCfg does not carry this field.
+        from isaaclab.physics import PhysicsManager as _PM
+
+        sim_cfg = _PM._sim.cfg if _PM._sim is not None else None
+        enable_sq = getattr(sim_cfg, "enable_scene_query_support", False)
+        scene_prim.CreateAttribute("physxScene:enableSceneQuerySupport", Sdf.ValueTypeNames.Bool).Set(enable_sq)
+        print(f"[OvPhysxManager] physxScene:enableSceneQuerySupport={enable_sq} written to scene prim before USD export")
