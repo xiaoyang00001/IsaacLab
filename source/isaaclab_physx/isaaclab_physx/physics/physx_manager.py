@@ -260,72 +260,8 @@ class PhysxManager(PhysicsManager):
             omni.kit.app.get_app().shutdown()
             return
 
-        import time as _pt
-
-        _ps = _pt.perf_counter()
         cls._physx_sim.simulate(sim.cfg.dt, 0.0)
         cls._physx_sim.fetch_results()
-        _pe = _pt.perf_counter()
-        if not hasattr(cls, "_step_acc"):
-            cls._step_acc = 0.0
-            cls._step_n = 0
-        cls._step_acc += _pe - _ps
-        cls._step_n += 1
-
-        # #region agent envid-dump (fires on step 1 only)
-        if cls._step_n == 1:
-            try:
-                import omni.physx
-
-                stage = omni.usd.get_context().get_stage()
-                stage_id = omni.usd.get_context().get_stage_id()
-
-                # --- Static actor count via USD: count prims with PhysicsRigidBodyAPI disabled (static) ---
-                from pxr import UsdPhysics
-
-                static_prims = [
-                    p
-                    for p in stage.Traverse()
-                    if p.HasAPI(UsdPhysics.CollisionAPI) and not p.HasAPI(UsdPhysics.RigidBodyAPI)
-                ]
-                print(
-                    f"[KIT-ENVID-DUMP] USD prims with CollisionAPI but no RigidBodyAPI (static colliders): {len(static_prims)}"
-                )
-                for p in static_prims[:5]:
-                    print(f"[KIT-ENVID-DUMP]   {p.GetPath()}")
-
-                # --- Articulation count ---
-                artic_prims = [p for p in stage.Traverse() if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
-                print(f"[KIT-ENVID-DUMP] USD prims with ArticulationRootAPI: {len(artic_prims)}")
-
-                # --- Contact pair stats via IPhysxStatistics ---
-                physx_stats = omni.physx.get_physx_statistics_interface()
-                from omni.physx.bindings._physx import PhysxSceneStatistics
-
-                stats = PhysxSceneStatistics()
-                scene_path = None
-                for p in stage.Traverse():
-                    if p.HasAPI(UsdPhysics.SceneAPI):
-                        scene_path = str(p.GetPath())
-                        break
-                if scene_path:
-                    path_int = int(Sdf.Path(scene_path).pathElementCount and omni.usd.get_context().get_stage_id()) or 0
-                    # use the physx stats path encoding
-                    import ctypes
-
-                    scene_path_token = hash(scene_path) & 0xFFFFFFFFFFFFFFFF
-                    physx_stats.get_physx_scene_statistics(
-                        stage_id, ctypes.c_uint64(hash(scene_path_token)).value, stats
-                    )
-                    print(
-                        f"[KIT-ENVID-DUMP] contactPairsTotal={stats.contactPairsTotal} gpuContacts={stats.gpuContactCount}"
-                    )
-            except Exception as e:
-                print(f"[KIT-ENVID-DUMP] probe failed: {e}")
-        # #endregion
-
-        if cls._step_n % 320 == 0:
-            print(f"[PHYSX-STEP] {cls._step_n} steps, avg={cls._step_acc / cls._step_n * 1000:.2f}ms/step")
 
         device = PhysicsManager._device
         if "cuda" in device:

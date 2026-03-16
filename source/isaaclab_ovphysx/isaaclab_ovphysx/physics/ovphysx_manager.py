@@ -117,18 +117,7 @@ class OvPhysxManager(PhysicsManager):
             return
         dt = cls.get_physics_dt()
         sim_time = PhysicsManager._sim_time
-        import time as _pt
-
-        _ps = _pt.perf_counter()
         cls._physx.step_sync(dt=dt, sim_time=sim_time)
-        _pe = _pt.perf_counter()
-        if not hasattr(cls, "_step_acc"):
-            cls._step_acc = 0.0
-            cls._step_n = 0
-        cls._step_acc += _pe - _ps
-        cls._step_n += 1
-        if cls._step_n % 320 == 0:
-            print(f"[OVPHYSX-STEP] {cls._step_n} steps, avg={cls._step_acc / cls._step_n * 1000:.2f}ms/step")
         PhysicsManager._sim_time += dt
 
     @classmethod
@@ -288,42 +277,6 @@ class OvPhysxManager(PhysicsManager):
 
         if ovphysx_device == "gpu":
             cls._physx.warmup_gpu()
-
-        # #region agent log
-        import json as _json
-        import time as _time
-
-        _log_path = "/home/alex/IsaacLab/.cursor/debug-3bc2b5.log"
-        _settings_to_check = [
-            "/persistent/physics/numThreads",
-            "/physics/physxDispatcher",
-            "/physics/suppressReadback",
-            "/physics/updateToUsd",
-            "/physics/updateVelocitiesToUsd",
-            "/physics/updateParticlesToUsd",
-            "/physics/cudaDevice",
-        ]
-        _settings_vals = {}
-        for _sk in _settings_to_check:
-            try:
-                _settings_vals[_sk] = cls._physx.get_setting(_sk)
-            except Exception as _e:
-                _settings_vals[_sk] = f"ERROR: {_e}"
-        with open(_log_path, "a") as _lf:
-            _lf.write(
-                _json.dumps(
-                    {
-                        "sessionId": "3bc2b5",
-                        "hypothesisId": "H1-H4",
-                        "location": "ovphysx_manager.py:warmup_end",
-                        "message": "Settings after warmup",
-                        "data": _settings_vals,
-                        "timestamp": int(_time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-        # #endregion
 
         cls.dispatch_event(PhysicsEvent.MODEL_INIT, payload={})
         cls._warmup_done = True
