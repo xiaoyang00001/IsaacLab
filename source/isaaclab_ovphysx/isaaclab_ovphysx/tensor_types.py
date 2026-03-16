@@ -23,6 +23,7 @@ _TT = TensorType  # shorter reference for alias block
 # Short aliases -- existing code using ``TT.DOF_STIFFNESS`` etc. continues to work.
 # All values are IntEnum members (== plain ints) of TensorType.
 
+# fmt: off  -- aligned columns are intentional; do not reformat
 # --- Root state (GPU) ---
 ROOT_POSE                    = _TT.ARTICULATION_ROOT_POSE              # [N, 7]  float32  (px,py,pz,qx,qy,qz,qw)
 ROOT_VELOCITY                = _TT.ARTICULATION_ROOT_VELOCITY          # [N, 6]  float32  (vx,vy,vz,wx,wy,wz)
@@ -48,10 +49,10 @@ DOF_LIMIT                    = _TT.ARTICULATION_DOF_LIMIT              # [N, D, 
 DOF_MAX_VELOCITY             = _TT.ARTICULATION_DOF_MAX_VELOCITY       # [N, D]  float32
 DOF_MAX_FORCE                = _TT.ARTICULATION_DOF_MAX_FORCE          # [N, D]  float32
 DOF_ARMATURE                 = _TT.ARTICULATION_DOF_ARMATURE           # [N, D]  float32
-DOF_FRICTION_PROPERTIES      = _TT.ARTICULATION_DOF_FRICTION_PROPERTIES  # [N, D, 3]  float32  (static, dynamic, viscous)
+DOF_FRICTION_PROPERTIES      = _TT.ARTICULATION_DOF_FRICTION_PROPERTIES  # [N, D, 3]  float32  (static, dynamic, viscous)  # noqa: E501
 
 # --- External wrench (GPU, write-only) ---
-LINK_WRENCH                  = _TT.ARTICULATION_LINK_WRENCH            # [N, L, 9]  float32  (fx,fy,fz,tx,ty,tz,px,py,pz)
+LINK_WRENCH                  = _TT.ARTICULATION_LINK_WRENCH            # [N, L, 9]  float32  (fx,fy,fz,tx,ty,tz,px,py,pz)  # noqa: E501
 
 # --- Body properties (CPU) ---
 BODY_MASS                    = _TT.ARTICULATION_BODY_MASS              # [N, L]  float32  [kg]
@@ -84,6 +85,7 @@ SPATIAL_TENDON_DAMPING       = _TT.ARTICULATION_SPATIAL_TENDON_DAMPING         #
 SPATIAL_TENDON_LIMIT_STIFFNESS = _TT.ARTICULATION_SPATIAL_TENDON_LIMIT_STIFFNESS  # [N, T_spa]  float32
 SPATIAL_TENDON_OFFSET        = _TT.ARTICULATION_SPATIAL_TENDON_OFFSET          # [N, T_spa]  float32
 
+# fmt: on
 # DOF/body property tensor types are CPU-resident even in GPU simulations.
 # Write helpers check this set to route data through CPU, not self._device.
 _CPU_ONLY_TYPES: frozenset[TensorType] = frozenset({

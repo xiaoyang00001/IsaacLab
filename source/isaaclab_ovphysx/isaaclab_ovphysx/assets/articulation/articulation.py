@@ -1642,8 +1642,6 @@ class Articulation(BaseArticulation):
         """
         from isaaclab.utils.types import ArticulationActions
 
-        device = self._device
-
         for name, act in self.actuators.items():
             jids = act.joint_indices
             if jids is None:

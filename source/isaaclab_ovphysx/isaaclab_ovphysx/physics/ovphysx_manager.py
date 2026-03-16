@@ -139,10 +139,10 @@ class OvPhysxManager(PhysicsManager):
     def _release_physx(cls) -> None:
         """Release the ovphysx instance if it exists.  Safe to call multiple times."""
         if cls._physx is not None:
-            try:
+            import contextlib
+
+            with contextlib.suppress(Exception):
                 cls._physx.release()
-            except Exception:
-                pass
             cls._physx = None
 
     @classmethod

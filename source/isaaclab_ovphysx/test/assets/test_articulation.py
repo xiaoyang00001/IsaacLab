@@ -366,7 +366,6 @@ def test_reset(fixed_base_sim):
         sim.step()
         art.update(DT)
 
-    drifted_jpos = art.data.joint_pos.numpy()
     art.reset()
 
     for _ in range(2):

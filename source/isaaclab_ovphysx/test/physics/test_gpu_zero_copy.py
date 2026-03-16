@@ -193,7 +193,6 @@ class TestGPUZeroCopy:
         the loop reports cuda:0 as its device.
         """
         sim, art = gpu_cartpole
-        n_joints = art.num_joints
 
         for step in range(100):
             # Observe (GPU reads)
