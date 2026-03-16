@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Verify the cartpole RL loop runs ENTIRELY on GPU with zero CPU copies.
 
 This test instruments every data access in the hot RL loop and asserts:
@@ -13,11 +18,9 @@ import os
 
 import numpy as np
 import pytest
-import torch
-
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdUtils
-
 import warp as wp
+
+from pxr import Sdf, Usd, UsdUtils
 
 wp.init()
 
@@ -28,16 +31,20 @@ for _k in list(_sys.modules):
     if _k == "pxr" or _k.startswith("pxr."):
         _hidden_pxr[_k] = _sys.modules.pop(_k)
 import ovphysx  # noqa: E402
+
 ovphysx.bootstrap()
 _sys.modules.update(_hidden_pxr)
 del _hidden_pxr
 
-CARTPOLE_USD = os.path.join(os.path.dirname(__file__), "..", "data", "cartpole.usda")  # ../data relative to test/physics/
+CARTPOLE_USD = os.path.join(
+    os.path.dirname(__file__), "..", "data", "cartpole.usda"
+)  # ../data relative to test/physics/
 DT = 1.0 / 120.0
 
 
 def _create_stage(usd_path):
     import isaaclab.sim.utils.stage as stage_utils
+
     src = Sdf.Layer.FindOrOpen(usd_path)
     stage = Usd.Stage.CreateInMemory()
     stage.GetRootLayer().TransferContent(src)
@@ -54,33 +61,47 @@ def _assert_cuda(arr, name):
 
 @pytest.fixture
 def gpu_cartpole():
+    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
+
+    from isaaclab.actuators import ImplicitActuatorCfg
+    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
     from isaaclab.sim.simulation_cfg import SimulationCfg
     from isaaclab.sim.simulation_context import SimulationContext
-    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
-    from isaaclab.actuators import ImplicitActuatorCfg
-    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
 
     SimulationContext.clear_instance()
     _create_stage(CARTPOLE_USD)
 
-    sim = SimulationContext(SimulationCfg(
-        dt=DT, device="cuda:0", gravity=(0, 0, -9.81),
-        physics=OvPhysxCfg(), use_fabric=False,
-    ))
+    sim = SimulationContext(
+        SimulationCfg(
+            dt=DT,
+            device="cuda:0",
+            gravity=(0, 0, -9.81),
+            physics=OvPhysxCfg(),
+            use_fabric=False,
+        )
+    )
 
     from isaaclab.assets.articulation.articulation import Articulation
-    art = Articulation(ArticulationCfg(
-        prim_path="/cartPole",
-        actuators={"cart": ImplicitActuatorCfg(
-            joint_names_expr=["railCartJoint"], stiffness=100.0, damping=10.0,
-        )},
-    ))
+
+    art = Articulation(
+        ArticulationCfg(
+            prim_path="/cartPole",
+            actuators={
+                "cart": ImplicitActuatorCfg(
+                    joint_names_expr=["railCartJoint"],
+                    stiffness=100.0,
+                    damping=10.0,
+                )
+            },
+        )
+    )
     sim.reset()
 
     # Perturb from equilibrium
     perturb = wp.from_numpy(
         np.array([[0.0, 0.05, 0.0]], dtype=np.float32),
-        dtype=wp.float32, device="cuda:0",
+        dtype=wp.float32,
+        device="cuda:0",
     )
     art.write_joint_position_to_sim_index(position=perturb)
     sim.step(render=False)

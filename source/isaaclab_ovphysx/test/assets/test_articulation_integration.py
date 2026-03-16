@@ -12,24 +12,24 @@ Mirrors the PhysX backend test coverage. Uses local USD assets (no nucleus).
 """
 
 import os
-import sys
 
 import numpy as np
 import pytest
-
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdUtils
-
 import warp as wp
+
+from pxr import Sdf, Usd, UsdUtils
 
 wp.init()
 
 # Hide pxr during ovphysx import to skip Python-level USD version check.
 import sys as _sys
+
 _hidden_pxr = {}
 for _k in list(_sys.modules):
     if _k == "pxr" or _k.startswith("pxr."):
         _hidden_pxr[_k] = _sys.modules.pop(_k)
 import ovphysx  # noqa: E402,F401
+
 ovphysx.bootstrap()
 _sys.modules.update(_hidden_pxr)
 del _hidden_pxr
@@ -48,6 +48,7 @@ def _create_stage(usd_path: str) -> Usd.Stage:
     delete and recreate the PhysicsScene prim.
     """
     import isaaclab.sim.utils.stage as stage_utils
+
     src_layer = Sdf.Layer.FindOrOpen(usd_path)
     stage = Usd.Stage.CreateInMemory()
     stage.GetRootLayer().TransferContent(src_layer)
@@ -60,24 +61,34 @@ def _create_stage(usd_path: str) -> Usd.Stage:
 @pytest.fixture
 def fixed_base_sim():
     """Two fixed-base articulations (2 envs, 2 joints, 3 bodies each)."""
+    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
+
+    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
     from isaaclab.sim.simulation_cfg import SimulationCfg
     from isaaclab.sim.simulation_context import SimulationContext
-    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
-    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
 
     SimulationContext.clear_instance()
     _create_stage(TWO_ART_USD)
 
-    sim = SimulationContext(SimulationCfg(
-        dt=DT, device=DEVICE, gravity=(0.0, 0.0, -9.81),
-        physics=OvPhysxCfg(), use_fabric=False, render_interval=1,
-    ))
+    sim = SimulationContext(
+        SimulationCfg(
+            dt=DT,
+            device=DEVICE,
+            gravity=(0.0, 0.0, -9.81),
+            physics=OvPhysxCfg(),
+            use_fabric=False,
+            render_interval=1,
+        )
+    )
 
     from isaaclab.assets.articulation.articulation import Articulation
-    art = Articulation(ArticulationCfg(
-        prim_path="/World/articulation*",
-        actuators={},
-    ))
+
+    art = Articulation(
+        ArticulationCfg(
+            prim_path="/World/articulation*",
+            actuators={},
+        )
+    )
     sim.reset()
 
     yield sim, art
@@ -87,24 +98,34 @@ def fixed_base_sim():
 @pytest.fixture
 def single_art_sim():
     """Single fixed-base articulation (1 env, 2 joints, 3 bodies)."""
+    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
+
+    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
     from isaaclab.sim.simulation_cfg import SimulationCfg
     from isaaclab.sim.simulation_context import SimulationContext
-    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
-    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
 
     SimulationContext.clear_instance()
     _create_stage(TWO_ART_USD)
 
-    sim = SimulationContext(SimulationCfg(
-        dt=DT, device=DEVICE, gravity=(0.0, 0.0, -9.81),
-        physics=OvPhysxCfg(), use_fabric=False, render_interval=1,
-    ))
+    sim = SimulationContext(
+        SimulationCfg(
+            dt=DT,
+            device=DEVICE,
+            gravity=(0.0, 0.0, -9.81),
+            physics=OvPhysxCfg(),
+            use_fabric=False,
+            render_interval=1,
+        )
+    )
 
     from isaaclab.assets.articulation.articulation import Articulation
-    art = Articulation(ArticulationCfg(
-        prim_path="/World/articulation",
-        actuators={},
-    ))
+
+    art = Articulation(
+        ArticulationCfg(
+            prim_path="/World/articulation",
+            actuators={},
+        )
+    )
     sim.reset()
 
     yield sim, art
@@ -114,31 +135,40 @@ def single_art_sim():
 @pytest.fixture
 def cartpole_sim():
     """Cartpole articulation with implicit actuator on the cart joint."""
+    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
+
+    from isaaclab.actuators import ImplicitActuatorCfg
+    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
     from isaaclab.sim.simulation_cfg import SimulationCfg
     from isaaclab.sim.simulation_context import SimulationContext
-    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
-    from isaaclab.actuators import ImplicitActuatorCfg
-    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
 
     SimulationContext.clear_instance()
     _create_stage(CARTPOLE_USD)
 
-    sim = SimulationContext(SimulationCfg(
-        dt=DT, device=DEVICE, gravity=(0.0, 0.0, -9.81),
-        physics=OvPhysxCfg(), use_fabric=False,
-    ))
+    sim = SimulationContext(
+        SimulationCfg(
+            dt=DT,
+            device=DEVICE,
+            gravity=(0.0, 0.0, -9.81),
+            physics=OvPhysxCfg(),
+            use_fabric=False,
+        )
+    )
 
     from isaaclab.assets.articulation.articulation import Articulation
-    art = Articulation(ArticulationCfg(
-        prim_path="/cartPole",
-        actuators={
-            "cart": ImplicitActuatorCfg(
-                joint_names_expr=["railCartJoint"],
-                stiffness=100.0,
-                damping=10.0,
-            ),
-        },
-    ))
+
+    art = Articulation(
+        ArticulationCfg(
+            prim_path="/cartPole",
+            actuators={
+                "cart": ImplicitActuatorCfg(
+                    joint_names_expr=["railCartJoint"],
+                    stiffness=100.0,
+                    damping=10.0,
+                ),
+            },
+        )
+    )
     sim.reset()
 
     yield sim, art
@@ -149,8 +179,8 @@ def cartpole_sim():
 # Initialization
 # ======================================================================
 
-class TestInitialization:
 
+class TestInitialization:
     def test_init_fixed_base(self, fixed_base_sim):
         _, art = fixed_base_sim
         assert art.is_initialized
@@ -184,8 +214,8 @@ class TestInitialization:
 # Joint limits and properties
 # ======================================================================
 
-class TestJointProperties:
 
+class TestJointProperties:
     def test_joint_pos_limits(self, fixed_base_sim):
         _, art = fixed_base_sim
         limits = art.data.joint_pos_limits
@@ -209,8 +239,8 @@ class TestJointProperties:
 # Actuator gains
 # ======================================================================
 
-class TestActuatorGains:
 
+class TestActuatorGains:
     def test_loading_gains_from_usd(self, fixed_base_sim):
         _, art = fixed_base_sim
         stiff = art.data.joint_stiffness
@@ -227,9 +257,7 @@ class TestActuatorGains:
     def test_setting_gains_write_readback(self, single_art_sim):
         sim, art = single_art_sim
         new_stiffness = np.full((1, 2), 500.0, dtype=np.float32)
-        art.write_joint_stiffness_to_sim_index(
-            stiffness=wp.from_numpy(new_stiffness, dtype=wp.float32, device=DEVICE)
-        )
+        art.write_joint_stiffness_to_sim_index(stiffness=wp.from_numpy(new_stiffness, dtype=wp.float32, device=DEVICE))
         sim.step(render=False)
         art.update(DT)
 
@@ -238,8 +266,8 @@ class TestActuatorGains:
 # External forces
 # ======================================================================
 
-class TestExternalForces:
 
+class TestExternalForces:
     def test_external_force_single_body(self, single_art_sim):
         sim, art = single_art_sim
         art.permanent_wrench_composer.add_forces_and_torques_index(
@@ -294,8 +322,8 @@ class TestExternalForces:
 # Reset -- including partial env_ids regression test for C3/C4 fixes
 # ======================================================================
 
-class TestReset:
 
+class TestReset:
     def test_reset_all(self, fixed_base_sim):
         """Full reset restores default joint positions."""
         sim, art = fixed_base_sim
@@ -315,8 +343,7 @@ class TestReset:
 
         jp_after = art.data.joint_pos.numpy()
         np.testing.assert_allclose(
-            jp_after, jp_default, atol=0.1,
-            err_msg="After full reset, joint positions should be near defaults"
+            jp_after, jp_default, atol=0.1, err_msg="After full reset, joint positions should be near defaults"
         )
 
     def test_reset_partial_env_ids(self, fixed_base_sim):
@@ -335,10 +362,12 @@ class TestReset:
             art.update(DT)
 
         jp_perturbed = art.data.joint_pos.numpy().copy()
-        assert not np.allclose(jp_perturbed[0], jp_default[0], atol=1e-3), \
+        assert not np.allclose(jp_perturbed[0], jp_default[0], atol=1e-3), (
             "Env 0 joints should have moved from defaults"
-        assert not np.allclose(jp_perturbed[1], jp_default[1], atol=1e-3), \
+        )
+        assert not np.allclose(jp_perturbed[1], jp_default[1], atol=1e-3), (
             "Env 1 joints should have moved from defaults"
+        )
 
         # Reset only env 0
         art.reset(env_ids=[0])
@@ -348,14 +377,12 @@ class TestReset:
         jp_after = art.data.joint_pos.numpy()
         # Env 0 should be near defaults (not exact due to one step of physics)
         np.testing.assert_allclose(
-            jp_after[0], jp_default[0], atol=0.2,
-            err_msg="After partial reset, env 0 should be near defaults"
+            jp_after[0], jp_default[0], atol=0.2, err_msg="After partial reset, env 0 should be near defaults"
         )
         # Env 1 should still be perturbed (roughly near its pre-reset state)
         delta_env1 = np.abs(jp_after[1] - jp_default[1])
         assert np.any(delta_env1 > 0.01), (
-            f"After partial reset, env 1 should still be perturbed. "
-            f"Delta from default: {delta_env1}"
+            f"After partial reset, env 1 should still be perturbed. Delta from default: {delta_env1}"
         )
 
     def test_reset_preserves_joint_command_buffers(self, single_art_sim):
@@ -400,8 +427,8 @@ class TestReset:
 # State read/write
 # ======================================================================
 
-class TestStateReadWrite:
 
+class TestStateReadWrite:
     def test_write_root_pose(self, single_art_sim):
         sim, art = single_art_sim
         pose_np = art.data.root_link_pose_w.numpy().copy()
@@ -421,9 +448,7 @@ class TestStateReadWrite:
     def test_write_joint_position(self, single_art_sim):
         sim, art = single_art_sim
         target = np.array([[0.1, -0.1]], dtype=np.float32)
-        art.write_joint_position_to_sim_index(
-            position=wp.from_numpy(target, dtype=wp.float32, device=DEVICE)
-        )
+        art.write_joint_position_to_sim_index(position=wp.from_numpy(target, dtype=wp.float32, device=DEVICE))
         sim.step(render=False)
         art.update(DT)
         jp = art.data.joint_pos.numpy()
@@ -432,9 +457,7 @@ class TestStateReadWrite:
     def test_write_joint_velocity(self, single_art_sim):
         sim, art = single_art_sim
         vel = np.array([[0.5, -0.5]], dtype=np.float32)
-        art.write_joint_velocity_to_sim_index(
-            velocity=wp.from_numpy(vel, dtype=wp.float32, device=DEVICE)
-        )
+        art.write_joint_velocity_to_sim_index(velocity=wp.from_numpy(vel, dtype=wp.float32, device=DEVICE))
         sim.step(render=False)
         art.update(DT)
 
@@ -465,8 +488,8 @@ class TestStateReadWrite:
 # Actuator commands
 # ======================================================================
 
-class TestActuatorCommands:
 
+class TestActuatorCommands:
     def test_implicit_position_target(self, cartpole_sim):
         """Set a position target and verify the joint moves toward it."""
         sim, art = cartpole_sim
@@ -487,9 +510,7 @@ class TestActuatorCommands:
             art.update(DT)
 
         jp = art.data.joint_pos.numpy()
-        assert jp[0, jids[0]] > 0.1, (
-            f"Cart should move toward target=1.0, got pos={jp[0, jids[0]]:.4f}"
-        )
+        assert jp[0, jids[0]] > 0.1, f"Cart should move toward target=1.0, got pos={jp[0, jids[0]]:.4f}"
 
     def test_effort_target(self, cartpole_sim):
         """Apply an effort and verify the joint moves."""
@@ -517,8 +538,8 @@ class TestActuatorCommands:
 # Body state and dynamics
 # ======================================================================
 
-class TestBodyState:
 
+class TestBodyState:
     def test_body_link_poses_kinematics(self, single_art_sim):
         _, art = single_art_sim
         bp = art.data.body_link_pose_w
@@ -527,8 +548,7 @@ class TestBodyState:
         bp_np = bp.numpy().reshape(3, 7)
         quats = bp_np[:, 3:7]
         norms = np.linalg.norm(quats, axis=-1)
-        np.testing.assert_allclose(norms, 1.0, atol=1e-4,
-                                   err_msg="Link quaternions should be unit quaternions")
+        np.testing.assert_allclose(norms, 1.0, atol=1e-4, err_msg="Link quaternions should be unit quaternions")
 
     def test_body_com_pose_consistency(self, single_art_sim):
         sim, art = single_art_sim
@@ -553,8 +573,8 @@ class TestBodyState:
 # Data consistency
 # ======================================================================
 
-class TestDataConsistency:
 
+class TestDataConsistency:
     def test_state_read_consistency(self, single_art_sim):
         """Reading the same property twice in the same step returns identical data."""
         sim, art = single_art_sim
@@ -585,8 +605,8 @@ class TestDataConsistency:
 # Friction and body properties
 # ======================================================================
 
-class TestFrictionAndBodyProperties:
 
+class TestFrictionAndBodyProperties:
     def test_write_joint_friction(self, single_art_sim):
         sim, art = single_art_sim
         friction = np.full((1, 2), 0.5, dtype=np.float32)
@@ -602,9 +622,7 @@ class TestFrictionAndBodyProperties:
         assert np.all(orig_mass > 0), f"Original masses should be positive: {orig_mass}"
 
         new_mass = orig_mass * 2.0
-        art.set_masses_index(
-            masses=wp.from_numpy(new_mass, dtype=wp.float32, device=DEVICE)
-        )
+        art.set_masses_index(masses=wp.from_numpy(new_mass, dtype=wp.float32, device=DEVICE))
         sim.step(render=False)
         art.update(DT)
 
@@ -614,9 +632,7 @@ class TestFrictionAndBodyProperties:
         assert orig_inertia.shape == (1, 3, 9)
 
         new_inertia = orig_inertia * 1.5
-        art.set_inertias_index(
-            inertias=wp.from_numpy(new_inertia, dtype=wp.float32, device=DEVICE)
-        )
+        art.set_inertias_index(inertias=wp.from_numpy(new_inertia, dtype=wp.float32, device=DEVICE))
         sim.step(render=False)
         art.update(DT)
 

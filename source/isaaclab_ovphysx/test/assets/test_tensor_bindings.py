@@ -11,14 +11,11 @@ works end-to-end through the OvPhysxManager and the TensorBindingsAPI.
 """
 
 import os
-import shutil
-import tempfile
 
 import numpy as np
+import ovphysx
 import pytest
 import warp as wp
-
-import ovphysx
 
 wp.init()
 
@@ -36,6 +33,7 @@ def gpu_write(binding, np_data: np.ndarray):
     """Write numpy data through a GPU warp array into a binding."""
     wp_buf = wp.from_numpy(np_data.astype(np.float32), dtype=wp.float32, device=DEVICE)
     binding.write(wp_buf)
+
 
 TWO_ARTICULATIONS_USD = os.path.join(os.path.dirname(__file__), "..", "data", "two_articulations.usda")
 
@@ -92,8 +90,9 @@ class TestTensorBindingsSmoke:
 
         buf_after = gpu_read(pose_b)
 
-        np.testing.assert_allclose(buf_before, buf_after, atol=1e-3,
-                                   err_msg="Fixed-base root poses should not change significantly")
+        np.testing.assert_allclose(
+            buf_before, buf_after, atol=1e-3, err_msg="Fixed-base root poses should not change significantly"
+        )
         pose_b.destroy()
 
     def test_write_dof_position_target(self, physx_cpu):

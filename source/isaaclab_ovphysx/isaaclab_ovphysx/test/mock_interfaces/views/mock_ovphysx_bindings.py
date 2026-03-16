@@ -104,6 +104,7 @@ class MockTensorBinding:
             raise RuntimeError("write-only tensor binding does not support read()")
         try:
             import warp as wp
+
             if isinstance(tensor, wp.array):
                 tmp = wp.from_numpy(self._data, dtype=wp.float32, device=tensor.device)
                 wp.copy(tensor, tmp)
@@ -118,12 +119,14 @@ class MockTensorBinding:
         """Convert warp/torch/numpy array to numpy, handling GPU arrays."""
         try:
             import warp as wp
+
             if isinstance(arr, wp.array):
                 return arr.numpy()
         except ImportError:
             pass
         try:
             import torch
+
             if isinstance(arr, torch.Tensor):
                 return arr.detach().cpu().numpy()
         except ImportError:
@@ -183,10 +186,16 @@ class MockOvPhysxBindingSet:
             body_names = [f"body_{i}" for i in range(L)]
 
         common = dict(
-            count=N, dof_count=D, body_count=L, joint_count=D,
-            is_fixed_base=is_fixed_base, dof_names=joint_names,
-            body_names=body_names, joint_names=joint_names,
-            fixed_tendon_count=T_fix, spatial_tendon_count=T_spa,
+            count=N,
+            dof_count=D,
+            body_count=L,
+            joint_count=D,
+            is_fixed_base=is_fixed_base,
+            dof_names=joint_names,
+            body_names=body_names,
+            joint_names=joint_names,
+            fixed_tendon_count=T_fix,
+            spatial_tendon_count=T_spa,
         )
 
         self.bindings: dict[int, MockTensorBinding] = {
@@ -219,23 +228,31 @@ class MockOvPhysxBindingSet:
 
         # Fixed tendon bindings (only when tendons are present)
         if T_fix > 0:
-            self.bindings.update({
-                TT.FIXED_TENDON_STIFFNESS: MockTensorBinding(TT.FIXED_TENDON_STIFFNESS, (N, T_fix), **common),
-                TT.FIXED_TENDON_DAMPING: MockTensorBinding(TT.FIXED_TENDON_DAMPING, (N, T_fix), **common),
-                TT.FIXED_TENDON_LIMIT_STIFFNESS: MockTensorBinding(TT.FIXED_TENDON_LIMIT_STIFFNESS, (N, T_fix), **common),
-                TT.FIXED_TENDON_LIMIT: MockTensorBinding(TT.FIXED_TENDON_LIMIT, (N, T_fix, 2), **common),
-                TT.FIXED_TENDON_REST_LENGTH: MockTensorBinding(TT.FIXED_TENDON_REST_LENGTH, (N, T_fix), **common),
-                TT.FIXED_TENDON_OFFSET: MockTensorBinding(TT.FIXED_TENDON_OFFSET, (N, T_fix), **common),
-            })
+            self.bindings.update(
+                {
+                    TT.FIXED_TENDON_STIFFNESS: MockTensorBinding(TT.FIXED_TENDON_STIFFNESS, (N, T_fix), **common),
+                    TT.FIXED_TENDON_DAMPING: MockTensorBinding(TT.FIXED_TENDON_DAMPING, (N, T_fix), **common),
+                    TT.FIXED_TENDON_LIMIT_STIFFNESS: MockTensorBinding(
+                        TT.FIXED_TENDON_LIMIT_STIFFNESS, (N, T_fix), **common
+                    ),
+                    TT.FIXED_TENDON_LIMIT: MockTensorBinding(TT.FIXED_TENDON_LIMIT, (N, T_fix, 2), **common),
+                    TT.FIXED_TENDON_REST_LENGTH: MockTensorBinding(TT.FIXED_TENDON_REST_LENGTH, (N, T_fix), **common),
+                    TT.FIXED_TENDON_OFFSET: MockTensorBinding(TT.FIXED_TENDON_OFFSET, (N, T_fix), **common),
+                }
+            )
 
         # Spatial tendon bindings
         if T_spa > 0:
-            self.bindings.update({
-                TT.SPATIAL_TENDON_STIFFNESS: MockTensorBinding(TT.SPATIAL_TENDON_STIFFNESS, (N, T_spa), **common),
-                TT.SPATIAL_TENDON_DAMPING: MockTensorBinding(TT.SPATIAL_TENDON_DAMPING, (N, T_spa), **common),
-                TT.SPATIAL_TENDON_LIMIT_STIFFNESS: MockTensorBinding(TT.SPATIAL_TENDON_LIMIT_STIFFNESS, (N, T_spa), **common),
-                TT.SPATIAL_TENDON_OFFSET: MockTensorBinding(TT.SPATIAL_TENDON_OFFSET, (N, T_spa), **common),
-            })
+            self.bindings.update(
+                {
+                    TT.SPATIAL_TENDON_STIFFNESS: MockTensorBinding(TT.SPATIAL_TENDON_STIFFNESS, (N, T_spa), **common),
+                    TT.SPATIAL_TENDON_DAMPING: MockTensorBinding(TT.SPATIAL_TENDON_DAMPING, (N, T_spa), **common),
+                    TT.SPATIAL_TENDON_LIMIT_STIFFNESS: MockTensorBinding(
+                        TT.SPATIAL_TENDON_LIMIT_STIFFNESS, (N, T_spa), **common
+                    ),
+                    TT.SPATIAL_TENDON_OFFSET: MockTensorBinding(TT.SPATIAL_TENDON_OFFSET, (N, T_spa), **common),
+                }
+            )
 
     def set_random_data(self) -> None:
         """Fill all bindings with random data."""

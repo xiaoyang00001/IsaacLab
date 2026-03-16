@@ -6,9 +6,7 @@
 """Unit tests for ovphysx articulation data helpers."""
 
 import numpy as np
-
 import warp as wp
-
 from isaaclab_ovphysx import tensor_types as TT
 from isaaclab_ovphysx.assets.articulation.articulation_data import ArticulationData
 from isaaclab_ovphysx.test.mock_interfaces.views import MockOvPhysxBindingSet

@@ -16,24 +16,24 @@ Uses local USD test assets (no nucleus dependency).
 """
 
 import os
-import sys
 
 import numpy as np
 import pytest
-
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdUtils
-
 import warp as wp
+
+from pxr import Sdf, Usd, UsdUtils
 
 wp.init()
 
 # Hide pxr during ovphysx import to skip Python-level USD version check.
 import sys as _sys
+
 _hidden_pxr = {}
 for _k in list(_sys.modules):
     if _k == "pxr" or _k.startswith("pxr."):
         _hidden_pxr[_k] = _sys.modules.pop(_k)
 import ovphysx  # noqa: E402,F401
+
 ovphysx.bootstrap()
 _sys.modules.update(_hidden_pxr)
 del _hidden_pxr
@@ -49,9 +49,11 @@ DEVICE = "cuda:0"
 # Helpers
 # ------------------------------------------------------------------
 
+
 def _create_stage(usd_path: str) -> Usd.Stage:
     """Create a fresh in-memory stage with USD content copied in."""
     import isaaclab.sim.utils.stage as stage_utils
+
     src_layer = Sdf.Layer.FindOrOpen(usd_path)
     stage = Usd.Stage.CreateInMemory()
     stage.GetRootLayer().TransferContent(src_layer)
@@ -63,27 +65,37 @@ def _create_stage(usd_path: str) -> Usd.Stage:
 
 def _make_sim_and_art(usd_path, prim_path, actuators=None, dt=DT, device=DEVICE, gravity=(0.0, 0.0, -9.81)):
     """Build SimulationContext + Articulation from a local USD file."""
+    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
+
+    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
     from isaaclab.sim.simulation_cfg import SimulationCfg
     from isaaclab.sim.simulation_context import SimulationContext
-    from isaaclab.assets.articulation.articulation_cfg import ArticulationCfg
-    from isaaclab_ovphysx.physics.ovphysx_manager_cfg import OvPhysxCfg
 
     SimulationContext.clear_instance()
     _create_stage(usd_path)
 
-    sim = SimulationContext(SimulationCfg(
-        dt=dt, device=device, gravity=gravity,
-        physics=OvPhysxCfg(), use_fabric=False, render_interval=1,
-    ))
+    sim = SimulationContext(
+        SimulationCfg(
+            dt=dt,
+            device=device,
+            gravity=gravity,
+            physics=OvPhysxCfg(),
+            use_fabric=False,
+            render_interval=1,
+        )
+    )
 
     if actuators is None:
         actuators = {}
 
     from isaaclab.assets.articulation.articulation import Articulation
-    art = Articulation(ArticulationCfg(
-        prim_path=prim_path,
-        actuators=actuators,
-    ))
+
+    art = Articulation(
+        ArticulationCfg(
+            prim_path=prim_path,
+            actuators=actuators,
+        )
+    )
     sim.reset()
     return sim, art
 
@@ -91,6 +103,7 @@ def _make_sim_and_art(usd_path, prim_path, actuators=None, dt=DT, device=DEVICE,
 # ------------------------------------------------------------------
 # Fixtures
 # ------------------------------------------------------------------
+
 
 @pytest.fixture
 def fixed_base_sim():
@@ -128,6 +141,7 @@ def cartpole_sim():
 # ======================================================================
 # Initialization tests (mirrors physx test_initialization_*)
 # ======================================================================
+
 
 def test_initialization_floating_base_non_root(fixed_base_sim):
     pytest.skip("Requires IsaacSim/Nucleus assets (humanoid) not available in ovphysx standalone tests.")
@@ -175,6 +189,7 @@ def test_initialization_fixed_base_made_floating_base(fixed_base_sim):
 # Default state validation
 # ======================================================================
 
+
 def test_out_of_range_default_joint_pos(fixed_base_sim):
     """Verify default joint position buffer shapes."""
     _, art = fixed_base_sim
@@ -194,6 +209,7 @@ def test_out_of_range_default_joint_vel(single_art_sim):
 # ======================================================================
 # Joint limits
 # ======================================================================
+
 
 def test_joint_pos_limits(fixed_base_sim):
     """Verify joint position limits are read correctly."""
@@ -217,6 +233,7 @@ def test_joint_effort_limits(fixed_base_sim):
 # External forces
 # ======================================================================
 
+
 def test_external_force_buffer(single_art_sim):
     """Verify external force buffer is initialized and accessible."""
     _, art = single_art_sim
@@ -236,7 +253,8 @@ def test_external_force_on_single_body(single_art_sim):
     wp.copy(force, wp.from_numpy(force_np, dtype=wp.vec3f, device=DEVICE))
 
     art.instantaneous_wrench_composer.set_forces_and_torques_index(
-        forces=force, torques=torque,
+        forces=force,
+        torques=torque,
         body_ids=list(range(art.num_bodies)),
         env_ids=[0],
     )
@@ -264,7 +282,8 @@ def test_external_force_on_multiple_bodies(fixed_base_sim):
     wp.copy(force, wp.from_numpy(force_np, dtype=wp.vec3f, device=DEVICE))
 
     art.instantaneous_wrench_composer.set_forces_and_torques_index(
-        forces=force, torques=torque,
+        forces=force,
+        torques=torque,
         body_ids=list(range(art.num_bodies)),
         env_ids=list(range(art.num_instances)),
     )
@@ -283,6 +302,7 @@ def test_external_force_on_multiple_bodies_at_position(fixed_base_sim):
 # ======================================================================
 # Actuator gains
 # ======================================================================
+
 
 def test_loading_gains_from_usd(fixed_base_sim):
     """Verify that gains (stiffness/damping) are loaded from the USD."""
@@ -306,6 +326,7 @@ def test_setting_gains_from_cfg_dict(fixed_base_sim):
 # ======================================================================
 # Velocity / effort limits
 # ======================================================================
+
 
 def test_setting_velocity_limit_implicit(cartpole_sim):
     """Verify velocity limit buffer is accessible."""
@@ -332,6 +353,7 @@ def test_setting_effort_limit_explicit(fixed_base_sim):
 # ======================================================================
 # Reset
 # ======================================================================
+
 
 def test_reset(fixed_base_sim):
     """Verify that reset restores the default state."""
@@ -362,6 +384,7 @@ def test_reset(fixed_base_sim):
 # Joint commands
 # ======================================================================
 
+
 def test_apply_joint_command(cartpole_sim):
     """Verify that setting a joint position target moves the joint."""
     sim, art = cartpole_sim
@@ -381,14 +404,13 @@ def test_apply_joint_command(cartpole_sim):
         art.update(DT)
 
     final_jpos = art.data.joint_pos.numpy()
-    assert abs(final_jpos[0, 0] - 0.5) < 0.3, (
-        f"Cart joint should approach target 0.5, got {final_jpos[0, 0]}"
-    )
+    assert abs(final_jpos[0, 0] - 0.5) < 0.3, f"Cart joint should approach target 0.5, got {final_jpos[0, 0]}"
 
 
 # ======================================================================
 # Body / root state
 # ======================================================================
+
 
 def test_body_root_state(fixed_base_sim):
     """Verify root and body state properties are accessible and have correct shapes."""
@@ -452,6 +474,7 @@ def test_write_root_state(single_art_sim):
 # Joint wrench
 # ======================================================================
 
+
 def test_body_incoming_joint_wrench_b_single_joint(single_art_sim):
     """Verify incoming joint wrench buffer is accessible."""
     sim, art = single_art_sim
@@ -467,6 +490,7 @@ def test_body_incoming_joint_wrench_b_single_joint(single_art_sim):
 # Articulation root prim path
 # ======================================================================
 
+
 def test_setting_articulation_root_prim_path(single_art_sim):
     """Verify articulation is accessible at expected path."""
     _, art = single_art_sim
@@ -480,6 +504,7 @@ def test_setting_invalid_articulation_root_prim_path():
 # ======================================================================
 # Write joint state data consistency
 # ======================================================================
+
 
 def test_write_joint_state_data_consistency(fixed_base_sim):
     """Verify that writing joint state and reading it back produces consistent values."""
@@ -510,6 +535,7 @@ def test_write_joint_state_data_consistency(fixed_base_sim):
 # Tendons
 # ======================================================================
 
+
 def test_spatial_tendons(fixed_base_sim):
     pytest.skip("Spatial tendon support requires specific USD assets not available in ovphysx standalone tests.")
 
@@ -517,6 +543,7 @@ def test_spatial_tendons(fixed_base_sim):
 # ======================================================================
 # Friction
 # ======================================================================
+
 
 def test_write_joint_frictions_to_sim(single_art_sim):
     """Verify joint friction can be written and read back."""

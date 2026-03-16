@@ -292,9 +292,7 @@ class SimulationContext:
             # Find and delete any existing physics scene.
             # Collect paths first to avoid iterator invalidation during deletion.
             physics_scene_paths = [
-                prim.GetPath().pathString
-                for prim in self.stage.Traverse()
-                if prim.GetTypeName() == "PhysicsScene"
+                prim.GetPath().pathString for prim in self.stage.Traverse() if prim.GetTypeName() == "PhysicsScene"
             ]
             for path in physics_scene_paths:
                 sim_utils.delete_prim(path, stage=self.stage)

@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 # When running kitless (e.g., ovphysx backend via run_ovphysx.sh), AppLauncher
 # will try to boot Kit and hang. Skip it entirely when LD_PRELOAD is cleared
 # (the signature of run_ovphysx.sh) or when EXP_PATH is not set.
-_kitless = (os.environ.get("LD_PRELOAD", "") == "" and "EXP_PATH" not in os.environ)
+_kitless = os.environ.get("LD_PRELOAD", "") == "" and "EXP_PATH" not in os.environ
 
 if not _kitless:
     from isaaclab.app import AppLauncher
