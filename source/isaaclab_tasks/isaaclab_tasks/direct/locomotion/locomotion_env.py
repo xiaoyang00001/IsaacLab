@@ -222,12 +222,9 @@ class LocomotionEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = wp.to_torch(self.robot._ALL_INDICES)
+        self.robot.reset(env_ids)
+        super()._reset_idx(env_ids)
 
-        # Write env_origins-adjusted defaults directly instead of calling
-        # scene.reset() (via super) followed by a second write.  The base
-        # class _reset_idx calls scene.reset -> robot.reset which writes raw
-        # defaults that are immediately overwritten below.  Skipping that
-        # halves the number of binding writes per reset.
         joint_pos = wp.to_torch(self.robot.data.default_joint_pos)[env_ids].clone()
         joint_vel = wp.to_torch(self.robot.data.default_joint_vel)[env_ids].clone()
         default_root_pose = wp.to_torch(self.robot.data.default_root_pose)[env_ids].clone()
@@ -238,18 +235,6 @@ class LocomotionEnv(DirectRLEnv):
         self.robot.write_root_velocity_to_sim_index(root_velocity=default_root_vel, env_ids=env_ids)
         self.robot.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
         self.robot.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)
-
-        # Housekeeping normally done by super()._reset_idx() -- skipped above to avoid
-        # the redundant scene.reset() -> robot.reset() write.
-        if self.cfg.events:
-            if "reset" in self.event_manager.available_modes:
-                env_step_count = self._sim_step_counter // self.cfg.decimation
-                self.event_manager.apply(mode="reset", env_ids=env_ids, global_env_step_count=env_step_count)
-        if self.cfg.action_noise_model:
-            self._action_noise_model.reset(env_ids)
-        if self.cfg.observation_noise_model:
-            self._observation_noise_model.reset(env_ids)
-        self.episode_length_buf[env_ids] = 0
 
         to_target = self.targets[env_ids] - default_root_pose[:, :3]
         to_target[:, 2] = 0.0
