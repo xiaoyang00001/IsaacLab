@@ -239,8 +239,8 @@ class LocomotionEnv(DirectRLEnv):
         self.robot.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
         self.robot.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)
 
-        # Base class housekeeping (event manager, noise, episode length)
-        # without the redundant scene.reset()
+        # Housekeeping normally done by super()._reset_idx() -- skipped above to avoid
+        # the redundant scene.reset() -> robot.reset() write.
         if self.cfg.events:
             if "reset" in self.event_manager.available_modes:
                 env_step_count = self._sim_step_counter // self.cfg.decimation

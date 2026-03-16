@@ -180,11 +180,6 @@ class OvPhysxManager(PhysicsManager):
         sim.stage.Export(stage_file)
         cls._stage_path = stage_file
         logger.info("OvPhysxManager: exported USD stage to %s", stage_file)
-        # DEBUG: copy to a stable path for inspection in IsaacSim
-        import shutil
-
-        shutil.copy(stage_file, "/tmp/ovphysx_scene_debug.usda")
-        logger.info("OvPhysxManager: DEBUG copy at /tmp/ovphysx_scene_debug.usda")
 
         # HACK (temporary): hide pxr from sys.modules during ovphysx bootstrap.
         # IsaacSim's pxr reports version 0.25.5 (pip convention) while ovphysx
@@ -206,11 +201,8 @@ class OvPhysxManager(PhysicsManager):
 
         cls._physx = ovphysx.PhysX(device=ovphysx_device, gpu_index=gpu_index)
 
-        # Enable async PhysX stepping by configuring the CPU dispatcher thread count.
-        # Without this, PhysXStepper::launch() sees workerCount==0 and runs
-        # simulate()+fetchResults() synchronously on the calling thread, blocking
-        # for ~6ms per substep.  With threads, simulate() returns immediately and
-        # the stepper runs on a background thread (~0.1ms), matching Kit's behavior.
+        # Without worker threads the stepper runs simulate()+fetchResults()
+        # synchronously, blocking the calling thread for the full GPU step time.
         cls._physx.set_setting("/persistent/physics/numThreads", "8")
         cls._physx.set_setting("/physics/physxDispatcher", "true")
         cls._physx.set_setting("/physics/updateToUsd", "false")
@@ -315,15 +307,8 @@ class OvPhysxManager(PhysicsManager):
             ]:
                 scene_prim.CreateAttribute(f"physxScene:{attr}", Sdf.ValueTypeNames.UInt).Set(val)
 
-        # Propagate scene query support setting.  physx_manager._configure_physics()
-        # normally writes this for the Kit backend, but OvPhysxManager skips that
-        # method entirely -- so the attribute was never authored and omni.physx fell
-        # back to the C++ default (supportSceneQueries=true), costing ~0.9ms/substep
-        # rebuilding the BVH tree for 36K bodies even though RL never uses scene queries.
-        # Read from SimulationCfg since OvPhysxCfg does not carry this field.
-        from isaaclab.physics import PhysicsManager as _PM
-
-        sim_cfg = _PM._sim.cfg if _PM._sim is not None else None
+        # Propagate scene query support from SimulationCfg so omni.physx creates
+        # the scene with the correct query mode.  OvPhysxCfg does not carry this field.
+        sim_cfg = PhysicsManager._sim.cfg if PhysicsManager._sim is not None else None
         enable_sq = getattr(sim_cfg, "enable_scene_query_support", False)
         scene_prim.CreateAttribute("physxScene:enableSceneQuerySupport", Sdf.ValueTypeNames.Bool).Set(enable_sq)
-        print(f"[OvPhysxManager] physxScene:enableSceneQuerySupport={enable_sq} written to scene prim before USD export")
