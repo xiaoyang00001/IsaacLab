@@ -12,11 +12,31 @@ ISAAC_DIR="${ISAACLAB_PATH}/_isaac_sim"
 # but do NOT use python.sh which sets LD_PRELOAD
 source "${ISAAC_DIR}/setup_python_env.sh"
 
-# CRITICAL: Clear LD_PRELOAD to avoid Carbonite version conflict.
-# python.sh sets LD_PRELOAD=$ISAAC_DIR/kit/libcarb.so which loads
-# Carbonite 0.7 from IsaacSim, but ovphysx bundles Carbonite 0.8.
-# Both try to tear down at process exit -> segfault.
-export LD_PRELOAD=""
+# CRITICAL: Preload ovphysx's own libcarb.so (Carbonite 0.8 framework).
+#
+# setup_python_env.sh puts Kit directories on LD_LIBRARY_PATH. During the
+# training pipeline, native code can implicitly load Kit's libcarb.so (0.7
+# framework) before ovphysx bootstrap runs.  Because both .so files share
+# SONAME "libcarb.so", the dynamic linker keeps the first one it sees;
+# if that is Kit's 0.7 build, ovphysx plugins compiled against 0.8 fail
+# with "Incompatible Framework API version".
+#
+# LD_PRELOAD of the wheel's 0.8 libcarb.so forces it into the process at
+# startup, before any Kit code runs.  The 0.8 framework is backward-
+# compatible with 0.7 plugins, so Kit's own Carbonite plugins still work.
+_ovphysx_libcarb=""
+for _sp in "${ISAAC_DIR}"/kit/python/lib/python3.*/site-packages/ovphysx/plugins/libcarb.so; do
+    if [ -f "${_sp}" ]; then
+        _ovphysx_libcarb="${_sp}"
+        break
+    fi
+done
+if [ -n "${_ovphysx_libcarb}" ]; then
+    export LD_PRELOAD="${_ovphysx_libcarb}"
+else
+    export LD_PRELOAD=""
+fi
+unset _ovphysx_libcarb
 
 # Ensure pxr (OpenUSD Python bindings) is on PYTHONPATH.
 # setup_python_env.sh may not include the packman USD path after rebuilds.

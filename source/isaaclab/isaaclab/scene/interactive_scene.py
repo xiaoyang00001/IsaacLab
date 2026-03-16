@@ -250,7 +250,7 @@ class InteractiveScene:
             if self.cloner_cfg.visualizer_clone_fn is not None:
                 self.cloner_cfg.visualizer_clone_fn(self.stage, *replicate_args, device=self.cloner_cfg.device)
             if self.cloner_cfg.clone_usd:
-                cloner.usd_replicate(self.stage, *replicate_args, positions=self._default_env_origins)
+                cloner.usd_replicate(self.stage, *replicate_args)
 
     def _sensor_renderer_types(self) -> list[str]:
         """Return renderer type names used by scene sensors."""
