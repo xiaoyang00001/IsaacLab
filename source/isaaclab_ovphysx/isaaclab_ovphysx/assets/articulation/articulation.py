@@ -1616,8 +1616,11 @@ class Articulation(BaseArticulation):
             torque = self._data.applied_torque
             shape = self._effort_binding.shape
             self._effort_write_view = wp.array(
-                ptr=torque.ptr, shape=shape, dtype=wp.float32,
-                device=str(torque.device), copy=False,
+                ptr=torque.ptr,
+                shape=shape,
+                dtype=wp.float32,
+                device=str(torque.device),
+                copy=False,
             )
         else:
             self._effort_write_view = None
@@ -1929,17 +1932,19 @@ class Articulation(BaseArticulation):
         joint_table.align["Name"] = "l"
 
         for index, name in enumerate(self.joint_names):
-            joint_table.add_row([
-                index,
-                name,
-                stiffnesses[index],
-                dampings[index],
-                armatures[index],
-                frictions[index],
-                position_limits[index],
-                velocity_limits[index],
-                effort_limits[index],
-            ])
+            joint_table.add_row(
+                [
+                    index,
+                    name,
+                    stiffnesses[index],
+                    dampings[index],
+                    armatures[index],
+                    frictions[index],
+                    position_limits[index],
+                    velocity_limits[index],
+                    effort_limits[index],
+                ]
+            )
         logger.info(f"Simulation parameters for joints in {self.cfg.prim_path}:\n" + joint_table.get_string())
 
         if self.num_fixed_tendons > 0:
@@ -1971,15 +1976,17 @@ class Articulation(BaseArticulation):
             tendon_table.custom_format["Rest Length"] = format_large_number
             tendon_table.custom_format["Offset"] = format_large_number
             for index in range(self.num_fixed_tendons):
-                tendon_table.add_row([
-                    index,
-                    ft_stiffnesses[index],
-                    ft_dampings[index],
-                    ft_limit_stiffnesses[index],
-                    ft_limits[index],
-                    ft_rest_lengths[index],
-                    ft_offsets[index],
-                ])
+                tendon_table.add_row(
+                    [
+                        index,
+                        ft_stiffnesses[index],
+                        ft_dampings[index],
+                        ft_limit_stiffnesses[index],
+                        ft_limits[index],
+                        ft_rest_lengths[index],
+                        ft_offsets[index],
+                    ]
+                )
             logger.info(
                 f"Simulation parameters for fixed tendons in {self.cfg.prim_path}:\n" + tendon_table.get_string()
             )
@@ -2001,13 +2008,15 @@ class Articulation(BaseArticulation):
             ]
             tendon_table.float_format = ".3"
             for index in range(self.num_spatial_tendons):
-                tendon_table.add_row([
-                    index,
-                    st_stiffnesses[index],
-                    st_dampings[index],
-                    st_limit_stiffnesses[index],
-                    st_offsets[index],
-                ])
+                tendon_table.add_row(
+                    [
+                        index,
+                        st_stiffnesses[index],
+                        st_dampings[index],
+                        st_limit_stiffnesses[index],
+                        st_offsets[index],
+                    ]
+                )
             logger.info(
                 f"Simulation parameters for spatial tendons in {self.cfg.prim_path}:\n" + tendon_table.get_string()
             )

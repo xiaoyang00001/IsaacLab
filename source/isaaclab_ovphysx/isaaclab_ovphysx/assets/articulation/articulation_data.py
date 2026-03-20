@@ -1515,5 +1515,3 @@ class ArticulationData(BaseArticulationData):
             strides=sv.strides,
             device=self.device,
         )
-
-
