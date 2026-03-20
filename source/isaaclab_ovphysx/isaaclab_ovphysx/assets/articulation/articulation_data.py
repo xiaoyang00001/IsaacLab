@@ -14,18 +14,20 @@ import numpy as np
 import warp as wp
 
 from isaaclab.assets.articulation.base_articulation_data import BaseArticulationData
+from isaaclab.utils.buffers import TimestampedBufferWarp as TimestampedBuffer
 
 from isaaclab_ovphysx import tensor_types as TT
 
-
-class TimestampedBuffer:
-    """A warp array that tracks when it was last refreshed from the simulation."""
-
-    __slots__ = ("data", "timestamp")
-
-    def __init__(self, shape, device: str, dtype):
-        self.data = wp.zeros(shape, dtype=dtype, device=device)
-        self.timestamp: float = -1.0
+from .kernels import (
+    _compose_body_com_poses,
+    _compose_root_com_pose,
+    _compute_heading,
+    _copy_first_body,
+    _fd_joint_acc,
+    _projected_gravity,
+    _world_vel_to_body_ang,
+    _world_vel_to_body_lin,
+)
 
 
 class ArticulationData(BaseArticulationData):
@@ -68,6 +70,7 @@ class ArticulationData(BaseArticulationData):
         self._bindings = bindings
         self._binding_getter = binding_getter
         self._sim_timestamp: float = 0.0
+        self._is_primed = False
 
         # Metadata from an arbitrary articulation binding.
         sample = next(iter(bindings.values()))
@@ -83,6 +86,25 @@ class ArticulationData(BaseArticulationData):
 
         self._num_fixed_tendons = 0
         self._num_spatial_tendons = 0
+
+        # Initialize parametric gravity and forward vectors (matching PhysX/Newton pattern).
+        # Guard against None sim context (e.g. mock/test environments).
+        from isaaclab.physics import PhysicsManager
+
+        gravity = (0.0, 0.0, -9.81)
+        if PhysicsManager._sim is not None and hasattr(PhysicsManager._sim, "cfg"):
+            gravity = PhysicsManager._sim.cfg.gravity
+        gravity_np = np.array(gravity, dtype=np.float32)
+        gravity_mag = np.linalg.norm(gravity_np)
+        if gravity_mag == 0.0:
+            gravity_dir = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        else:
+            gravity_dir = gravity_np / gravity_mag
+        gravity_dir_tiled = np.tile(gravity_dir, (self._num_instances, 1))
+        forward_tiled = np.tile(np.array([1.0, 0.0, 0.0], dtype=np.float32), (self._num_instances, 1))
+
+        self.GRAVITY_VEC_W = wp.from_numpy(gravity_dir_tiled, dtype=wp.vec3f, device=device)
+        self.FORWARD_VEC_B = wp.from_numpy(forward_tiled, dtype=wp.vec3f, device=device)
 
     def update(self, dt: float) -> None:
         """Update the data for the articulation.
@@ -103,7 +125,28 @@ class ArticulationData(BaseArticulationData):
                 device=self.device,
             )
             self._joint_acc.timestamp = self._sim_timestamp
-            wp.copy(self._previous_joint_vel, cur_vel)
+
+    @property
+    def is_primed(self) -> bool:
+        """Whether the articulation data is fully instantiated and ready to use."""
+        return self._is_primed
+
+    @is_primed.setter
+    def is_primed(self, value: bool) -> None:
+        """Set whether the articulation data is fully instantiated and ready to use.
+
+        .. note::
+            Once this quantity is set to True, it cannot be changed.
+
+        Args:
+            value: The primed state.
+
+        Raises:
+            ValueError: If the articulation data is already primed.
+        """
+        if self._is_primed:
+            raise ValueError("The articulation data is already primed.")
+        self._is_primed = True
 
     """
     Names.
@@ -134,6 +177,20 @@ class ArticulationData(BaseArticulationData):
         """
         return self._default_root_pose
 
+    @default_root_pose.setter
+    def default_root_pose(self, value: wp.array) -> None:
+        """Set the default root pose.
+
+        Args:
+            value: The default root pose. Shape is (num_instances, 7).
+
+        Raises:
+            ValueError: If the articulation data is already primed.
+        """
+        if self.is_primed:
+            raise ValueError("The articulation data is already primed.")
+        self._default_root_pose.assign(value)
+
     @property
     def default_root_vel(self) -> wp.array:
         """Default root velocity ``[lin_vel, ang_vel]`` in the local environment frame.
@@ -142,6 +199,20 @@ class ArticulationData(BaseArticulationData):
         Shape is (num_instances,), dtype = wp.spatial_vectorf. In torch this resolves to (num_instances, 6).
         """
         return self._default_root_vel
+
+    @default_root_vel.setter
+    def default_root_vel(self, value: wp.array) -> None:
+        """Set the default root velocity.
+
+        Args:
+            value: The default root velocity. Shape is (num_instances, 6).
+
+        Raises:
+            ValueError: If the articulation data is already primed.
+        """
+        if self.is_primed:
+            raise ValueError("The articulation data is already primed.")
+        self._default_root_vel.assign(value)
 
     @property
     def default_joint_pos(self) -> wp.array:
@@ -154,6 +225,20 @@ class ArticulationData(BaseArticulationData):
         """
         return self._default_joint_pos
 
+    @default_joint_pos.setter
+    def default_joint_pos(self, value: wp.array) -> None:
+        """Set the default joint positions.
+
+        Args:
+            value: The default joint positions. Shape is (num_instances, num_joints).
+
+        Raises:
+            ValueError: If the articulation data is already primed.
+        """
+        if self.is_primed:
+            raise ValueError("The articulation data is already primed.")
+        self._default_joint_pos.assign(value)
+
     @property
     def default_joint_vel(self) -> wp.array:
         """Default joint velocities of all joints [m/s or rad/s, depending on joint type].
@@ -164,6 +249,20 @@ class ArticulationData(BaseArticulationData):
         This quantity is configured through the :attr:`isaaclab.assets.ArticulationCfg.init_state` parameter.
         """
         return self._default_joint_vel
+
+    @default_joint_vel.setter
+    def default_joint_vel(self, value: wp.array) -> None:
+        """Set the default joint velocities.
+
+        Args:
+            value: The default joint velocities. Shape is (num_instances, num_joints).
+
+        Raises:
+            ValueError: If the articulation data is already primed.
+        """
+        if self.is_primed:
+            raise ValueError("The articulation data is already primed.")
+        self._default_joint_vel.assign(value)
 
     """
     Joint commands -- Set into simulation.
@@ -694,7 +793,7 @@ class ArticulationData(BaseArticulationData):
             wp.launch(
                 _projected_gravity,
                 dim=self._num_instances,
-                inputs=[self.root_link_pose_w],
+                inputs=[self.GRAVITY_VEC_W, self.root_link_pose_w],
                 outputs=[self._projected_gravity_b.data],
                 device=self.device,
             )
@@ -714,7 +813,7 @@ class ArticulationData(BaseArticulationData):
             wp.launch(
                 _compute_heading,
                 dim=self._num_instances,
-                inputs=[self.root_link_pose_w],
+                inputs=[self.FORWARD_VEC_B, self.root_link_pose_w],
                 outputs=[self._heading_w.data],
                 device=self.device,
             )
@@ -1070,9 +1169,9 @@ class ArticulationData(BaseArticulationData):
         )
         return self.body_com_pose_w
 
-    # ------------------------------------------------------------------
-    # Buffer creation (called once after initialization)
-    # ------------------------------------------------------------------
+    """
+    Internal helper.
+    """
 
     def _create_buffers(self) -> None:  # noqa: C901
         super()._create_buffers()
@@ -1265,9 +1364,9 @@ class ArticulationData(BaseArticulationData):
                 if np_buf is not None and dst is not None:
                     wp.copy(dst, wp.from_numpy(np_buf, dtype=wp.float32, device=self.device))
 
-    # ------------------------------------------------------------------
-    # Binding read helpers
-    # ------------------------------------------------------------------
+    """
+    Internal helpers -- Bindings.
+    """
 
     def _get_binding(self, tensor_type: int):
         """Return a binding, lazily creating it if a binding_getter was provided."""
@@ -1301,26 +1400,26 @@ class ArticulationData(BaseArticulationData):
         self._read_scratch[tensor_type] = buf
         return buf
 
-    def _get_direct_read_callable(self, tensor_type: int, wp_array: wp.array, floats_per_elem: int = 0):
-        """Return a zero-overhead callable that reads from a binding into a buffer.
+    def _get_read_view(self, tensor_type: int, wp_array: wp.array, floats_per_elem: int = 0) -> wp.array | None:
+        """Return a stable float32 view of a warp buffer for reading from a binding.
 
-        Builds everything once: DLTensor, ctypes pointer, C function reference,
-        SDK handle, binding handle.  The returned callable does ONE thing:
-        invoke the C function.  No Python lock, no destroyed check, no SDK
-        validity check, no DLPack protocol -- just the raw ctypes call.
+        For structured-dtype buffers (transformf, spatial_vectorf), the view
+        reinterprets the same GPU memory as a flat float32 array matching the
+        binding's shape.  For plain float32 buffers, returns the array as-is.
 
-        The old tensorAPI achieves similar speed via cached TensorDesc + pybind.
+        The returned view is cached so that ``binding.read(view)`` sees the
+        same object on every call, enabling the binding's internal read cache.
         """
-        if not hasattr(self, "_direct_read_cache"):
-            self._direct_read_cache = {}
+        if not hasattr(self, "_read_view_cache"):
+            self._read_view_cache = {}
         cache_key = (tensor_type, wp_array.ptr)
-        cached = self._direct_read_cache.get(cache_key)
+        cached = self._read_view_cache.get(cache_key)
         if cached is not None:
             return cached
 
         binding = self._get_binding(tensor_type)
         if binding is None:
-            self._direct_read_cache[cache_key] = None
+            self._read_view_cache[cache_key] = None
             return None
 
         if floats_per_elem > 0:
@@ -1334,21 +1433,8 @@ class ArticulationData(BaseArticulationData):
         else:
             view = wp_array
 
-        import ctypes
-
-        from ovphysx._dlpack_utils import acquire_dltensor
-
-        dl_tensor, keepalive = acquire_dltensor(view)
-        dl_ptr = ctypes.byref(dl_tensor)
-        c_func = binding._sdk._lib.ovphysx_read_tensor_binding
-        sdk_handle = binding._sdk._omni_physx_sdk_handle.value
-        binding_handle = binding._handle
-
-        def _fast_read():
-            c_func(sdk_handle, binding_handle, dl_ptr)
-
-        self._direct_read_cache[cache_key] = (_fast_read, keepalive, view, dl_tensor)
-        return self._direct_read_cache[cache_key]
+        self._read_view_cache[cache_key] = view
+        return view
 
     def _read_binding_into_flat(self, tensor_type: int, wp_array: wp.array) -> None:
         """Read a flat binding (no structured dtype) into an existing warp array.
@@ -1361,41 +1447,38 @@ class ArticulationData(BaseArticulationData):
         binding.read(wp_array)
 
     def _read_binding_into_buf(self, tensor_type: int, buf: TimestampedBuffer) -> None:
-        """Read from an ovphysx binding into a TimestampedBuffer, skipping if fresh.
-
-        Uses a direct C call -- no Python lock, no DLPack, no validation.
-        """
+        """Read from an ovphysx binding into a TimestampedBuffer, skipping if fresh."""
         if buf.timestamp >= self._sim_timestamp:
             return
-        cached = self._get_direct_read_callable(tensor_type, buf.data)
-        if cached is None:
+        view = self._get_read_view(tensor_type, buf.data)
+        if view is None:
             return
-        cached[0]()
+        self._get_binding(tensor_type).read(view)
         buf.timestamp = self._sim_timestamp
 
     def _read_transform_binding(self, tensor_type: int, buf: TimestampedBuffer) -> None:
-        """Read a pose binding directly via cached C call."""
+        """Read a pose binding (float32 view of transformf buffer), skipping if fresh."""
         if buf.timestamp >= self._sim_timestamp:
             return
-        cached = self._get_direct_read_callable(tensor_type, buf.data, 7)
-        if cached is None:
+        view = self._get_read_view(tensor_type, buf.data, 7)
+        if view is None:
             return
-        cached[0]()
+        self._get_binding(tensor_type).read(view)
         buf.timestamp = self._sim_timestamp
 
     def _read_spatial_vector_binding(self, tensor_type: int, buf: TimestampedBuffer) -> None:
-        """Read a velocity binding directly via cached C call."""
+        """Read a velocity binding (float32 view of spatial_vectorf buffer), skipping if fresh."""
         if buf.timestamp >= self._sim_timestamp:
             return
-        cached = self._get_direct_read_callable(tensor_type, buf.data, 6)
-        if cached is None:
+        view = self._get_read_view(tensor_type, buf.data, 6)
+        if view is None:
             return
-        cached[0]()
+        self._get_binding(tensor_type).read(view)
         buf.timestamp = self._sim_timestamp
 
-    # ------------------------------------------------------------------
-    # Extraction helpers (slice pos/quat/lin_vel/ang_vel from structured)
-    # ------------------------------------------------------------------
+    """
+    Internal helpers -- Extraction.
+    """
 
     def _get_pos_from_transform(self, transform: wp.array) -> wp.array:
         return wp.array(
@@ -1434,92 +1517,3 @@ class ArticulationData(BaseArticulationData):
         )
 
 
-# ======================================================================
-# Warp kernels
-# ======================================================================
-
-
-@wp.kernel
-def _fd_joint_acc(
-    cur_vel: wp.array2d(dtype=wp.float32),
-    prev_vel: wp.array2d(dtype=wp.float32),
-    inv_dt: float,
-    out: wp.array2d(dtype=wp.float32),
-):
-    i, j = wp.tid()
-    out[i, j] = (cur_vel[i, j] - prev_vel[i, j]) * inv_dt
-
-
-@wp.kernel
-def _copy_first_body(
-    body_vel: wp.array(dtype=wp.spatial_vectorf, ndim=2),
-    root_vel: wp.array(dtype=wp.spatial_vectorf),
-):
-    i = wp.tid()
-    root_vel[i] = body_vel[i, 0]
-
-
-@wp.kernel
-def _compose_root_com_pose(
-    link_pose: wp.array(dtype=wp.transformf),
-    com_pose_b: wp.array(dtype=wp.transformf, ndim=2),
-    com_pose_w: wp.array(dtype=wp.transformf),
-):
-    i = wp.tid()
-    com_pose_w[i] = wp.transform_multiply(link_pose[i], com_pose_b[i, 0])
-
-
-@wp.kernel
-def _compose_body_com_poses(
-    link_pose: wp.array(dtype=wp.transformf, ndim=2),
-    com_pose_b: wp.array(dtype=wp.transformf, ndim=2),
-    com_pose_w: wp.array(dtype=wp.transformf, ndim=2),
-):
-    i, j = wp.tid()
-    com_pose_w[i, j] = wp.transform_multiply(link_pose[i, j], com_pose_b[i, j])
-
-
-@wp.kernel
-def _projected_gravity(
-    root_pose: wp.array(dtype=wp.transformf),
-    out: wp.array(dtype=wp.vec3f),
-):
-    i = wp.tid()
-    q = wp.transform_get_rotation(root_pose[i])
-    gravity_w = wp.vec3f(0.0, 0.0, -1.0)
-    out[i] = wp.quat_rotate_inv(q, gravity_w)
-
-
-@wp.kernel
-def _compute_heading(
-    root_pose: wp.array(dtype=wp.transformf),
-    out: wp.array(dtype=wp.float32),
-):
-    i = wp.tid()
-    q = wp.transform_get_rotation(root_pose[i])
-    forward = wp.quat_rotate(q, wp.vec3f(1.0, 0.0, 0.0))
-    out[i] = wp.atan2(forward[1], forward[0])
-
-
-@wp.kernel
-def _world_vel_to_body_lin(
-    root_pose: wp.array(dtype=wp.transformf),
-    vel_w: wp.array(dtype=wp.spatial_vectorf),
-    out: wp.array(dtype=wp.vec3f),
-):
-    i = wp.tid()
-    q = wp.transform_get_rotation(root_pose[i])
-    lin = wp.spatial_top(vel_w[i])
-    out[i] = wp.quat_rotate_inv(q, lin)
-
-
-@wp.kernel
-def _world_vel_to_body_ang(
-    root_pose: wp.array(dtype=wp.transformf),
-    vel_w: wp.array(dtype=wp.spatial_vectorf),
-    out: wp.array(dtype=wp.vec3f),
-):
-    i = wp.tid()
-    q = wp.transform_get_rotation(root_pose[i])
-    ang = wp.spatial_bottom(vel_w[i])
-    out[i] = wp.quat_rotate_inv(q, ang)

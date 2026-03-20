@@ -51,6 +51,7 @@ class OvPhysxManager(PhysicsManager):
     # physx.clone() in _warmup_and_load().
     # parent_positions is a list of (x, y, z) tuples — one per target.
     _pending_clones: ClassVar[list[tuple[str, list[str], list[tuple[float, float, float]]]]] = []
+    _atexit_registered: ClassVar[bool] = False
 
     @classmethod
     def register_clone(
@@ -231,11 +232,14 @@ class OvPhysxManager(PhysicsManager):
         #
         # Proper long-term fix: ovphysx ships a fully namespace-isolated Carbonite
         # (different soname / hidden visibility) so its symbols never collide with kit's.
-        def _atexit_release_and_exit():
-            cls._release_physx()
-            os._exit(0)
+        if not cls._atexit_registered:
 
-        atexit.register(_atexit_release_and_exit)
+            def _atexit_release_and_exit():
+                cls._release_physx()
+                os._exit(0)
+
+            atexit.register(_atexit_release_and_exit)
+            cls._atexit_registered = True
 
         usd_handle, op_idx = cls._physx.add_usd(stage_file)
         cls._physx.wait_op(op_idx)
