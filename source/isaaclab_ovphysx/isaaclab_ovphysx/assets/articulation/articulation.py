@@ -217,44 +217,53 @@ class Articulation(BaseArticulation):
     def find_fixed_tendons(
         self,
         name_keys: str | Sequence[str],
-        tendon_subsets: list[int] | None = None,
+        tendon_subsets: list[str] | None = None,
         preserve_order: bool = False,
     ) -> tuple[list[int], list[str]]:
         """Find fixed tendons in the articulation based on the name keys.
 
         Args:
-            name_keys: A regular expression or a list of regular expressions to match the tendon names.
-            tendon_subsets: A subset of tendon indices to search within. Defaults to None.
-            preserve_order: Whether to preserve the order of the name keys in the output. Defaults to False.
+            name_keys: A regular expression or a list of regular expressions
+                to match the joint names with fixed tendons.
+            tendon_subsets: A subset of joints with fixed tendons to search
+                for. Defaults to None, which means all joints in the
+                articulation are searched.
+            preserve_order: Whether to preserve the order of the name keys in
+                the output. Defaults to False.
 
         Returns:
             A tuple of lists containing the tendon indices and names.
         """
-        names = self.fixed_tendon_names
-        if not names:
+        if tendon_subsets is None:
+            tendon_subsets = self.fixed_tendon_names
+        if not tendon_subsets:
             return [], []
-        return self._find_names(names, name_keys, preserve_order)
+        return self._find_names(tendon_subsets, name_keys, preserve_order)
 
     def find_spatial_tendons(
         self,
         name_keys: str | Sequence[str],
-        tendon_subsets: list[int] | None = None,
+        tendon_subsets: list[str] | None = None,
         preserve_order: bool = False,
     ) -> tuple[list[int], list[str]]:
         """Find spatial tendons in the articulation based on the name keys.
 
         Args:
-            name_keys: A regular expression or a list of regular expressions to match the tendon names.
-            tendon_subsets: A subset of tendon indices to search within. Defaults to None.
-            preserve_order: Whether to preserve the order of the name keys in the output. Defaults to False.
+            name_keys: A regular expression or a list of regular expressions
+                to match the tendon names.
+            tendon_subsets: A subset of tendons to search for. Defaults to
+                None, which means all tendons in the articulation are searched.
+            preserve_order: Whether to preserve the order of the name keys in
+                the output. Defaults to False.
 
         Returns:
             A tuple of lists containing the tendon indices and names.
         """
-        names = self.spatial_tendon_names
-        if not names:
+        if tendon_subsets is None:
+            tendon_subsets = self.spatial_tendon_names
+        if not tendon_subsets:
             return [], []
-        return self._find_names(names, name_keys, preserve_order)
+        return self._find_names(tendon_subsets, name_keys, preserve_order)
 
     """
     Operations - State Writers.
@@ -1467,7 +1476,8 @@ class Articulation(BaseArticulation):
     ) -> None:
         """Deprecated in base class. Use :meth:`write_root_pose_to_sim_index` and
         :meth:`write_root_velocity_to_sim_index` instead."""
-        self.write_root_pose_to_sim_index(root_pose=root_state, env_ids=env_ids)
+        self._write_root_state(TT.ROOT_POSE, root_state[:, :7], env_ids)
+        self._write_root_state(TT.ROOT_VELOCITY, root_state[:, 7:], env_ids)
 
     def write_root_com_state_to_sim(
         self,
@@ -1476,7 +1486,8 @@ class Articulation(BaseArticulation):
     ) -> None:
         """Deprecated in base class. Use :meth:`write_root_com_pose_to_sim_index` and
         :meth:`write_root_com_velocity_to_sim_index` instead."""
-        self.write_root_com_pose_to_sim_index(root_pose=root_state, env_ids=env_ids)
+        self._write_root_state(TT.ROOT_POSE, root_state[:, :7], env_ids)
+        self._write_root_state(TT.ROOT_VELOCITY, root_state[:, 7:], env_ids)
 
     def write_root_link_state_to_sim(
         self,
@@ -1485,7 +1496,8 @@ class Articulation(BaseArticulation):
     ) -> None:
         """Deprecated in base class. Use :meth:`write_root_link_pose_to_sim_index` and
         :meth:`write_root_link_velocity_to_sim_index` instead."""
-        self.write_root_link_pose_to_sim_index(root_pose=root_state, env_ids=env_ids)
+        self._write_root_state(TT.ROOT_POSE, root_state[:, :7], env_ids)
+        self._write_root_state(TT.ROOT_VELOCITY, root_state[:, 7:], env_ids)
 
     def write_joint_state_to_sim(
         self,

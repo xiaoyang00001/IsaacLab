@@ -30,11 +30,18 @@ _hidden_pxr = {}
 for _k in list(_sys.modules):
     if _k == "pxr" or _k.startswith("pxr."):
         _hidden_pxr[_k] = _sys.modules.pop(_k)
-import ovphysx  # noqa: E402
+# The CI isaaclab_ov* pattern unintentionally collects isaaclab_ovphysx tests,
+# but the ovphysx wheel is not installed in that environment. Skip gracefully
+# so the isaaclab_ov CI pipeline is not blocked by an unrelated dependency.
+try:
+    import ovphysx  # noqa: E402
 
-ovphysx.bootstrap()
-_sys.modules.update(_hidden_pxr)
-del _hidden_pxr
+    ovphysx.bootstrap()
+except (ImportError, AttributeError) as exc:
+    pytest.skip(f"ovphysx wheel not available: {exc}", allow_module_level=True)
+finally:
+    _sys.modules.update(_hidden_pxr)
+    del _hidden_pxr
 
 CARTPOLE_USD = os.path.join(
     os.path.dirname(__file__), "..", "data", "cartpole.usda"

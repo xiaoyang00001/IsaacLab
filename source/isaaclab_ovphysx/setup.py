@@ -30,7 +30,16 @@ setup(
     package_data={"": ["*.pyi"]},
     python_requires=">=3.11",
     install_requires=INSTALL_REQUIRES,
-    packages=["isaaclab_ovphysx"],
+    packages=[
+        "isaaclab_ovphysx",
+        "isaaclab_ovphysx.assets",
+        "isaaclab_ovphysx.assets.articulation",
+        "isaaclab_ovphysx.cloner",
+        "isaaclab_ovphysx.physics",
+        "isaaclab_ovphysx.test",
+        "isaaclab_ovphysx.test.mock_interfaces",
+        "isaaclab_ovphysx.test.mock_interfaces.views",
+    ],
     classifiers=[
         "Natural Language :: English",
         "Programming Language :: Python :: 3.11",

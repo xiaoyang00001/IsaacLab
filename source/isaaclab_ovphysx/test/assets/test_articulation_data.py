@@ -6,8 +6,15 @@
 """Unit tests for ovphysx articulation data helpers."""
 
 import numpy as np
+import pytest
 import warp as wp
-from isaaclab_ovphysx import tensor_types as TT
+
+# The CI isaaclab_ov* pattern unintentionally collects isaaclab_ovphysx tests,
+# but the ovphysx wheel is not installed in that environment. Skip gracefully
+# so the isaaclab_ov CI pipeline is not blocked by an unrelated dependency.
+pytest.importorskip("ovphysx.types", reason="ovphysx wheel not installed")
+
+from isaaclab_ovphysx import tensor_types as TT  # noqa: E402
 from isaaclab_ovphysx.assets.articulation.articulation_data import ArticulationData
 from isaaclab_ovphysx.test.mock_interfaces.views import MockOvPhysxBindingSet
 
