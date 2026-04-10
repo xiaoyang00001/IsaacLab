@@ -101,11 +101,18 @@
     if (xhr.status === 200) {
       try {
         var versions = JSON.parse(xhr.responseText);
+        if (!Array.isArray(versions)) {
+          console.warn("[version-switcher] versions.json is not an array");
+          return;
+        }
         createSwitcher(versions);
       } catch (e) {
-        // Silently fail — old page without valid JSON.
+        console.warn("[version-switcher] Failed to parse versions.json:", e.message);
       }
     }
+  };
+  xhr.onerror = function () {
+    console.warn("[version-switcher] Network error fetching", JSON_URL);
   };
   xhr.send();
 })();
