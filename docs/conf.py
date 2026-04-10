@@ -218,6 +218,10 @@ suppress_warnings = [
     # analysis. Since those hints are actual hints that *CANNOT* by definition
     # by canonicalized, our only recourse is to squelch warnings altogether.
     "ref.python",
+    # Sphinx 7+ emits warnings when autosummary entries use fully-qualified
+    # names that include the current module. These are cosmetic and do not
+    # affect the generated output.
+    "autosummary.import_cycle",
 ]
 
 # -- Internationalization ----------------------------------------------------
