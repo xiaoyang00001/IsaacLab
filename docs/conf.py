@@ -152,7 +152,17 @@ templates_path = []
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ["_build", "_redirect", "_templates", "Thumbs.db", ".DS_Store", "README.md", "licenses/*", "plans"]
+exclude_patterns = [
+    "_build",
+    "_redirect",
+    "_templates",
+    "Thumbs.db",
+    ".DS_Store",
+    "README.md",
+    "licenses/*",
+    "plans",
+    "superpowers",
+]
 
 # Mock out modules that are not available on RTD
 autodoc_mock_imports = [
@@ -233,6 +243,11 @@ suppress_warnings = [
     # analysis. Since those hints are actual hints that *CANNOT* by definition
     # by canonicalized, our only recourse is to squelch warnings altogether.
     "ref.python",
+    # The pydata-sphinx-theme version switcher fetches versions.json at build
+    # time to validate it. Before the first deploy, the file does not exist on
+    # gh-pages, causing a 404 that becomes a warning. Suppress it so -W builds
+    # don't fail on PRs.
+    "config.invalid_switcher_json",
 ]
 
 # -- Internationalization ----------------------------------------------------
