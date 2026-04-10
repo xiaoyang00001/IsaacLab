@@ -54,7 +54,7 @@ with open(os.path.join(os.path.dirname(__file__), "..", "VERSION")) as f:
 
 # CI sets DOCS_VERSION_SLUG (e.g. "main", "develop", "v2.3.2") for the
 # version switcher. Local builds fall back to the semver from VERSION.
-_version_slug = os.getenv("DOCS_VERSION_SLUG", version)
+_version_slug = os.getenv("DOCS_VERSION_SLUG") or version
 
 # -- General configuration ---------------------------------------------------
 

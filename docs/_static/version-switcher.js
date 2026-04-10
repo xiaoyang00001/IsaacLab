@@ -109,6 +109,8 @@
       } catch (e) {
         console.warn("[version-switcher] Failed to parse versions.json:", e.message);
       }
+    } else if (xhr.status !== 0) {
+      console.warn("[version-switcher] versions.json returned HTTP", xhr.status);
     }
   };
   xhr.onerror = function () {
