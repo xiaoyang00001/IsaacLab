@@ -1,0 +1,172 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+name: Docs Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (build but don't deploy)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  build-version:
+    name: Build ${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ref:
+          - main
+          - develop
+          - release/2.1.0
+          - release/2.2.0
+          - release/2.3.0
+          - v1.0.0
+          - v1.1.0
+          - v1.2.0
+          - v1.3.0
+          - v1.4.0
+          - v1.4.1
+          - v2.0.0
+          - v2.0.1
+          - v2.0.2
+          - v2.1.0
+          - v2.1.1
+          - v2.2.0
+          - v2.2.1
+          - v2.3.0
+          - v2.3.1
+          - v2.3.2
+          - v3.0.0-beta
+      fail-fast: false
+
+    steps:
+    - name: Checkout ref
+      uses: actions/checkout@v6
+      with:
+        ref: ${{ matrix.ref }}
+
+    - name: Setup python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        architecture: x64
+
+    - name: Install dev requirements
+      working-directory: ./docs
+      run: pip install -r requirements.txt
+
+    - name: Determine slug
+      id: slug
+      run: |
+        REF="${{ matrix.ref }}"
+        # For branches with slashes, replace / with -
+        SLUG="${REF//\//-}"
+        echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+        echo "Slug: $SLUG"
+
+    - name: Build docs
+      working-directory: ./docs
+      # No -W flag: old versions may have warnings that are acceptable.
+      run: |
+        rm -rf "_build"
+        sphinx-build -b html . "_build"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: docs-${{ steps.slug.outputs.slug }}
+        path: ./docs/_build
+
+  deploy-all:
+    name: Deploy All Versions
+    runs-on: ubuntu-latest
+    needs: [build-version]
+    if: ${{ inputs.dry_run == 'false' }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        sparse-checkout: |
+          docs/_static/version-switcher.js
+          docs/_redirect/index.html
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v8
+      with:
+        path: ./artifacts
+
+    - name: Assemble site
+      run: |
+        mkdir -p site
+
+        # Move each artifact into its versioned directory
+        for dir in artifacts/docs-*; do
+          SLUG="${dir#artifacts/docs-}"
+          echo "Assembling: $SLUG"
+          cp -r "$dir" "site/${SLUG}"
+        done
+
+        # Inject version-switcher.js into every HTML file across all versions
+        find site/ -name "*.html" -exec sed -i \
+          's|</body>|<script src="/IsaacLab/version-switcher.js"></script></body>|' {} +
+
+        # Copy static assets to root
+        cp docs/_static/version-switcher.js site/version-switcher.js
+        cp docs/_redirect/index.html site/index.html
+
+    - name: Generate versions.json
+      run: |
+        python3 -c "
+        import json, os
+
+        versions = []
+        for name in sorted(os.listdir('site')):
+            path = os.path.join('site', name)
+            if not os.path.isdir(path):
+                continue
+            entry = {
+                'name': name,
+                'version': name,
+                'url': '/IsaacLab/' + name + '/',
+            }
+            versions.append(entry)
+
+        # Sort: branches first, then releases, then tags
+        def sort_key(v):
+            s = v['version']
+            if s == 'main':
+                return (0, s)
+            elif s == 'develop':
+                return (1, s)
+            elif s.startswith('release-'):
+                return (2, s)
+            else:
+                return (3, s)
+
+        versions.sort(key=sort_key)
+
+        with open('site/versions.json', 'w') as f:
+            json.dump(versions, f, indent=2)
+            f.write('\n')
+
+        print('Generated versions.json with', len(versions), 'entries:')
+        for v in versions:
+            print(f'  {v[\"version\"]}')
+        "
+
+    - name: Deploy to gh-pages
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./site
+        keep_files: false
