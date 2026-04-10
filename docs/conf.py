@@ -52,6 +52,10 @@ with open(os.path.join(os.path.dirname(__file__), "..", "VERSION")) as f:
     full_version = f.read().strip()
     version = ".".join(full_version.split(".")[:3])
 
+# CI sets DOCS_VERSION_SLUG (e.g. "main", "develop", "v2.3.2") for the
+# version switcher. Local builds fall back to the semver from VERSION.
+_version_slug = os.getenv("DOCS_VERSION_SLUG", version)
+
 # -- General configuration ---------------------------------------------------
 
 # Add any Sphinx extension module names here, as strings. They can be
@@ -74,7 +78,6 @@ extensions = [
     "sphinx_copybutton",
     "sphinx_design",
     "sphinx_tabs.tabs",  # backwards compatibility for building docs on v1.0.0
-    "sphinx_multiversion",
 ]
 
 # mathjax hacks
@@ -290,21 +293,14 @@ html_theme_options = {
         },
     ],
     "icon_links_label": "Quick Links",
+    "switcher": {
+        "json_url": "https://isaac-sim.github.io/IsaacLab/versions.json",
+        "version_match": _version_slug,
+    },
+    "navbar_end": ["version-switcher", "theme-switcher", "navbar-icon-links"],
 }
 
-templates_path = [
-    "_templates",
-]
-
-# Whitelist pattern for remotes
-smv_remote_whitelist = r"^.*$"
-# Whitelist pattern for branches (set to None to ignore all branches)
-smv_branch_whitelist = os.getenv("SMV_BRANCH_WHITELIST", r"^(main|develop|release/.*)$")
-# Whitelist pattern for tags (set to None to ignore all tags)
-smv_tag_whitelist = os.getenv("SMV_TAG_WHITELIST", r"^v[1-9]\d*\.\d+\.\d+$")
-html_sidebars = {
-    "**": ["navbar-logo.html", "versioning.html", "icon-links.html", "search-field.html", "sbt-sidebar-nav.html"]
-}
+html_sidebars = {"**": ["navbar-logo.html", "icon-links.html", "search-field.html", "sbt-sidebar-nav.html"]}
 
 
 # -- Advanced configuration -------------------------------------------------
