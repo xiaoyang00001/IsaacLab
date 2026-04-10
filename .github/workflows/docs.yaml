@@ -151,6 +151,9 @@ jobs:
         TOTAL=$(find "site/${SLUG}" -name "*.html" | wc -l)
         INJECTED=$(grep -rl 'version-switcher.js' "site/${SLUG}" --include="*.html" | wc -l)
         echo "Injected version-switcher.js into ${INJECTED}/${TOTAL} HTML files"
+        if [ "$TOTAL" -gt 0 ] && [ "$INJECTED" -ne "$TOTAL" ]; then
+          echo "::warning::version-switcher.js injection missed $((TOTAL - INJECTED)) of ${TOTAL} HTML files"
+        fi
 
         # Copy static assets to site root
         cp docs/_static/version-switcher.js site/version-switcher.js
@@ -160,6 +163,7 @@ jobs:
       env:
         SLUG: ${{ steps.slug.outputs.slug }}
         GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         # Fetch existing versions.json from gh-pages branch (avoids CDN cache).
         if gh api "repos/${GH_REPO}/contents/versions.json?ref=gh-pages" \

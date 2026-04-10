@@ -130,6 +130,15 @@ jobs:
         find site/ -name "*.html" -exec sed -i \
           's|</body>|<script src="/IsaacLab/version-switcher.js"></script></body>|' {} +
 
+        # Verify injection
+        TOTAL=$(find site/ -name "*.html" | wc -l)
+        INJECTED=$(grep -rl 'version-switcher.js' site/ --include="*.html" | wc -l)
+        echo "Injected version-switcher.js into ${INJECTED}/${TOTAL} HTML files"
+        if [ "$TOTAL" -gt 0 ] && [ "$INJECTED" -eq 0 ]; then
+          echo "::error::version-switcher.js injection found zero matches in ${TOTAL} HTML files"
+          exit 1
+        fi
+
         # Copy static assets to root
         cp docs/_static/version-switcher.js site/version-switcher.js
         cp docs/_redirect/index.html site/index.html
