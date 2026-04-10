@@ -1,6 +1,6 @@
 # for building the docs
 sphinx>=7.0,<9  # sphinx-multiversion 0.2.4 incompatible with Sphinx 9.x (Config.read() signature change)
-sphinx-book-theme==1.0.1
+sphinx-book-theme>=1.1
 myst-parser
 sphinxcontrib-bibtex==2.5.0
 autodocsumm
