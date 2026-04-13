@@ -143,10 +143,48 @@ jobs:
         cp docs/_static/version-switcher.js site/version-switcher.js
         cp docs/_redirect/index.html site/index.html
 
+    - name: Create stable alias
+      run: |
+        # Find the latest semver tag directory (highest version number)
+        LATEST_TAG=""
+        for dir in site/v*; do
+          [ -d "$dir" ] || continue
+          TAG="${dir#site/}"
+          if [ -z "$LATEST_TAG" ] || python3 -c "
+        import sys, re
+        def vt(s): return tuple(int(n) for n in re.findall(r'\d+', s))
+        sys.exit(0 if vt(sys.argv[1]) > vt(sys.argv[2]) else 1)
+        " "$TAG" "$LATEST_TAG" 2>/dev/null; then
+            LATEST_TAG="$TAG"
+          fi
+        done
+
+        if [ -n "$LATEST_TAG" ]; then
+          echo "Creating /stable/ from ${LATEST_TAG}"
+          cp -r "site/${LATEST_TAG}" "site/stable"
+          # Update root redirect to point to /stable/
+          cat > site/index.html << 'HTMLEOF'
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Redirecting to the latest Isaac Lab documentation</title>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=./stable/index.html">
+            <link rel="canonical" href="https://isaac-sim.github.io/IsaacLab/stable/">
+          </head>
+          <body>
+            <p>Redirecting to <a href="./stable/index.html">Isaac Lab documentation</a>...</p>
+          </body>
+        </html>
+        HTMLEOF
+        else
+          echo "No tag directories found, skipping /stable/ creation"
+        fi
+
     - name: Generate versions.json
       run: |
         python3 << 'PYEOF'
-        import json, os, sys
+        import json, os, re, sys
 
         versions = []
         for name in sorted(os.listdir('site')):
@@ -164,16 +202,20 @@ jobs:
             sys.exit(1)
 
         # Sort: branches first, then releases, then tags
+        def _version_tuple(s):
+            """Extract numeric parts for semver-aware sorting."""
+            return tuple(int(n) for n in re.findall(r'\d+', s))
+
         def sort_key(v):
             s = v['version']
             if s == 'main':
-                return (0, s)
+                return (0, ())
             elif s == 'develop':
-                return (1, s)
+                return (1, ())
             elif s.startswith('release-'):
-                return (2, s)
+                return (2, _version_tuple(s))
             else:
-                return (3, s)
+                return (3, _version_tuple(s))
 
         versions.sort(key=sort_key)
 
