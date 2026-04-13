@@ -224,7 +224,7 @@ def setup_sim():
 
 @pytest.mark.isaacsim_ci
 def test_constant_velocity(setup_sim):
-    """Test the Pva sensor with a constant velocity.
+    """Test the PVA sensor with a constant velocity.
 
     Expected behavior is that the linear and angular are approx the same at every time step as in each step we set
     the same velocity and therefore reset the physx buffers.
@@ -313,7 +313,7 @@ def test_constant_velocity(setup_sim):
 
 @pytest.mark.isaacsim_ci
 def test_constant_acceleration(setup_sim):
-    """Test the Pva sensor with a constant acceleration."""
+    """Test the PVA sensor with a constant acceleration."""
     sim, scene = setup_sim
     for idx in range(100):
         # set acceleration
@@ -357,7 +357,7 @@ def test_constant_acceleration(setup_sim):
 
 @pytest.mark.isaacsim_ci
 def test_single_dof_pendulum(setup_sim):
-    """Test pva against analytical pendulum problem."""
+    """Test PVA against analytical pendulum problem."""
     sim, scene = setup_sim
     # pendulum length
     pend_length = PEND_POS_OFFSET[0]
@@ -494,7 +494,7 @@ def test_single_dof_pendulum(setup_sim):
 
 @pytest.mark.isaacsim_ci
 def test_indirect_attachment(setup_sim):
-    """Test attaching the pva through an xForm primitive configuration argument."""
+    """Test attaching the PVA sensor through an xForm primitive configuration argument."""
     sim, scene = setup_sim
     # pendulum length
     pend_length = PEND_POS_OFFSET[0]
@@ -720,8 +720,10 @@ def test_offset_calculation(setup_sim):
 
 @pytest.mark.isaacsim_ci
 def test_attachment_validity(setup_sim):
-    """Test invalid pva attachment. A pva cannot be attached directly to the world. It must be somehow attached to
-    something implementing physics."""
+    """Test invalid PVA attachment. A PVA sensor cannot be attached directly to the world.
+
+    It must be somehow attached to something implementing physics.
+    """
     sim, scene = setup_sim
     pva_world_cfg = PvaCfg(prim_path="/World/envs/env_0")
     with pytest.raises(RuntimeError) as exc_info:

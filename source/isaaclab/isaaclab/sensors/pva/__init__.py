@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Pva Sensor
+PVA Sensor
 """
 
 from isaaclab.utils.module import lazy_export

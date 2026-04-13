@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class PvaData(BasePvaData):
-    """Data container for the PhysX Pva sensor."""
+    """Data container for the PhysX PVA sensor."""
 
     @property
     def pose_w(self) -> wp.array:

@@ -63,7 +63,7 @@ class Pva(BasePva):
     """The name of the backend for the PVA sensor."""
 
     def __init__(self, cfg: PvaCfg):
-        """Initializes the Pva sensor.
+        """Initializes the PVA sensor.
 
         Args:
             cfg: The configuration parameters.
@@ -79,7 +79,7 @@ class Pva(BasePva):
     def __str__(self) -> str:
         """Returns: A string containing information about the instance."""
         return (
-            f"Pva sensor @ '{self.cfg.prim_path}': \n"
+            f"PVA sensor @ '{self.cfg.prim_path}': \n"
             f"\tview type         : {self._view.__class__}\n"
             f"\tupdate period (s) : {self.cfg.update_period}\n"
             f"\tnumber of sensors : {self._view.count}\n"

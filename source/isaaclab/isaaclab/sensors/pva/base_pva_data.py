@@ -13,7 +13,7 @@ import warp as wp
 
 
 class BasePvaData(ABC):
-    """Data container for the Pva sensor.
+    """Data container for the PVA sensor.
 
     This base class defines the interface for PVA sensor data. Backend-specific
     implementations should inherit from this class and provide the actual data storage.

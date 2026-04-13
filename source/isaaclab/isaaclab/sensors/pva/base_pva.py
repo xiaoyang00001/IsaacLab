@@ -53,7 +53,7 @@ class BasePva(SensorBase):
     """The name of the backend for the PVA sensor."""
 
     def __init__(self, cfg: PvaCfg):
-        """Initializes the Pva sensor.
+        """Initializes the PVA sensor.
 
         Args:
             cfg: The configuration parameters.
