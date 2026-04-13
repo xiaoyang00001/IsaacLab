@@ -682,3 +682,66 @@ def test_composer_vs_physx_global_force_with_reset(device):
             rtol=0.0,
             atol=1e-4,
         )
+
+
+@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+def test_composer_vs_physx_payload_scenario(device):
+    """Mirrors the apply_payload MDP: permanent global downward force at CoM with gravity.
+
+    A constant world-frame downward force (payload weight) is applied via the composer
+    path vs raw PhysX. The body falls under gravity + payload, contacts the ground, and
+    orientation changes. The composer does a world->body->world round-trip each step;
+    this test catches any precision drift from that.
+    """
+    with build_simulation_context(device=device, gravity_enabled=True, auto_add_lighting=True) as sim:
+        sim._app_control_on_stop_handle = None
+        cube_composer, cube_raw = generate_dual_cube_scene(
+            num_cubes=1, height=0.5, device=device, initial_rot=ROT_45_Z, spacing=20.0
+        )
+
+        sim.reset()
+        cube_composer.update(sim.cfg.dt)
+        cube_raw.update(sim.cfg.dt)
+
+        # Record initial positions to compare displacements (cubes spawn at different Y)
+        init_pos_composer = cube_composer.data.root_pos_w.clone()
+        init_pos_raw = cube_raw.data.root_pos_w.clone()
+
+        body_ids, _ = cube_composer.find_bodies(".*")
+
+        payload_force = 2.0 * 9.81
+        forces = torch.zeros(1, len(body_ids), 3, device=device)
+        forces[..., 2] = -payload_force
+        torques = torch.zeros(1, len(body_ids), 3, device=device)
+
+        cube_composer.permanent_wrench_composer.set_forces_and_torques(
+            forces=forces, torques=torques, body_ids=body_ids, is_global=True,
+        )
+
+        raw_forces = torch.zeros(1, 3, device=device)
+        raw_forces[:, 2] = -payload_force
+        raw_torques = torch.zeros(1, 3, device=device)
+        raw_indices = cube_raw._ALL_INDICES
+
+        for _ in range(N_STEPS):
+            cube_composer.write_data_to_sim()
+            cube_raw.write_data_to_sim()
+            cube_raw.root_physx_view.apply_forces_and_torques_at_position(
+                force_data=raw_forces, torque_data=raw_torques,
+                position_data=None, indices=raw_indices, is_global=True,
+            )
+            sim.step()
+            cube_composer.update(sim.cfg.dt)
+            cube_raw.update(sim.cfg.dt)
+
+        # Compare displacements (not absolute positions — cubes have different spawn Y)
+        disp_composer = cube_composer.data.root_pos_w - init_pos_composer
+        disp_raw = cube_raw.data.root_pos_w - init_pos_raw
+
+        torch.testing.assert_close(disp_composer, disp_raw, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(
+            cube_composer.data.root_lin_vel_w, cube_raw.data.root_lin_vel_w, rtol=1e-4, atol=1e-4,
+        )
+        torch.testing.assert_close(
+            cube_composer.data.root_ang_vel_w, cube_raw.data.root_ang_vel_w, rtol=1e-4, atol=1e-4,
+        )
