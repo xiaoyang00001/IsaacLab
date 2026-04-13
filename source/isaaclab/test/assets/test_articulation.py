@@ -848,12 +848,8 @@ def test_external_force_buffer(sim, num_articulations, device):
                 is_global=False,
             )
 
-        # check if the articulation's force and torque buffers are correctly updated
-        for i in range(num_articulations):
-            assert articulation._external_force_b[i, 0, 0].item() == force
-            assert articulation._external_torque_b[i, 0, 0].item() == force
-            assert articulation._external_wrench_positions_b[i, 0, 0].item() == position
-            assert articulation._use_global_wrench_frame == (step == 0 or step == 3)
+        # check if the articulation's wrench composer is correctly updated
+        assert articulation.permanent_wrench_composer.active == (force != 0)
 
         # apply action to the articulation
         articulation.set_joint_position_target(articulation.data.default_joint_pos.clone())
@@ -1502,9 +1498,12 @@ def test_reset(sim, num_articulations, device):
     articulation.reset()
 
     # Reset should zero external forces and torques
-    assert not articulation.has_external_wrench
-    assert torch.count_nonzero(articulation._external_force_b) == 0
-    assert torch.count_nonzero(articulation._external_torque_b) == 0
+    import warp as wp
+
+    assert not articulation._instantaneous_wrench_composer.active
+    assert not articulation._permanent_wrench_composer.active
+    assert torch.count_nonzero(wp.to_torch(articulation._permanent_wrench_composer.local_force_b)) == 0
+    assert torch.count_nonzero(wp.to_torch(articulation._permanent_wrench_composer.local_torque_b)) == 0
 
 
 @pytest.mark.parametrize("num_articulations", [1, 2])

@@ -1021,6 +1021,48 @@ def apply_external_force_torque(
     asset.set_external_force_and_torque(forces, torques, env_ids=env_ids, body_ids=asset_cfg.body_ids)
 
 
+def apply_payload(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    payload_range: list[tuple[float, float]],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Apply a random downward force to bodies to simulate carrying a payload.
+
+    For each body listed in ``asset_cfg.body_ids``, a mass is sampled uniformly from the
+    corresponding entry in *payload_range* and converted to a downward force (mass * 9.81).
+    The force is applied in the **global frame** (``is_global=True``) so that it always
+    points towards the ground regardless of the body's orientation.
+
+    Args:
+        env: The environment instance.
+        env_ids: Environment indices to apply the payload to.
+        payload_range: Per-body (min, max) payload mass in kg.
+            Length must equal the number of resolved bodies in *asset_cfg*.
+        asset_cfg: Scene entity configuration identifying the asset and bodies.
+    """
+    asset: RigidObject | Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=asset.device)
+
+    num_bodies = len(asset_cfg.body_ids) if isinstance(asset_cfg.body_ids, list) else asset.num_bodies
+
+    size = (len(env_ids), num_bodies, 3)
+    force_range = [tuple(p * 9.81 for p in pr) for pr in payload_range]
+
+    forces = torch.zeros(size, device=asset.device)
+    random_values = torch.rand((len(env_ids), num_bodies), device=asset.device)
+    force_min = torch.tensor([fr[0] for fr in force_range], device=asset.device)
+    force_max = torch.tensor([fr[1] for fr in force_range], device=asset.device)
+    forces[:, :, 2] = -(force_min + random_values * (force_max - force_min))
+
+    torques = torch.zeros(size, device=asset.device)
+
+    asset.set_external_force_and_torque(
+        forces, torques, env_ids=env_ids, body_ids=asset_cfg.body_ids, is_global=True
+    )
+
+
 def push_by_setting_velocity(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,

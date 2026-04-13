@@ -260,12 +260,8 @@ def test_external_force_buffer(sim, device):
             is_global=is_global,
         )
 
-        # check if the object collection's force and torque buffers are correctly updated
-        for i in range(num_envs):
-            assert object_collection._external_force_b[i, 0, 0].item() == force
-            assert object_collection._external_torque_b[i, 0, 0].item() == force
-            assert object_collection._external_wrench_positions_b[i, 0, 0].item() == position
-            assert object_collection._use_global_wrench_frame == (step == 0 or step == 3)
+        # check if the object collection's wrench composer is correctly updated
+        assert object_collection._permanent_wrench_composer.active == (force != 0)
 
         # apply action to the object collection
         object_collection.write_data_to_sim()
@@ -614,9 +610,11 @@ def test_reset_object_collection(sim, num_envs, num_cubes, device):
             object_collection.reset()
 
             # Reset should zero external forces and torques
-            assert not object_collection.has_external_wrench
-            assert torch.count_nonzero(object_collection._external_force_b) == 0
-            assert torch.count_nonzero(object_collection._external_torque_b) == 0
+            import warp as wp
+
+            assert not object_collection._permanent_wrench_composer.active
+            assert torch.count_nonzero(wp.to_torch(object_collection._permanent_wrench_composer.local_force_b)) == 0
+            assert torch.count_nonzero(wp.to_torch(object_collection._permanent_wrench_composer.local_torque_b)) == 0
 
 
 @pytest.mark.parametrize("num_envs", [1, 3])

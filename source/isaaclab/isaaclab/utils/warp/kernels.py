@@ -131,3 +131,140 @@ wp.overload(
     reshape_tiled_image,
     {"tiled_image_buffer": wp.array(dtype=wp.float32), "batched_image": wp.array(dtype=wp.float32, ndim=4)},
 )
+
+##
+# Wrench Composer
+##
+
+
+@wp.kernel
+def set_forces_to_dual_buffers(
+    env_ids: wp.array(dtype=wp.int32),
+    body_ids: wp.array(dtype=wp.int32),
+    forces: wp.array2d(dtype=wp.vec3f),
+    torques: wp.array2d(dtype=wp.vec3f),
+    positions: wp.array2d(dtype=wp.vec3f),
+    global_force_w: wp.array2d(dtype=wp.vec3f),
+    global_torque_w: wp.array2d(dtype=wp.vec3f),
+    global_force_at_com_w: wp.array2d(dtype=wp.vec3f),
+    local_force_b: wp.array2d(dtype=wp.vec3f),
+    local_torque_b: wp.array2d(dtype=wp.vec3f),
+    is_global: bool,
+):
+    """Sets forces and torques into the appropriate global or local buffer."""
+    tid_env, tid_body = wp.tid()
+    ei = env_ids[tid_env]
+    bi = body_ids[tid_body]
+
+    if is_global:
+        if torques:
+            global_torque_w[ei, bi] = torques[tid_env, tid_body]
+        if forces:
+            if positions:
+                global_force_w[ei, bi] = forces[tid_env, tid_body]
+                if torques:
+                    global_torque_w[ei, bi] = global_torque_w[ei, bi] + wp.cross(
+                        positions[tid_env, tid_body], forces[tid_env, tid_body]
+                    )
+                else:
+                    global_torque_w[ei, bi] = wp.cross(positions[tid_env, tid_body], forces[tid_env, tid_body])
+            else:
+                global_force_at_com_w[ei, bi] = forces[tid_env, tid_body]
+    else:
+        if torques:
+            local_torque_b[ei, bi] = torques[tid_env, tid_body]
+        if forces:
+            local_force_b[ei, bi] = forces[tid_env, tid_body]
+            if positions:
+                if torques:
+                    local_torque_b[ei, bi] = local_torque_b[ei, bi] + wp.cross(
+                        positions[tid_env, tid_body], forces[tid_env, tid_body]
+                    )
+                else:
+                    local_torque_b[ei, bi] = wp.cross(positions[tid_env, tid_body], forces[tid_env, tid_body])
+
+
+@wp.kernel
+def add_forces_to_dual_buffers(
+    env_ids: wp.array(dtype=wp.int32),
+    body_ids: wp.array(dtype=wp.int32),
+    forces: wp.array2d(dtype=wp.vec3f),
+    torques: wp.array2d(dtype=wp.vec3f),
+    positions: wp.array2d(dtype=wp.vec3f),
+    global_force_w: wp.array2d(dtype=wp.vec3f),
+    global_torque_w: wp.array2d(dtype=wp.vec3f),
+    global_force_at_com_w: wp.array2d(dtype=wp.vec3f),
+    local_force_b: wp.array2d(dtype=wp.vec3f),
+    local_torque_b: wp.array2d(dtype=wp.vec3f),
+    is_global: bool,
+):
+    """Adds forces and torques into the appropriate global or local buffer."""
+    tid_env, tid_body = wp.tid()
+    ei = env_ids[tid_env]
+    bi = body_ids[tid_body]
+
+    if is_global:
+        if forces:
+            if positions:
+                global_force_w[ei, bi] = global_force_w[ei, bi] + forces[tid_env, tid_body]
+                global_torque_w[ei, bi] = global_torque_w[ei, bi] + wp.cross(
+                    positions[tid_env, tid_body], forces[tid_env, tid_body]
+                )
+            else:
+                global_force_at_com_w[ei, bi] = global_force_at_com_w[ei, bi] + forces[tid_env, tid_body]
+        if torques:
+            global_torque_w[ei, bi] = global_torque_w[ei, bi] + torques[tid_env, tid_body]
+    else:
+        if forces:
+            local_force_b[ei, bi] = local_force_b[ei, bi] + forces[tid_env, tid_body]
+            if positions:
+                local_torque_b[ei, bi] = local_torque_b[ei, bi] + wp.cross(
+                    positions[tid_env, tid_body], forces[tid_env, tid_body]
+                )
+        if torques:
+            local_torque_b[ei, bi] = local_torque_b[ei, bi] + torques[tid_env, tid_body]
+
+
+@wp.kernel
+def add_raw_wrench_buffers(
+    src_gf: wp.array2d(dtype=wp.vec3f),
+    src_gt: wp.array2d(dtype=wp.vec3f),
+    src_gfc: wp.array2d(dtype=wp.vec3f),
+    src_lf: wp.array2d(dtype=wp.vec3f),
+    src_lt: wp.array2d(dtype=wp.vec3f),
+    dst_gf: wp.array2d(dtype=wp.vec3f),
+    dst_gt: wp.array2d(dtype=wp.vec3f),
+    dst_gfc: wp.array2d(dtype=wp.vec3f),
+    dst_lf: wp.array2d(dtype=wp.vec3f),
+    dst_lt: wp.array2d(dtype=wp.vec3f),
+):
+    """Element-wise adds source wrench buffers into destination buffers."""
+    tid_env, tid_body = wp.tid()
+    dst_gf[tid_env, tid_body] = dst_gf[tid_env, tid_body] + src_gf[tid_env, tid_body]
+    dst_gt[tid_env, tid_body] = dst_gt[tid_env, tid_body] + src_gt[tid_env, tid_body]
+    dst_gfc[tid_env, tid_body] = dst_gfc[tid_env, tid_body] + src_gfc[tid_env, tid_body]
+    dst_lf[tid_env, tid_body] = dst_lf[tid_env, tid_body] + src_lf[tid_env, tid_body]
+    dst_lt[tid_env, tid_body] = dst_lt[tid_env, tid_body] + src_lt[tid_env, tid_body]
+
+
+@wp.kernel
+def compose_wrench_to_body_frame(
+    global_force_w: wp.array2d(dtype=wp.vec3f),
+    global_torque_w: wp.array2d(dtype=wp.vec3f),
+    global_force_at_com_w: wp.array2d(dtype=wp.vec3f),
+    local_force_b: wp.array2d(dtype=wp.vec3f),
+    local_torque_b: wp.array2d(dtype=wp.vec3f),
+    link_positions: wp.array2d(dtype=wp.vec3f),
+    link_quaternions: wp.array2d(dtype=wp.quatf),
+    out_force_b: wp.array2d(dtype=wp.vec3f),
+    out_torque_b: wp.array2d(dtype=wp.vec3f),
+):
+    """Composes global and local wrench buffers into a single body-frame output."""
+    tid_env, tid_body = wp.tid()
+    q = link_quaternions[tid_env, tid_body]
+    total_force_w = global_force_w[tid_env, tid_body] + global_force_at_com_w[tid_env, tid_body]
+    corrected_torque_w = global_torque_w[tid_env, tid_body] - wp.cross(
+        link_positions[tid_env, tid_body], global_force_w[tid_env, tid_body]
+    )
+    out_force_b[tid_env, tid_body] = wp.quat_rotate_inv(q, total_force_w) + local_force_b[tid_env, tid_body]
+    out_torque_b[tid_env, tid_body] = wp.quat_rotate_inv(q, corrected_torque_w) + local_torque_b[tid_env, tid_body]

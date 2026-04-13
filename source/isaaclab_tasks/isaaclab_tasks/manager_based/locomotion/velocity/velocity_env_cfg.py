@@ -182,6 +182,15 @@ class EventCfg:
         },
     )
 
+    apply_payload = EventTerm(
+        func=mdp.apply_payload,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "payload_range": [(0.5, 3.0)],
+        },
+    )
+
     # reset
     base_external_force_torque = EventTerm(
         func=mdp.apply_external_force_torque,

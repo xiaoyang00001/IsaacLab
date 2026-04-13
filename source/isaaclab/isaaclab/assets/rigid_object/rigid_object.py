@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import logging
 import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
+
+import warp as wp
 
 import omni.log
 import omni.physics.tensors.impl.api as physx
@@ -17,6 +20,9 @@ from pxr import UsdPhysics
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
 import isaaclab.utils.string as string_utils
+from isaaclab.utils.wrench_composer import WrenchComposer
+
+logger = logging.getLogger(__name__)
 
 from ..asset_base import AssetBase
 from .rigid_object_data import RigidObjectData
@@ -84,6 +90,16 @@ class RigidObject(AssetBase):
         return [path.split("/")[-1] for path in prim_paths]
 
     @property
+    def instantaneous_wrench_composer(self) -> WrenchComposer:
+        """Instantaneous wrench composer."""
+        return self._instantaneous_wrench_composer
+
+    @property
+    def permanent_wrench_composer(self) -> WrenchComposer:
+        """Permanent wrench composer."""
+        return self._permanent_wrench_composer
+
+    @property
     def root_physx_view(self) -> physx.RigidBodyView:
         """Rigid body view for the asset (PhysX).
 
@@ -100,10 +116,9 @@ class RigidObject(AssetBase):
         # resolve all indices
         if env_ids is None:
             env_ids = slice(None)
-        # reset external wrench
-        self._external_force_b[env_ids] = 0.0
-        self._external_torque_b[env_ids] = 0.0
-        self._external_wrench_positions_b[env_ids] = 0.0
+        # reset external wrenches
+        self._instantaneous_wrench_composer.reset(env_ids)
+        self._permanent_wrench_composer.reset(env_ids)
 
     def write_data_to_sim(self):
         """Write external wrench to the simulation.
@@ -113,23 +128,27 @@ class RigidObject(AssetBase):
             This ensures that the external wrench is applied at every simulation step.
         """
         # write external wrench
-        if self.has_external_wrench:
-            if self.uses_external_wrench_positions:
+        if self._instantaneous_wrench_composer.active or self._permanent_wrench_composer.active:
+            if self._instantaneous_wrench_composer.active:
+                self._instantaneous_wrench_composer.add_raw_buffers_from(self._permanent_wrench_composer)
+                self._instantaneous_wrench_composer.compose_to_body_frame()
                 self.root_physx_view.apply_forces_and_torques_at_position(
-                    force_data=self._external_force_b.view(-1, 3),
-                    torque_data=self._external_torque_b.view(-1, 3),
-                    position_data=self._external_wrench_positions_b.view(-1, 3),
-                    indices=self._ALL_INDICES,
-                    is_global=self._use_global_wrench_frame,
-                )
-            else:
-                self.root_physx_view.apply_forces_and_torques_at_position(
-                    force_data=self._external_force_b.view(-1, 3),
-                    torque_data=self._external_torque_b.view(-1, 3),
+                    force_data=self._instantaneous_wrench_composer.out_force_b_as_torch.view(-1, 3),
+                    torque_data=self._instantaneous_wrench_composer.out_torque_b_as_torch.view(-1, 3),
                     position_data=None,
                     indices=self._ALL_INDICES,
-                    is_global=self._use_global_wrench_frame,
+                    is_global=False,
                 )
+            else:
+                self._permanent_wrench_composer.compose_to_body_frame()
+                self.root_physx_view.apply_forces_and_torques_at_position(
+                    force_data=self._permanent_wrench_composer.out_force_b_as_torch.view(-1, 3),
+                    torque_data=self._permanent_wrench_composer.out_torque_b_as_torch.view(-1, 3),
+                    position_data=None,
+                    indices=self._ALL_INDICES,
+                    is_global=False,
+                )
+        self._instantaneous_wrench_composer.reset()
 
     def update(self, dt: float):
         self._data.update(dt)
@@ -414,40 +433,42 @@ class RigidObject(AssetBase):
             is_global: Whether to apply the external wrench in the global frame. Defaults to False. If set to False,
                 the external wrench is applied in the link frame of the bodies.
         """
-        if forces.any() or torques.any():
-            self.has_external_wrench = True
-        else:
-            self.has_external_wrench = False
-            # to be safe, explicitly set value to zero
-            forces = torques = 0.0
+        logger.warning(
+            "The function 'set_external_force_and_torque' will be deprecated in a future release. Please"
+            " use 'permanent_wrench_composer.set_forces_and_torques' instead."
+        )
+        if forces is None and torques is None:
+            logger.warning("No forces or torques provided. No permanent external wrench will be applied.")
 
         # resolve all indices
         # -- env_ids
         if env_ids is None:
-            env_ids = slice(None)
+            env_ids = self._ALL_INDICES_WP
+        elif not isinstance(env_ids, torch.Tensor):
+            env_ids = wp.array(env_ids, dtype=wp.int32, device=self.device)
+        else:
+            env_ids = wp.from_torch(env_ids.to(torch.int32), dtype=wp.int32)
         # -- body_ids
         if body_ids is None:
-            body_ids = slice(None)
-        # broadcast env_ids if needed to allow double indexing
-        if env_ids != slice(None) and body_ids != slice(None):
-            env_ids = env_ids[:, None]
-        # set into internal buffers
-        self._external_force_b[env_ids, body_ids] = forces
-        self._external_torque_b[env_ids, body_ids] = torques
-
-        if is_global != self._use_global_wrench_frame:
-            omni.log.warn(
-                f"The external wrench frame has been changed from {self._use_global_wrench_frame} to {is_global}. This"
-                " may lead to unexpected behavior."
+            body_ids = self._ALL_BODY_INDICES_WP
+        elif isinstance(body_ids, slice):
+            body_ids = wp.from_torch(
+                torch.arange(self.num_bodies, dtype=torch.int32, device=self.device)[body_ids], dtype=wp.int32
             )
-            self._use_global_wrench_frame = is_global
-
-        if positions is not None:
-            self.uses_external_wrench_positions = True
-            self._external_wrench_positions_b[env_ids, body_ids] = positions
+        elif not isinstance(body_ids, torch.Tensor):
+            body_ids = wp.array(body_ids, dtype=wp.int32, device=self.device)
         else:
-            if self.uses_external_wrench_positions:
-                self._external_wrench_positions_b[env_ids, body_ids] = 0.0
+            body_ids = wp.from_torch(body_ids.to(torch.int32), dtype=wp.int32)
+
+        # Write to wrench composer
+        self._permanent_wrench_composer.set_forces_and_torques(
+            forces=wp.from_torch(forces, dtype=wp.vec3f) if forces is not None else None,
+            torques=wp.from_torch(torques, dtype=wp.vec3f) if torques is not None else None,
+            positions=wp.from_torch(positions, dtype=wp.vec3f) if positions is not None else None,
+            body_ids=body_ids,
+            env_ids=env_ids,
+            is_global=is_global,
+        )
 
     """
     Internal helper.
@@ -520,14 +541,13 @@ class RigidObject(AssetBase):
         """Create buffers for storing data."""
         # constants
         self._ALL_INDICES = torch.arange(self.num_instances, dtype=torch.long, device=self.device)
+        self._ALL_BODY_INDICES = torch.arange(self.num_bodies, dtype=torch.long, device=self.device)
+        self._ALL_INDICES_WP = wp.from_torch(self._ALL_INDICES.to(torch.int32), dtype=wp.int32)
+        self._ALL_BODY_INDICES_WP = wp.from_torch(self._ALL_BODY_INDICES.to(torch.int32), dtype=wp.int32)
 
-        # external forces and torques
-        self.has_external_wrench = False
-        self._external_force_b = torch.zeros((self.num_instances, self.num_bodies, 3), device=self.device)
-        self._external_torque_b = torch.zeros_like(self._external_force_b)
-        self.uses_external_wrench_positions = False
-        self._external_wrench_positions_b = torch.zeros_like(self._external_force_b)
-        self._use_global_wrench_frame = False
+        # external wrench composer
+        self._instantaneous_wrench_composer = WrenchComposer(self)
+        self._permanent_wrench_composer = WrenchComposer(self)
 
         # set information about rigid body into data
         self._data.body_names = self.body_names

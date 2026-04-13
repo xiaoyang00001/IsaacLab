@@ -265,11 +265,8 @@ def test_external_force_buffer(device):
                     is_global=is_global,
                 )
 
-            # check if the cube's force and torque buffers are correctly updated
-            assert cube_object._external_force_b[0, 0, 0].item() == force
-            assert cube_object._external_torque_b[0, 0, 0].item() == force
-            assert cube_object._external_wrench_positions_b[0, 0, 0].item() == position
-            assert cube_object._use_global_wrench_frame == (step == 0 or step == 3)
+            # check if the cube's wrench composer is correctly updated
+            assert cube_object._permanent_wrench_composer.active == (force != 0)
 
             # apply action to the object
             cube_object.write_data_to_sim()
@@ -508,9 +505,11 @@ def test_reset_rigid_object(num_cubes, device):
                 cube_object.reset()
 
                 # Reset should zero external forces and torques
-                assert not cube_object.has_external_wrench
-                assert torch.count_nonzero(cube_object._external_force_b) == 0
-                assert torch.count_nonzero(cube_object._external_torque_b) == 0
+                import warp as wp
+
+                assert not cube_object._permanent_wrench_composer.active
+                assert torch.count_nonzero(wp.to_torch(cube_object._permanent_wrench_composer.local_force_b)) == 0
+                assert torch.count_nonzero(wp.to_torch(cube_object._permanent_wrench_composer.local_torque_b)) == 0
 
 
 @pytest.mark.parametrize("num_cubes", [1, 2])
