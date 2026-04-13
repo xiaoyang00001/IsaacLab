@@ -1,6 +1,17 @@
 Changelog
 ---------
 
+0.5.11 (2026-04-13)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added :class:`~isaaclab_newton.sensors.frame_transformer.FrameTransformer` sensor
+  wrapping Newton's ``SensorFrameTransform``. Supports per-env source/target site
+  registration, wildcard body matching, and zero-copy transform views.
+
+
 0.5.10 (2026-04-05)
 ~~~~~~~~~~~~~~~~~~~
 
