@@ -1,6 +1,38 @@
 Changelog
 ---------
 
+4.5.33 (2026-04-14)
+~~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Refactored :class:`~isaaclab.utils.wrench_composer.WrenchComposer` to a dual-buffer architecture with separate
+  global (world-frame) and local (body-frame) buffers. A new
+  :meth:`~isaaclab.utils.wrench_composer.WrenchComposer.compose_to_body_frame` method rotates global forces/torques
+  into the body frame at apply time using the current body orientation, then sums with local forces/torques.
+* Added :meth:`~isaaclab.utils.wrench_composer.WrenchComposer.add_raw_buffers_from` to merge one composer's buffers
+  into another.
+
+Deprecated
+^^^^^^^^^^
+
+* Deprecated :attr:`~isaaclab.utils.wrench_composer.WrenchComposer.composed_force` and
+  :attr:`~isaaclab.utils.wrench_composer.WrenchComposer.composed_torque` in favor of
+  :attr:`~isaaclab.utils.wrench_composer.WrenchComposer.out_force_b` and
+  :attr:`~isaaclab.utils.wrench_composer.WrenchComposer.out_torque_b`.
+
+Fixed
+^^^^^
+
+* Fixed :class:`~isaaclab.utils.wrench_composer.WrenchComposer` not correctly updating the composed torque from global
+  positional forces when the body moves.
+* Fixed :meth:`~isaaclab.utils.wrench_composer.WrenchComposer.reset` not clearing the ``_active`` flag when called
+  with ``slice(None)``.
+* Fixed :class:`~isaaclab.utils.wrench_composer.WrenchComposer` producing spurious torque when global forces are
+  applied without explicit positions.
+
+
 4.5.32 (2026-04-13)
 ~~~~~~~~~~~~~~~~~~~
 

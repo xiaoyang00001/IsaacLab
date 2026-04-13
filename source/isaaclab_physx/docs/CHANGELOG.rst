@@ -1,6 +1,24 @@
 Changelog
 ---------
 
+0.5.16 (2026-04-14)
+~~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Updated ``write_data_to_sim`` in :class:`~isaaclab_physx.assets.Articulation`,
+  :class:`~isaaclab_physx.assets.RigidObject`, and :class:`~isaaclab_physx.assets.RigidObjectCollection`
+  to use the dual-buffer :class:`~isaaclab.utils.wrench_composer.WrenchComposer`. Composed wrenches are
+  applied to PhysX with ``is_global=False`` after body-frame composition.
+
+Fixed
+^^^^^
+
+* Fixed ``set_external_force_and_torque`` wiping forces from non-resetting environments during partial
+  episode resets by using ``reset(env_ids)`` + ``add_forces_and_torques`` instead of ``set_forces_and_torques``.
+
+
 0.5.15 (2026-04-13)
 ~~~~~~~~~~~~~~~~~~~
 
