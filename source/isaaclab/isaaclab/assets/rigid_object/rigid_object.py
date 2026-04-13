@@ -134,22 +134,32 @@ class RigidObject(AssetBase):
                 composer.add_raw_buffers_from(self._permanent_wrench_composer)
             else:
                 composer = self._permanent_wrench_composer
-            global_force_w = (wp.to_torch(composer._global_force_w) + wp.to_torch(composer._global_force_at_com_w))
-            global_torque_w = wp.to_torch(composer._global_torque_w)
-            if global_force_w.any() or global_torque_w.any():
+            if self._supports_global_wrench_apply:
+                global_force_w = (wp.to_torch(composer._global_force_w) + wp.to_torch(composer._global_force_at_com_w))
+                global_torque_w = wp.to_torch(composer._global_torque_w)
+                if global_force_w.any() or global_torque_w.any():
+                    self.root_physx_view.apply_forces_and_torques_at_position(
+                        force_data=global_force_w.view(-1, 3),
+                        torque_data=global_torque_w.view(-1, 3),
+                        position_data=None,
+                        indices=self._ALL_INDICES,
+                        is_global=True,
+                    )
+                local_force_b = wp.to_torch(composer._local_force_b)
+                local_torque_b = wp.to_torch(composer._local_torque_b)
+                if local_force_b.any() or local_torque_b.any():
+                    self.root_physx_view.apply_forces_and_torques_at_position(
+                        force_data=local_force_b.view(-1, 3),
+                        torque_data=local_torque_b.view(-1, 3),
+                        position_data=None,
+                        indices=self._ALL_INDICES,
+                        is_global=False,
+                    )
+            else:
+                composer.compose_to_body_frame()
                 self.root_physx_view.apply_forces_and_torques_at_position(
-                    force_data=global_force_w.view(-1, 3),
-                    torque_data=global_torque_w.view(-1, 3),
-                    position_data=None,
-                    indices=self._ALL_INDICES,
-                    is_global=True,
-                )
-            local_force_b = wp.to_torch(composer._local_force_b)
-            local_torque_b = wp.to_torch(composer._local_torque_b)
-            if local_force_b.any() or local_torque_b.any():
-                self.root_physx_view.apply_forces_and_torques_at_position(
-                    force_data=local_force_b.view(-1, 3),
-                    torque_data=local_torque_b.view(-1, 3),
+                    force_data=composer.out_force_b_as_torch.view(-1, 3),
+                    torque_data=composer.out_torque_b_as_torch.view(-1, 3),
                     position_data=None,
                     indices=self._ALL_INDICES,
                     is_global=False,
@@ -559,6 +569,7 @@ class RigidObject(AssetBase):
         # external wrench composer
         self._instantaneous_wrench_composer = WrenchComposer(self)
         self._permanent_wrench_composer = WrenchComposer(self)
+        self._supports_global_wrench_apply = True
 
         # set information about rigid body into data
         self._data.body_names = self.body_names
