@@ -216,24 +216,41 @@ class Articulation(AssetBase):
         # write external wrench
         if self._instantaneous_wrench_composer.active or self._permanent_wrench_composer.active:
             if self._instantaneous_wrench_composer.active:
-                self._instantaneous_wrench_composer.add_raw_buffers_from(self._permanent_wrench_composer)
-                self._instantaneous_wrench_composer.compose_to_body_frame()
-                self.root_physx_view.apply_forces_and_torques_at_position(
-                    force_data=self._instantaneous_wrench_composer.out_force_b_as_torch.view(-1, 3),
-                    torque_data=self._instantaneous_wrench_composer.out_torque_b_as_torch.view(-1, 3),
-                    position_data=None,
-                    indices=self._ALL_INDICES,
-                    is_global=False,
-                )
+                composer = self._instantaneous_wrench_composer
+                composer.add_raw_buffers_from(self._permanent_wrench_composer)
             else:
-                self._permanent_wrench_composer.compose_to_body_frame()
+                composer = self._permanent_wrench_composer
+            # HACK: apply global forces directly to PhysX (no round-trip rotation)
+            global_force_w = (wp.to_torch(composer._global_force_w) + wp.to_torch(composer._global_force_at_com_w))
+            global_torque_w = wp.to_torch(composer._global_torque_w)
+            if global_force_w.any() or global_torque_w.any():
+                # DEBUG: log first env, base body
+                _f = global_force_w[0, 0]
+                _t = global_torque_w[0, 0]
+                print(f"[WRENCH_DEBUG] global force={_f.tolist()} torque={_t.tolist()} is_global=True")
                 self.root_physx_view.apply_forces_and_torques_at_position(
-                    force_data=self._permanent_wrench_composer.out_force_b_as_torch.view(-1, 3),
-                    torque_data=self._permanent_wrench_composer.out_torque_b_as_torch.view(-1, 3),
+                    force_data=global_force_w.view(-1, 3),
+                    torque_data=global_torque_w.view(-1, 3),
+                    position_data=None,
+                    indices=self._ALL_INDICES,
+                    is_global=True,
+                )
+            # Apply local forces via compose (body frame)
+            local_force_b = wp.to_torch(composer._local_force_b)
+            local_torque_b = wp.to_torch(composer._local_torque_b)
+            if local_force_b.any() or local_torque_b.any():
+                _f = local_force_b[0, 0]
+                _t = local_torque_b[0, 0]
+                print(f"[WRENCH_DEBUG] local force={_f.tolist()} torque={_t.tolist()} is_global=False")
+                self.root_physx_view.apply_forces_and_torques_at_position(
+                    force_data=local_force_b.view(-1, 3),
+                    torque_data=local_torque_b.view(-1, 3),
                     position_data=None,
                     indices=self._ALL_INDICES,
                     is_global=False,
                 )
+        else:
+            print("[WRENCH_DEBUG] inactive — no PhysX call")
         self._instantaneous_wrench_composer.reset()
 
         # apply actuator models
@@ -1040,8 +1057,9 @@ class Articulation(AssetBase):
         if forces is None and torques is None:
             logger.warning("No forces or torques provided. No permanent external wrench will be applied.")
 
-        # If all zeros, skip — matches v2.3.1 where has_external_wrench stayed False
+        # If all zeros, disable force application — matches v2.3.1's has_external_wrench = False
         if not (forces is not None and forces.any()) and not (torques is not None and torques.any()):
+            self._permanent_wrench_composer._active = False
             return
 
         # resolve all indices
