@@ -441,7 +441,6 @@ class RigidObject(AssetBase):
             logger.warning("No forces or torques provided. No permanent external wrench will be applied.")
 
         if not (forces is not None and forces.any()) and not (torques is not None and torques.any()):
-            self._permanent_wrench_composer.reset()
             return
 
         # resolve all indices

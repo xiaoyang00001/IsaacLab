@@ -1040,9 +1040,8 @@ class Articulation(AssetBase):
         if forces is None and torques is None:
             logger.warning("No forces or torques provided. No permanent external wrench will be applied.")
 
-        # If all zeros, reset the composer (matches v2.3.1 behavior of skipping PhysX calls)
+        # If all zeros, skip — matches v2.3.1 where has_external_wrench stayed False
         if not (forces is not None and forces.any()) and not (torques is not None and torques.any()):
-            self._permanent_wrench_composer.reset()
             return
 
         # resolve all indices
