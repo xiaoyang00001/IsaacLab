@@ -220,14 +220,10 @@ class Articulation(AssetBase):
                 composer.add_raw_buffers_from(self._permanent_wrench_composer)
             else:
                 composer = self._permanent_wrench_composer
-            # HACK: apply global forces directly to PhysX (no round-trip rotation)
+            # Apply global forces directly to PhysX (no round-trip rotation)
             global_force_w = (wp.to_torch(composer._global_force_w) + wp.to_torch(composer._global_force_at_com_w))
             global_torque_w = wp.to_torch(composer._global_torque_w)
             if global_force_w.any() or global_torque_w.any():
-                # DEBUG: log first env, base body
-                _f = global_force_w[0, 0]
-                _t = global_torque_w[0, 0]
-                print(f"[WRENCH_DEBUG] global force={_f.tolist()} torque={_t.tolist()} is_global=True")
                 self.root_physx_view.apply_forces_and_torques_at_position(
                     force_data=global_force_w.view(-1, 3),
                     torque_data=global_torque_w.view(-1, 3),
@@ -239,9 +235,6 @@ class Articulation(AssetBase):
             local_force_b = wp.to_torch(composer._local_force_b)
             local_torque_b = wp.to_torch(composer._local_torque_b)
             if local_force_b.any() or local_torque_b.any():
-                _f = local_force_b[0, 0]
-                _t = local_torque_b[0, 0]
-                print(f"[WRENCH_DEBUG] local force={_f.tolist()} torque={_t.tolist()} is_global=False")
                 self.root_physx_view.apply_forces_and_torques_at_position(
                     force_data=local_force_b.view(-1, 3),
                     torque_data=local_torque_b.view(-1, 3),
@@ -249,8 +242,6 @@ class Articulation(AssetBase):
                     indices=self._ALL_INDICES,
                     is_global=False,
                 )
-        else:
-            print("[WRENCH_DEBUG] inactive — no PhysX call")
         self._instantaneous_wrench_composer.reset()
 
         # apply actuator models
@@ -1082,8 +1073,10 @@ class Articulation(AssetBase):
         else:
             body_ids = wp.from_torch(body_ids.to(torch.int32), dtype=wp.int32)
 
-        # Write to wrench composer
-        self._permanent_wrench_composer.set_forces_and_torques(
+        # Write to wrench composer — reset only the target env_ids, then add
+        # (set_forces_and_torques clears ALL envs which breaks partial resets)
+        self._permanent_wrench_composer.reset(wp.to_torch(env_ids).to(torch.long))
+        self._permanent_wrench_composer.add_forces_and_torques(
             forces=wp.from_torch(forces, dtype=wp.vec3f) if forces is not None else None,
             torques=wp.from_torch(torques, dtype=wp.vec3f) if torques is not None else None,
             positions=wp.from_torch(positions, dtype=wp.vec3f) if positions is not None else None,
