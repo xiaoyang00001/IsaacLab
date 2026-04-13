@@ -1,0 +1,120 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+name: Docs (dev)
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - develop
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-secrets:
+    name: Check Secrets
+    runs-on: ubuntu-latest
+    outputs:
+      trigger-deploy: ${{ steps.trigger-deploy.outputs.defined }}
+
+    steps:
+    - id: trigger-deploy
+      env:
+        REPO_NAME: ${{ secrets.REPO_NAME }}
+      if: github.repository == env.REPO_NAME && github.ref == 'refs/heads/develop'
+      run: echo "defined=true" >> "$GITHUB_OUTPUT"
+
+  build-docs:
+    name: Build Docs
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+    - name: Setup python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: "3.12"
+        architecture: x64
+
+    - name: Install dev requirements
+      working-directory: ./docs
+      run: pip install -r requirements.txt
+
+    - name: Build docs
+      working-directory: ./docs
+      env:
+        DOCS_VERSION_SLUG: develop
+      run: make current-docs
+
+    - name: Upload docs artifact
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+      with:
+        name: docs-html
+        path: ./docs/_build
+
+  deploy-docs:
+    name: Deploy Docs
+    runs-on: ubuntu-latest
+    needs: [check-secrets, build-docs]
+    if: needs.check-secrets.outputs.trigger-deploy == 'true'
+    permissions:
+      contents: write
+    # Serialize deploys to avoid race conditions on versions.json.
+    concurrency:
+      group: docs-deploy-gh-pages
+      cancel-in-progress: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        sparse-checkout: |
+          docs/_static/version-switcher.js
+
+    - name: Download docs artifact
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: docs-html
+        path: ./artifact
+
+    - name: Assemble deploy directory
+      run: |
+        mkdir -p site
+
+        # Copy built docs into /develop/ subdirectory
+        cp -r artifact/current "site/develop"
+
+        # Inject version-switcher.js into every HTML file
+        find "site/develop" -name "*.html" -exec sed -i \
+          's|</body>|<script src="/IsaacLab/version-switcher.js"></script></body>|' {} +
+
+        # Verify injection
+        TOTAL=$(find "site/develop" -name "*.html" | wc -l)
+        INJECTED=$(grep -rl 'version-switcher.js' "site/develop" --include="*.html" | wc -l)
+        echo "Injected version-switcher.js into ${INJECTED}/${TOTAL} HTML files"
+        if [ "$TOTAL" -gt 0 ] && [ "$INJECTED" -ne "$TOTAL" ]; then
+          echo "::warning::version-switcher.js injection missed $((TOTAL - INJECTED)) of ${TOTAL} HTML files"
+        fi
+
+        # Copy version-switcher.js to site root
+        cp docs/_static/version-switcher.js site/version-switcher.js
+
+    - name: Deploy to gh-pages
+      uses: peaceiris/actions-gh-pages@4f9cc6602d3f66b9c108549d475ec49e8ef4d45e  # v4.0.0
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./site
+        keep_files: true
