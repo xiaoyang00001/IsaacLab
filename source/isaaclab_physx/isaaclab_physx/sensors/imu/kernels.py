@@ -30,8 +30,7 @@ def imu_update_kernel(
     if not env_mask[idx]:
         return
 
-    # 1. Extract body pose
-    body_pos = wp.transform_get_translation(transforms[idx])
+    # 1. Extract body orientation
     body_quat = wp.transform_get_rotation(transforms[idx])
 
     # 2. Apply sensor offset to get sensor orientation

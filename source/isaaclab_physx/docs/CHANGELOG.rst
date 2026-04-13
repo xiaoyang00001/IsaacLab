@@ -1,7 +1,7 @@
 Changelog
 ---------
 
-0.5.14 (2026-04-10)
+0.5.14 (2026-04-13)
 ~~~~~~~~~~~~~~~~~~~
 
 Changed
@@ -11,6 +11,12 @@ Changed
   :class:`~isaaclab_physx.sensors.Pva`. The ``isaaclab_physx.sensors.imu``
   module now contains a new lightweight IMU sensor that only provides angular
   velocity and linear acceleration.
+* Changed :class:`~isaaclab_physx.sensors.Pva` to no longer accept a
+  ``gravity_bias`` parameter. Linear acceleration is now pure finite
+  differencing of velocity without any gravity contribution.
+* Changed :class:`~isaaclab_physx.sensors.Imu` to unconditionally include
+  gravity in accelerometer readings. The gravity vector is queried from the
+  PhysX simulation at initialization instead of being user-configured.
 
 Added
 ^^^^^
@@ -18,6 +24,12 @@ Added
 * Added :class:`~isaaclab_physx.sensors.Imu` PhysX backend for the new
   lightweight IMU sensor with simplified Warp kernels that only compute
   angular velocity and linear acceleration.
+
+Fixed
+^^^^^
+
+* Fixed unused ``body_pos`` variable in the IMU Warp kernel.
+* Fixed ``phsyx`` typo in :class:`~isaaclab.sensors.pva.BasePva` docstring.
 
 
 0.5.13 (2026-03-25)

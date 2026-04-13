@@ -32,8 +32,7 @@ class BaseImu(SensorBase):
 
     .. note::
 
-        Accelerations are computed using numerical differentiation from velocities.
-        Consequently, the IMU sensor accuracy depends on the chosen physics timestep.
+        The accuracy of the acceleration readings depends on the physics backend and timestep.
         For sufficient accuracy, we recommend keeping the timestep at least 200 Hz.
     """
 

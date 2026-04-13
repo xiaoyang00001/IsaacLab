@@ -17,7 +17,6 @@ def pva_update_kernel(
     # sensor config (per-env)
     offset_pos_b: wp.array(dtype=wp.vec3f),
     offset_quat_b: wp.array(dtype=wp.quatf),
-    gravity_bias_w: wp.array(dtype=wp.vec3f),
     gravity_vec_w: wp.array(dtype=wp.vec3f),
     # previous velocities (read + write)
     prev_lin_vel_w: wp.array(dtype=wp.vec3f),
@@ -55,7 +54,7 @@ def pva_update_kernel(
     lin_vel_w = lin_vel_w + wp.cross(ang_vel_w, lever_arm)
 
     # 5. Numerical differentiation (world frame)
-    lin_acc_w = (lin_vel_w - prev_lin_vel_w[idx]) * inv_dt + gravity_bias_w[idx]
+    lin_acc_w = (lin_vel_w - prev_lin_vel_w[idx]) * inv_dt
     ang_acc_w = (ang_vel_w - prev_ang_vel_w[idx]) * inv_dt
 
     # 6. Rotate world -> body using sensor orientation

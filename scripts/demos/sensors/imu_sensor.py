@@ -57,7 +57,7 @@ class ImuSensorSceneCfg(InteractiveSceneCfg):
 
     imu_RF = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/LF_FOOT")
 
-    imu_LF = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/RF_FOOT", gravity_bias=(0, 0, 0))
+    imu_LF = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/RF_FOOT")
 
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):

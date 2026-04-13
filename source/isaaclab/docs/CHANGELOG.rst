@@ -1,7 +1,7 @@
 Changelog
 ---------
 
-4.5.28 (2026-04-10)
+4.5.28 (2026-04-13)
 ~~~~~~~~~~~~~~~~~~~
 
 Added
@@ -29,6 +29,13 @@ Changed
 Removed
 ^^^^^^^
 
+* Removed ``gravity_bias`` configuration parameter from
+  :class:`~isaaclab.sensors.PvaCfg`. The PVA sensor now always reports raw
+  kinematic acceleration without gravity contribution.
+* Removed ``gravity_bias`` and ``visualizer_cfg`` configuration parameters from
+  :class:`~isaaclab.sensors.ImuCfg`. The IMU sensor now unconditionally includes
+  gravity in its accelerometer readings, matching real hardware behavior. The
+  gravity vector is queried from the simulation automatically.
 * Removed ``imu_orientation`` and ``imu_projected_gravity`` observation
   functions. Use :func:`~isaaclab.envs.mdp.observations.pva_orientation` and
   :func:`~isaaclab.envs.mdp.observations.pva_projected_gravity` instead.

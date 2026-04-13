@@ -130,25 +130,15 @@ class MySceneCfg(InteractiveSceneCfg):
     )
 
     # sensors - imu (filled inside unit test)
-    imu_ball: ImuCfg = ImuCfg(
-        prim_path="{ENV_REGEX_NS}/ball",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
-    imu_cube: ImuCfg = ImuCfg(
-        prim_path="{ENV_REGEX_NS}/cube",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
-    imu_robot_imu_link: ImuCfg = ImuCfg(
-        prim_path="{ENV_REGEX_NS}/robot/imu_link",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
+    imu_ball: ImuCfg = ImuCfg(prim_path="{ENV_REGEX_NS}/ball")
+    imu_cube: ImuCfg = ImuCfg(prim_path="{ENV_REGEX_NS}/cube")
+    imu_robot_imu_link: ImuCfg = ImuCfg(prim_path="{ENV_REGEX_NS}/robot/imu_link")
     imu_robot_base: ImuCfg = ImuCfg(
         prim_path="{ENV_REGEX_NS}/robot/base",
         offset=ImuCfg.OffsetCfg(
             pos=POS_OFFSET,
             rot=ROT_OFFSET,
         ),
-        gravity_bias=(0.0, 0.0, 0.0),
     )
     imu_robot_norb: ImuCfg = ImuCfg(
         prim_path="{ENV_REGEX_NS}/robot/LF_HIP/LF_hip_fixed",
@@ -156,7 +146,6 @@ class MySceneCfg(InteractiveSceneCfg):
             pos=POS_OFFSET,
             rot=ROT_OFFSET,
         ),
-        gravity_bias=(0.0, 0.0, 0.0),
     )
     # The new URDF converter (urdf-usd-converter) places links under Geometry/ in a nested
     # kinematic tree.  With merge_fixed_joints=True the hierarchy for simple_2_link.urdf is:
@@ -164,7 +153,6 @@ class MySceneCfg(InteractiveSceneCfg):
     # A non-physics imu_link Xform is recreated in the test fixture (see setup_sim).
     imu_indirect_pendulum_link: ImuCfg = ImuCfg(
         prim_path="{ENV_REGEX_NS}/pendulum2/Geometry/world/link_1/imu_link",
-        gravity_bias=(0.0, 0.0, 9.81),
     )
     imu_indirect_pendulum_base: ImuCfg = ImuCfg(
         prim_path="{ENV_REGEX_NS}/pendulum2/Geometry/world/link_1",
@@ -172,11 +160,9 @@ class MySceneCfg(InteractiveSceneCfg):
             pos=PEND_POS_OFFSET,
             rot=PEND_ROT_OFFSET,
         ),
-        gravity_bias=(0.0, 0.0, 9.81),
     )
     imu_pendulum_imu_link: ImuCfg = ImuCfg(
         prim_path="{ENV_REGEX_NS}/pendulum/Geometry/world/link_1/imu_link",
-        gravity_bias=(0.0, 0.0, 9.81),
     )
     imu_pendulum_base: ImuCfg = ImuCfg(
         prim_path="{ENV_REGEX_NS}/pendulum/Geometry/world/link_1",
@@ -184,7 +170,6 @@ class MySceneCfg(InteractiveSceneCfg):
             pos=PEND_POS_OFFSET,
             rot=PEND_ROT_OFFSET,
         ),
-        gravity_bias=(0.0, 0.0, 9.81),
     )
 
     def __post_init__(self):
@@ -303,13 +288,14 @@ def test_constant_acceleration(setup_sim):
         if idx < 1:
             continue
 
-        # check the imu linear acceleration data
+        # check the imu linear acceleration data (includes gravity since IMU always measures it)
         torch.testing.assert_close(
             wp.to_torch(scene.sensors["imu_ball"].data.lin_acc_b),
             math_utils.quat_apply_inverse(
                 wp.to_torch(scene.rigid_objects["balls"].data.root_quat_w),
                 torch.tensor([[0.1, 0.0, 0.0]], dtype=torch.float32, device=scene.device).repeat(scene.num_envs, 1)
-                / sim.get_physics_dt(),
+                / sim.get_physics_dt()
+                + torch.tensor([[0.0, 0.0, 9.81]], dtype=torch.float32, device=scene.device).repeat(scene.num_envs, 1),
             ),
             rtol=1e-4,
             atol=1e-4,
@@ -336,9 +322,6 @@ def test_single_dof_pendulum(setup_sim):
         sim.step()
         # read data from sim
         scene.update(sim.get_physics_dt())
-
-        # get pendulum joint state
-        joint_vel = wp.to_torch(scene.articulations["pendulum"].data.joint_vel)
 
         # IMU data
         imu_data = scene.sensors["imu_pendulum_imu_link"].data
@@ -464,10 +447,7 @@ def test_attachment_validity(setup_sim):
     """Test invalid imu attachment. An imu cannot be attached directly to the world. It must be somehow attached to
     something implementing physics."""
     sim, scene = setup_sim
-    imu_world_cfg = ImuCfg(
-        prim_path="/World/envs/env_0",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
+    imu_world_cfg = ImuCfg(prim_path="/World/envs/env_0")
     with pytest.raises(RuntimeError) as exc_info:
         imu_world = Imu(imu_world_cfg)
         imu_world._initialize_impl()

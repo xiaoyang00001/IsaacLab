@@ -131,25 +131,15 @@ class MySceneCfg(InteractiveSceneCfg):
     )
 
     # sensors - pva (filled inside unit test)
-    pva_ball: PvaCfg = PvaCfg(
-        prim_path="{ENV_REGEX_NS}/ball",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
-    pva_cube: PvaCfg = PvaCfg(
-        prim_path="{ENV_REGEX_NS}/cube",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
-    pva_robot_imu_link: PvaCfg = PvaCfg(
-        prim_path="{ENV_REGEX_NS}/robot/imu_link",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
+    pva_ball: PvaCfg = PvaCfg(prim_path="{ENV_REGEX_NS}/ball")
+    pva_cube: PvaCfg = PvaCfg(prim_path="{ENV_REGEX_NS}/cube")
+    pva_robot_imu_link: PvaCfg = PvaCfg(prim_path="{ENV_REGEX_NS}/robot/imu_link")
     pva_robot_base: PvaCfg = PvaCfg(
         prim_path="{ENV_REGEX_NS}/robot/base",
         offset=PvaCfg.OffsetCfg(
             pos=POS_OFFSET,
             rot=ROT_OFFSET,
         ),
-        gravity_bias=(0.0, 0.0, 0.0),
     )
     pva_robot_norb: PvaCfg = PvaCfg(
         prim_path="{ENV_REGEX_NS}/robot/LF_HIP/LF_hip_fixed",
@@ -157,7 +147,6 @@ class MySceneCfg(InteractiveSceneCfg):
             pos=POS_OFFSET,
             rot=ROT_OFFSET,
         ),
-        gravity_bias=(0.0, 0.0, 0.0),
     )
     # The new URDF converter (urdf-usd-converter) places links under Geometry/ in a nested
     # kinematic tree.  With merge_fixed_joints=True the hierarchy for simple_2_link.urdf is:
@@ -167,7 +156,6 @@ class MySceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/pendulum2/Geometry/world/link_1/imu_link",
         debug_vis=not app_launcher._headless,
         visualizer_cfg=RED_ARROW_X_MARKER_CFG.replace(prim_path="/Visuals/Acceleration/imu_link"),
-        gravity_bias=(0.0, 0.0, 9.81),
     )
     pva_indirect_pendulum_base: PvaCfg = PvaCfg(
         prim_path="{ENV_REGEX_NS}/pendulum2/Geometry/world/link_1",
@@ -177,13 +165,11 @@ class MySceneCfg(InteractiveSceneCfg):
         ),
         debug_vis=not app_launcher._headless,
         visualizer_cfg=GREEN_ARROW_X_MARKER_CFG.replace(prim_path="/Visuals/Acceleration/base"),
-        gravity_bias=(0.0, 0.0, 9.81),
     )
     pva_pendulum_imu_link: PvaCfg = PvaCfg(
         prim_path="{ENV_REGEX_NS}/pendulum/Geometry/world/link_1/imu_link",
         debug_vis=not app_launcher._headless,
         visualizer_cfg=RED_ARROW_X_MARKER_CFG.replace(prim_path="/Visuals/Acceleration/imu_link"),
-        gravity_bias=(0.0, 0.0, 9.81),
     )
     pva_pendulum_base: PvaCfg = PvaCfg(
         prim_path="{ENV_REGEX_NS}/pendulum/Geometry/world/link_1",
@@ -193,7 +179,6 @@ class MySceneCfg(InteractiveSceneCfg):
         ),
         debug_vis=not app_launcher._headless,
         visualizer_cfg=GREEN_ARROW_X_MARKER_CFG.replace(prim_path="/Visuals/Acceleration/base"),
-        gravity_bias=(0.0, 0.0, 9.81),
     )
 
     def __post_init__(self):
@@ -415,7 +400,7 @@ def test_single_dof_pendulum(setup_sim):
 
         ax = -joint_acc * pend_length * torch.sin(joint_pos) - joint_vel**2 * pend_length * torch.cos(joint_pos)
         ay = torch.zeros(2, 1, device=scene.device)
-        az = -joint_acc * pend_length * torch.cos(joint_pos) + joint_vel**2 * pend_length * torch.sin(joint_pos) + 9.81
+        az = -joint_acc * pend_length * torch.cos(joint_pos) + joint_vel**2 * pend_length * torch.sin(joint_pos)
         gt_linear_acc_w = torch.cat([ax, ay, az], dim=-1)
 
         # skip first step where initial velocity is zero
@@ -565,7 +550,7 @@ def test_indirect_attachment(setup_sim):
 
         ax = -joint_acc * pend_length * torch.sin(joint_pos) - joint_vel**2 * pend_length * torch.cos(joint_pos)
         ay = torch.zeros(2, 1, device=scene.device)
-        az = -joint_acc * pend_length * torch.cos(joint_pos) + joint_vel**2 * pend_length * torch.sin(joint_pos) + 9.81
+        az = -joint_acc * pend_length * torch.cos(joint_pos) + joint_vel**2 * pend_length * torch.sin(joint_pos)
         gt_linear_acc_w = torch.cat([ax, ay, az], dim=-1)
 
         # skip first step where initial velocity is zero
@@ -738,10 +723,7 @@ def test_attachment_validity(setup_sim):
     """Test invalid pva attachment. A pva cannot be attached directly to the world. It must be somehow attached to
     something implementing physics."""
     sim, scene = setup_sim
-    pva_world_cfg = PvaCfg(
-        prim_path="/World/envs/env_0",
-        gravity_bias=(0.0, 0.0, 0.0),
-    )
+    pva_world_cfg = PvaCfg(prim_path="/World/envs/env_0")
     with pytest.raises(RuntimeError) as exc_info:
         pva_world = Pva(pva_world_cfg)
         pva_world._initialize_impl()

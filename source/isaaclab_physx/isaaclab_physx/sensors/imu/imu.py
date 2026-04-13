@@ -34,6 +34,10 @@ class Imu(BaseImu):
     sensor, it does not provide pose, linear velocity, angular acceleration, or
     projected gravity.
 
+    Like a real accelerometer, the linear acceleration readings always include the
+    contribution of gravity. The gravity vector is queried from the simulation at
+    initialization.
+
     The sensor can be attached to any prim path with a rigid ancestor in its tree.
     If the provided path is not a rigid body, the closest rigid-body ancestor is used
     for simulation queries. The fixed transform from that ancestor to the target prim
@@ -141,6 +145,12 @@ class Imu(BaseImu):
 
         self._view = self._physics_sim_view.create_rigid_body_view(self._rigid_parent_expr.replace(".*", "*"))
 
+        # Query world gravity and compute accelerometer bias (real IMUs always measure gravity)
+        gravity = self._physics_sim_view.get_gravity()
+        gravity_bias = torch.tensor((-gravity[0], -gravity[1], -gravity[2]), device=self._device)
+        gravity_bias_torch = gravity_bias.repeat(self._view.count, 1)
+        self._gravity_bias_w = wp.from_torch(gravity_bias_torch.contiguous(), dtype=wp.vec3f)
+
         self._initialize_buffers_impl()
 
         # Compose the configured offset with the fixed ancestor->target transform (done once)
@@ -194,8 +204,5 @@ class Imu(BaseImu):
         offset_quat_torch = torch.tensor(list(self.cfg.offset.rot), device=self._device).repeat(self._view.count, 1)
         self._offset_pos_b = wp.from_torch(offset_pos_torch.contiguous(), dtype=wp.vec3f)
         self._offset_quat_b = wp.from_torch(offset_quat_torch.contiguous(), dtype=wp.quatf)
-
-        gravity_bias_torch = torch.tensor(list(self.cfg.gravity_bias), device=self._device).repeat(self._view.count, 1)
-        self._gravity_bias_w = wp.from_torch(gravity_bias_torch.contiguous(), dtype=wp.vec3f)
 
         self._coms_buffer = wp.zeros(self._view.count, dtype=wp.transformf, device=self._device)

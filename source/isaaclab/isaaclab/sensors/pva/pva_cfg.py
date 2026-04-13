@@ -41,10 +41,3 @@ class PvaCfg(SensorBaseCfg):
 
     This attribute is only used when debug visualization is enabled.
     """
-    gravity_bias: tuple[float, float, float] = (0.0, 0.0, 9.81)
-    """The linear acceleration bias applied to the linear acceleration in the world frame [m/s^2] (x, y, z).
-
-    PVA sensors typically output a positive gravity acceleration in opposition to the direction of gravity. This
-    config parameter allows users to subtract that bias if set to (0., 0., 0.). By default this is set to (0.0, 0.0,
-    9.81) which results in a positive acceleration reading in the world Z.
-    """

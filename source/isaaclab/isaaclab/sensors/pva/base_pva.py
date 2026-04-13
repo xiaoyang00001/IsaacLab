@@ -31,7 +31,7 @@ class BasePva(SensorBase):
     .. note::
 
         We are computing the accelerations using numerical differentiation from the velocities. Consequently, the
-        PVA sensor accuracy depends on the chosen phsyx timestep. For a sufficient accuracy, we recommend to keep the
+        PVA sensor accuracy depends on the chosen physx timestep. For a sufficient accuracy, we recommend to keep the
         timestep at least as 200Hz.
 
     .. note::

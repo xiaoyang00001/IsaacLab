@@ -222,7 +222,6 @@ class Pva(BasePva):
                 self._coms_buffer,
                 self._offset_pos_b,
                 self._offset_quat_b,
-                self._gravity_bias_w,
                 self.GRAVITY_VEC_W,
                 self._prev_lin_vel_w,
                 self._prev_ang_vel_w,
@@ -253,10 +252,6 @@ class Pva(BasePva):
         offset_quat_torch = torch.tensor(list(self.cfg.offset.rot), device=self._device).repeat(self._view.count, 1)
         self._offset_pos_b = wp.from_torch(offset_pos_torch.contiguous(), dtype=wp.vec3f)
         self._offset_quat_b = wp.from_torch(offset_quat_torch.contiguous(), dtype=wp.quatf)
-
-        # Set gravity bias
-        gravity_bias_torch = torch.tensor(list(self.cfg.gravity_bias), device=self._device).repeat(self._view.count, 1)
-        self._gravity_bias_w = wp.from_torch(gravity_bias_torch.contiguous(), dtype=wp.vec3f)
 
         # Pre-allocate GPU buffer for COMs (get_coms() returns CPU array)
         self._coms_buffer = wp.zeros(self._view.count, dtype=wp.transformf, device=self._device)
