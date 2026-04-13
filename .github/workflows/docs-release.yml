@@ -3,17 +3,19 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-name: Docs
+name: Docs (release)
 
 on:
   push:
     branches:
       - main
-      - develop
       - 'release/**'
     tags:
       - 'v[1-9]*'
   pull_request:
+    branches:
+      - main
+      - 'release/**'
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -29,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       trigger-deploy: ${{ steps.trigger-deploy.outputs.defined }}
+
     steps:
     - id: trigger-deploy
       env:
@@ -37,7 +40,6 @@ jobs:
         github.repository == env.REPO_NAME &&
         (
           github.ref == 'refs/heads/main' ||
-          github.ref == 'refs/heads/develop' ||
           startsWith(github.ref, 'refs/heads/release/') ||
           startsWith(github.ref, 'refs/tags/v')
         )
@@ -68,8 +70,7 @@ jobs:
           SLUG="${REF#refs/heads/}"
           SLUG="${SLUG//\//-}"
         fi
-        # For PRs and other refs, SLUG remains unset — conf.py will
-        # fall back to the semver from the VERSION file.
+        # For PRs, SLUG remains unset — conf.py falls back to VERSION file.
         if [ -n "$SLUG" ]; then
           echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
         fi
@@ -137,6 +138,7 @@ jobs:
     - name: Assemble deploy directory
       env:
         SLUG: ${{ steps.slug.outputs.slug }}
+        REF: ${{ github.ref }}
       run: |
         mkdir -p site
 
@@ -155,9 +157,28 @@ jobs:
           echo "::warning::version-switcher.js injection missed $((TOTAL - INJECTED)) of ${TOTAL} HTML files"
         fi
 
-        # Copy static assets to site root
+        # Copy version-switcher.js to site root
         cp docs/_static/version-switcher.js site/version-switcher.js
-        cp docs/_redirect/index.html site/index.html
+
+        # For tag deploys: create /stable/ alias and redirect root to it
+        if [[ "$REF" == refs/tags/* ]]; then
+          echo "Tag deploy detected — creating /stable/ alias"
+          cp -r "site/${SLUG}" "site/stable"
+          cat > site/index.html << 'HTMLEOF'
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Redirecting to the latest Isaac Lab documentation</title>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=./stable/index.html">
+            <link rel="canonical" href="https://isaac-sim.github.io/IsaacLab/stable/">
+          </head>
+          <body>
+            <p>Redirecting to <a href="./stable/index.html">Isaac Lab documentation</a>...</p>
+          </body>
+        </html>
+        HTMLEOF
+        fi
 
     - name: Update versions.json
       env:
