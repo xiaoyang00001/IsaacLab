@@ -1,6 +1,25 @@
 Changelog
 ---------
 
+0.5.14 (2026-04-10)
+~~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Renamed the PhysX IMU sensor implementation to
+  :class:`~isaaclab_physx.sensors.Pva`. The ``isaaclab_physx.sensors.imu``
+  module now contains a new lightweight IMU sensor that only provides angular
+  velocity and linear acceleration.
+
+Added
+^^^^^
+
+* Added :class:`~isaaclab_physx.sensors.Imu` PhysX backend for the new
+  lightweight IMU sensor with simplified Warp kernels that only compute
+  angular velocity and linear acceleration.
+
+
 0.5.13 (2026-03-25)
 ~~~~~~~~~~~~~~~~~~~
 
