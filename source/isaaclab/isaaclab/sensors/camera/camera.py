@@ -116,6 +116,14 @@ class Camera(SensorBase):
         # initialize base class
         super().__init__(cfg)
 
+        # UsdGeom Camera prim for the sensor
+        self._sensor_prims: list[UsdGeom.Camera] = list()
+        # Create empty variables for storing output data
+        self._data = CameraData()
+        # Renderer and render data — assigned in _initialize_impl.
+        self._renderer: BaseRenderer | None = None
+        self._render_data = None
+
         # toggle rendering of rtx sensors as True
         # this flag is read by SimulationContext to determine if rtx sensors should be rendered
         settings = get_settings_manager()
@@ -151,14 +159,6 @@ class Camera(SensorBase):
         matching_prims = sim_utils.find_matching_prims(check_path)
         if len(matching_prims) == 0:
             raise RuntimeError(f"Could not find prim with path {check_path}.")
-
-        # UsdGeom Camera prim for the sensor
-        self._sensor_prims: list[UsdGeom.Camera] = list()
-        # Create empty variables for storing output data
-        self._data = CameraData()
-        # Renderer and render data — assigned in _initialize_impl.
-        self._renderer: BaseRenderer | None = None
-        self._render_data = None
 
         if not has_kit():
             return

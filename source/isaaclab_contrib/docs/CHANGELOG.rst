@@ -1,6 +1,17 @@
 Changelog
 ---------
 
+0.3.1 (2026-04-14)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Replaced deprecated :class:`~isaaclab.sensors.camera.TiledCamera` and
+  :class:`~isaaclab.sensors.camera.TiledCameraCfg` with :class:`~isaaclab.sensors.camera.Camera`
+  and :class:`~isaaclab.sensors.camera.CameraCfg` in the visuotactile sensor.
+
+
 0.3.0 (2026-02-13)
 ~~~~~~~~~~~~~~~~~~
 

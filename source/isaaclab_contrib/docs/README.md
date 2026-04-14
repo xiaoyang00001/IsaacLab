@@ -256,7 +256,7 @@ The TacSL tactile sensor system includes:
 
 ```python
 import isaaclab.sim as sim_utils
-from isaaclab.sensors import TiledCameraCfg
+from isaaclab.sensors import CameraCfg
 
 from isaaclab_contrib.sensors.tacsl_sensor import VisuoTactileSensorCfg
 
@@ -288,7 +288,7 @@ tactile_sensor_cfg = VisuoTactileSensorCfg(
     tangential_stiffness=0.1,        # Tangential stiffness
 
     # Camera configuration (must match render_cfg dimensions)
-    camera_cfg=TiledCameraCfg(
+    camera_cfg=CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/elastomer_tip/cam",
         height=GELSIGHT_R15_CFG.image_height,
         width=GELSIGHT_R15_CFG.image_width,

@@ -12,6 +12,13 @@ Added
   joints with zero stiffness and damping receive a minimal stiffness so that
   backends like Newton recognise the drive as active.
 
+Fixed
+^^^^^
+
+* Fixed ``AttributeError`` in :meth:`Camera.__del__` when the constructor raised
+  before ``_renderer`` was assigned. Data attributes are now initialized early in
+  ``__init__`` so cleanup is always safe.
+
 
 4.6.0 (2026-04-13)
 ~~~~~~~~~~~~~~~~~~
