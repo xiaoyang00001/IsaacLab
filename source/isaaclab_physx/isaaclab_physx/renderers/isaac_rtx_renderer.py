@@ -89,7 +89,12 @@ class IsaacRtxRenderer(BaseRenderer):
         isaac_sim_version = get_isaac_sim_version()
 
         if isaac_sim_version.major >= 6:
-            needs_color_render = "rgb" in sensor.cfg.data_types or "rgba" in sensor.cfg.data_types
+            needs_color_render = (
+                "rgb" in sensor.cfg.data_types
+                or "rgba" in sensor.cfg.data_types
+                or "albedo" in sensor.cfg.data_types
+                or any(dt in SIMPLE_SHADING_MODES for dt in sensor.cfg.data_types)
+            )
             if not needs_color_render:
                 settings.set_bool("/rtx/sdg/force/disableColorRender", True)
             if settings.get("/isaaclab/has_gui"):

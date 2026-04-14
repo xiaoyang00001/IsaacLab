@@ -1,6 +1,17 @@
 Changelog
 ---------
 
+0.5.17 (2026-04-14)
+~~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed :class:`~isaaclab_physx.renderers.IsaacRtxRenderer` incorrectly
+  disabling RTX color rendering for ``"albedo"`` and simple-shading camera
+  data types. This caused CUDA illegal memory access errors when using
+  camera environments with these data types.
+
 0.5.16 (2026-04-13)
 ~~~~~~~~~~~~~~~~~~~
 
