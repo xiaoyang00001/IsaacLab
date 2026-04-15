@@ -35,12 +35,12 @@ class WrenchComposer:
         specified in either the global (world) frame or the local (body) frame. Internally, they are
         stored in separate global and local input buffers. When the final composed wrench is needed,
         the global contributions are rotated into the body frame and combined with the local
-        contributions to produce the output force and torque in the body's link frame.
+        contributions to produce the output force and torque expressed in the body frame.
 
         The dual-buffer architecture uses five input buffers:
-            - global_force_w: Global forces applied at a position offset (world frame).
+            - global_force_w: Global forces (world frame).
             - global_torque_w: Global torques (world frame), including cross-product contributions.
-            - global_force_at_com_w: Global forces applied at the link origin (world frame, no positional torque).
+            - global_force_at_com_w: Global forces applied at the body's CoM (world frame, no positional torque).
             - local_force_b: Local forces (body frame).
             - local_torque_b: Local torques (body frame).
 
@@ -63,8 +63,8 @@ class WrenchComposer:
         self._dirty = False
 
         # Avoid isinstance here due to potential circular import issues; check by attribute presence instead.
-        if hasattr(self._asset.data, "body_link_pose_w"):
-            self._get_link_pose_fn = lambda a=self._asset: a.data.body_link_pose_w
+        if hasattr(self._asset.data, "body_com_pose_w"):
+            self._get_com_pose_fn = lambda a=self._asset: a.data.body_com_pose_w
         else:
             raise ValueError(f"Unsupported asset type: {self._asset.__class__.__name__}")
 
@@ -98,7 +98,7 @@ class WrenchComposer:
 
     @property
     def global_force_w(self) -> wp.array:
-        """Global force buffer (world frame, applied at position offset). Shape: (num_envs, num_bodies, 3)."""
+        """Global force buffer (world frame). Shape: (num_envs, num_bodies, 3)."""
         return self._global_force_w
 
     @property
@@ -108,7 +108,7 @@ class WrenchComposer:
 
     @property
     def global_force_at_com_w(self) -> wp.array:
-        """Global force at link origin buffer (world frame, no positional torque). Shape: (num_envs, num_bodies, 3)."""
+        """Global force at body's CoM buffer (world frame, no positional torque). Shape: (num_envs, num_bodies, 3)."""
         return self._global_force_at_com_w
 
     @property
@@ -123,7 +123,7 @@ class WrenchComposer:
 
     @property
     def out_force_b(self) -> wp.array:
-        """Composed output force in the body's link frame. Shape: (num_envs, num_bodies, 3).
+        """Composed output force in the body frame. Shape: (num_envs, num_bodies, 3).
 
         Triggers composition from input buffers if dirty.
         """
@@ -132,7 +132,7 @@ class WrenchComposer:
 
     @property
     def out_torque_b(self) -> wp.array:
-        """Composed output torque in the body's link frame. Shape: (num_envs, num_bodies, 3).
+        """Composed output torque in the body frame. Shape: (num_envs, num_bodies, 3).
 
         Triggers composition from input buffers if dirty.
         """
@@ -141,7 +141,7 @@ class WrenchComposer:
 
     @property
     def composed_force(self) -> wp.array:
-        """Composed force at the body's link frame. Shape: (num_envs, num_bodies, 3).
+        """Composed force at the body frame. Shape: (num_envs, num_bodies, 3).
 
         .. deprecated:: Use :attr:`out_force_b` instead.
         """
@@ -154,7 +154,7 @@ class WrenchComposer:
 
     @property
     def composed_torque(self) -> wp.array:
-        """Composed torque at the body's link frame. Shape: (num_envs, num_bodies, 3).
+        """Composed torque at the body frame. Shape: (num_envs, num_bodies, 3).
 
         .. deprecated:: Use :attr:`out_torque_b` instead.
         """
@@ -181,15 +181,19 @@ class WrenchComposer:
         """Add forces and torques into the input buffers using index-based selection.
 
         Accumulates onto whatever is already in the buffers. The result is always composed into the
-        body's link frame when the output properties are accessed.
+        body frame when the output properties are accessed.
 
         Args:
             forces: Forces. Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
             torques: Torques. Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
-            positions: Position offsets from the link origin, expressed in the link frame. Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
+            positions: The positions at which forces act. If `is_global` is True, these are global positions expressed
+                in the world frame. If `is_global` is False, these are offsets from the body's CoM expressed in the
+                body frame. If None, forces are assumed to act at the body's CoM, independent of the `is_global` flag.
+                Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
             body_ids: Body indices. Defaults to None (all bodies).
             env_ids: Environment indices. Defaults to None (all environments).
-            is_global: Whether the forces and torques are in the global frame. Defaults to False.
+            is_global: Whether the forces and torques are expressed in the global world frame or the local body frame.
+                Defaults to False.
         """
         env_ids = self._resolve_env_ids(env_ids)
         body_ids = self._resolve_body_ids(body_ids)
@@ -240,10 +244,14 @@ class WrenchComposer:
         Args:
             forces: Forces. Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
             torques: Torques. Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
-            positions: Position offsets from the link origin, expressed in the link frame. Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
+            positions: The positions at which forces act. If `is_global` is True, these are global positions expressed
+                in the world frame. If `is_global` is False, these are offsets from the body's CoM expressed in the
+                body frame. If None, forces are assumed to act at the body's CoM, independent of the `is_global` flag.
+                Shape: (len(env_ids), len(body_ids), 3). Defaults to None.
             body_ids: Body indices. Defaults to None (all bodies).
             env_ids: Environment indices. Defaults to None (all environments).
-            is_global: Whether the forces and torques are in the global frame. Defaults to False.
+            is_global: Whether the forces and torques are expressed in the global world frame or the local body frame.
+                Defaults to False.
         """
         env_ids = self._resolve_env_ids(env_ids)
         body_ids = self._resolve_body_ids(body_ids)
@@ -300,10 +308,14 @@ class WrenchComposer:
         Args:
             forces: Forces. Shape: (num_envs, num_bodies, 3). Defaults to None.
             torques: Torques. Shape: (num_envs, num_bodies, 3). Defaults to None.
-            positions: Position offsets from the link origin, expressed in the link frame. Shape: (num_envs, num_bodies, 3). Defaults to None.
+            positions: The positions at which forces act. If `is_global` is True, these are global positions expressed
+                in the world frame. If `is_global` is False, these are offsets from the body's CoM expressed in the
+                body frame. If None, forces are assumed to act at the body's CoM, independent of the `is_global` flag.
+                Shape: (num_envs, num_bodies, 3). Defaults to None.
             body_mask: Body mask. Shape: (num_bodies,). Defaults to None (all bodies).
             env_mask: Environment mask. Shape: (num_envs,). Defaults to None (all environments).
-            is_global: Whether the forces and torques are in the global frame. Defaults to False.
+            is_global: Whether the forces and torques are expressed in the global world frame or the local body frame.
+                Defaults to False.
         """
         if env_mask is None:
             env_mask = self._ALL_ENV_MASK
@@ -355,10 +367,14 @@ class WrenchComposer:
         Args:
             forces: Forces. Shape: (num_envs, num_bodies, 3). Defaults to None.
             torques: Torques. Shape: (num_envs, num_bodies, 3). Defaults to None.
-            positions: Position offsets from the link origin, expressed in the link frame. Shape: (num_envs, num_bodies, 3). Defaults to None.
+            positions: The positions at which forces act. If `is_global` is True, these are global positions expressed
+                in the world frame. If `is_global` is False, these are offsets from the body's CoM expressed in the
+                body frame. If None, forces are assumed to act at the body's CoM, independent of the `is_global` flag.
+                Shape: (num_envs, num_bodies, 3). Defaults to None.
             body_mask: Body mask. Shape: (num_bodies,). Defaults to None (all bodies).
             env_mask: Environment mask. Shape: (num_envs,). Defaults to None (all environments).
-            is_global: Whether the forces and torques are in the global frame. Defaults to False.
+            is_global: Whether the forces and torques are expressed in the global world frame or the local body frame.
+                Defaults to False.
         """
         if env_mask is None:
             env_mask = self._ALL_ENV_MASK
@@ -443,13 +459,12 @@ class WrenchComposer:
     def compose_to_body_frame(self):
         """Compose the five input buffers into the two output buffers in body frame.
 
-        This rotates global-frame forces/torques into the body frame using the current link poses,
-        then adds local-frame contributions. After this call, ``out_force_b`` and ``out_torque_b``
-        contain the final composed wrench.
+        This rotates world frame forces/torques into the body frame, then adds local-frame contributions. After this
+        call, ``out_force_b`` and ``out_torque_b``contain the final composed wrench.
 
         The dirty flag is cleared after composition.
         """
-        link_poses = self._get_link_pose_fn()
+        com_poses = self._get_com_pose_fn()
 
         wp.launch(
             compose_wrench_to_body_frame,
@@ -460,7 +475,7 @@ class WrenchComposer:
                 self._global_force_at_com_w,
                 self._local_force_b,
                 self._local_torque_b,
-                link_poses,
+                com_poses,
                 self._out_force_b,
                 self._out_torque_b,
             ],

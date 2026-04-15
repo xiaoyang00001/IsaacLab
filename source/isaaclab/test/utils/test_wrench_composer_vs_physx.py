@@ -26,8 +26,6 @@ import pytest
 import torch
 import warp as wp
 
-
-
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObject, RigidObjectCfg
 from isaaclab.sim import build_simulation_context
@@ -592,7 +590,11 @@ def test_composer_vs_physx_global_force_with_reset(device):
             dim=-1,
         ).clone()
         initial_state_raw = torch.cat(
-            [wp.to_torch(cube_raw.data.root_link_pos_w), wp.to_torch(cube_raw.data.root_link_quat_w), wp.to_torch(cube_raw.data.root_com_vel_w)],
+            [
+                wp.to_torch(cube_raw.data.root_link_pos_w),
+                wp.to_torch(cube_raw.data.root_link_quat_w),
+                wp.to_torch(cube_raw.data.root_com_vel_w),
+            ],
             dim=-1,
         ).clone()
 
@@ -716,7 +718,10 @@ def test_composer_vs_physx_payload_scenario(device):
         torques = torch.zeros(1, len(body_ids), 3, device=device)
 
         cube_composer.permanent_wrench_composer.set_forces_and_torques(
-            forces=forces, torques=torques, body_ids=body_ids, is_global=True,
+            forces=forces,
+            torques=torques,
+            body_ids=body_ids,
+            is_global=True,
         )
 
         raw_forces = torch.zeros(1, 3, device=device)
@@ -728,8 +733,11 @@ def test_composer_vs_physx_payload_scenario(device):
             cube_composer.write_data_to_sim()
             cube_raw.write_data_to_sim()
             cube_raw.root_view.apply_forces_and_torques_at_position(
-                force_data=wp.from_torch(raw_forces.contiguous(), dtype=wp.float32), torque_data=wp.from_torch(raw_torques.contiguous(), dtype=wp.float32),
-                position_data=None, indices=raw_indices, is_global=True,
+                force_data=wp.from_torch(raw_forces.contiguous(), dtype=wp.float32),
+                torque_data=wp.from_torch(raw_torques.contiguous(), dtype=wp.float32),
+                position_data=None,
+                indices=raw_indices,
+                is_global=True,
             )
             sim.step()
             cube_composer.update(sim.cfg.dt)
@@ -741,8 +749,14 @@ def test_composer_vs_physx_payload_scenario(device):
 
         torch.testing.assert_close(disp_composer, disp_raw, rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(
-            wp.to_torch(cube_composer.data.root_lin_vel_w), wp.to_torch(cube_raw.data.root_lin_vel_w), rtol=1e-4, atol=1e-4,
+            wp.to_torch(cube_composer.data.root_lin_vel_w),
+            wp.to_torch(cube_raw.data.root_lin_vel_w),
+            rtol=1e-4,
+            atol=1e-4,
         )
         torch.testing.assert_close(
-            wp.to_torch(cube_composer.data.root_ang_vel_w), wp.to_torch(cube_raw.data.root_ang_vel_w), rtol=1e-4, atol=1e-4,
+            wp.to_torch(cube_composer.data.root_ang_vel_w),
+            wp.to_torch(cube_raw.data.root_ang_vel_w),
+            rtol=1e-4,
+            atol=1e-4,
         )

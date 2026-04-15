@@ -520,7 +520,7 @@ def test_global_forces_at_global_position(device: str, num_envs: int, num_bodies
             for j in range(num_bodies):
                 torque_w = np.cross(position_offset_global[i, j], forces_global_np[i, j])
                 expected_torques_local[i, j] = quat_rotate_inv_np(
-                    link_quat_np[i:i+1, j:j+1], torque_w.reshape(1, 1, 3)
+                    link_quat_np[i : i + 1, j : j + 1], torque_w.reshape(1, 1, 3)
                 )[0, 0]
 
         # Check raw global force buffer has the global forces

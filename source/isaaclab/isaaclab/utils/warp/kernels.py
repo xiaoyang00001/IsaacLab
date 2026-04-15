@@ -515,21 +515,21 @@ def compose_wrench_to_body_frame(
     global_force_at_com_w: wp.array2d(dtype=wp.vec3f),
     local_force_b: wp.array2d(dtype=wp.vec3f),
     local_torque_b: wp.array2d(dtype=wp.vec3f),
-    link_poses: wp.array2d(dtype=wp.transformf),
+    com_poses: wp.array2d(dtype=wp.transformf),
     out_force_b: wp.array2d(dtype=wp.vec3f),
     out_torque_b: wp.array2d(dtype=wp.vec3f),
 ):
     """Composes global and local wrench buffers into a single body-frame output.
 
     Global torques are stored about the world origin (cross(P, F)). This kernel
-    corrects them to be about the current link origin by subtracting cross(link_pos, F),
+    corrects them to be about the current body's CoM by subtracting cross(com_pos, F),
     then rotates into body frame and adds local-frame values.
     """
     tid_env, tid_body = wp.tid()
-    q = wp.transform_get_rotation(link_poses[tid_env, tid_body])
-    link_pos = wp.transform_get_translation(link_poses[tid_env, tid_body])
+    q = wp.transform_get_rotation(com_poses[tid_env, tid_body])  # assumes that link and com frames are aligned
+    com_pos = wp.transform_get_translation(com_poses[tid_env, tid_body])
     total_force_w = global_force_w[tid_env, tid_body] + global_force_at_com_w[tid_env, tid_body]
-    corrected_torque_w = global_torque_w[tid_env, tid_body] - wp.cross(link_pos, global_force_w[tid_env, tid_body])
+    corrected_torque_w = global_torque_w[tid_env, tid_body] - wp.cross(com_pos, global_force_w[tid_env, tid_body])
     out_force_b[tid_env, tid_body] = wp.quat_rotate_inv(q, total_force_w) + local_force_b[tid_env, tid_body]
     out_torque_b[tid_env, tid_body] = wp.quat_rotate_inv(q, corrected_torque_w) + local_torque_b[tid_env, tid_body]
 
@@ -539,7 +539,7 @@ def reset_wrench_composer_index(
     env_ids: wp.array(dtype=wp.int32),
     global_force_w: wp.array2d(dtype=wp.vec3f),
     global_torque_w: wp.array2d(dtype=wp.vec3f),
-    global_force_at_link_w: wp.array2d(dtype=wp.vec3f),
+    global_force_at_com_w: wp.array2d(dtype=wp.vec3f),
     local_force_b: wp.array2d(dtype=wp.vec3f),
     local_torque_b: wp.array2d(dtype=wp.vec3f),
     out_force_b: wp.array2d(dtype=wp.vec3f),
@@ -551,7 +551,7 @@ def reset_wrench_composer_index(
     z = wp.vec3f(0.0)
     global_force_w[ei, tid_body] = z
     global_torque_w[ei, tid_body] = z
-    global_force_at_link_w[ei, tid_body] = z
+    global_force_at_com_w[ei, tid_body] = z
     local_force_b[ei, tid_body] = z
     local_torque_b[ei, tid_body] = z
     out_force_b[ei, tid_body] = z
@@ -563,7 +563,7 @@ def reset_wrench_composer_mask(
     env_mask: wp.array(dtype=wp.bool),
     global_force_w: wp.array2d(dtype=wp.vec3f),
     global_torque_w: wp.array2d(dtype=wp.vec3f),
-    global_force_at_link_w: wp.array2d(dtype=wp.vec3f),
+    global_force_at_com_w: wp.array2d(dtype=wp.vec3f),
     local_force_b: wp.array2d(dtype=wp.vec3f),
     local_torque_b: wp.array2d(dtype=wp.vec3f),
     out_force_b: wp.array2d(dtype=wp.vec3f),
@@ -575,7 +575,7 @@ def reset_wrench_composer_mask(
         z = wp.vec3f(0.0)
         global_force_w[tid_env, tid_body] = z
         global_torque_w[tid_env, tid_body] = z
-        global_force_at_link_w[tid_env, tid_body] = z
+        global_force_at_com_w[tid_env, tid_body] = z
         local_force_b[tid_env, tid_body] = z
         local_torque_b[tid_env, tid_body] = z
         out_force_b[tid_env, tid_body] = z

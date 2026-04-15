@@ -326,6 +326,7 @@ class MockWrenchComposer:
         if forces is not None or torques is not None:
             self._active = True
             self._dirty = True
+
     def add_forces_and_torques_mask(
         self,
         forces: wp.array | torch.Tensor | None = None,
@@ -339,6 +340,7 @@ class MockWrenchComposer:
         if forces is not None or torques is not None:
             self._active = True
             self._dirty = True
+
     def set_forces_and_torques_index(
         self,
         forces: wp.array | torch.Tensor | None = None,
@@ -352,6 +354,7 @@ class MockWrenchComposer:
         if forces is not None or torques is not None:
             self._active = True
             self._dirty = True
+
     def set_forces_and_torques_mask(
         self,
         forces: wp.array | torch.Tensor | None = None,
@@ -365,6 +368,7 @@ class MockWrenchComposer:
         if forces is not None or torques is not None:
             self._active = True
             self._dirty = True
+
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------

@@ -21,8 +21,6 @@ import pytest
 import torch
 import warp as wp
 
-
-
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObject, RigidObjectCfg
 from isaaclab.sim import build_simulation_context
