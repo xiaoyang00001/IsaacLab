@@ -377,7 +377,7 @@ def _repoint_prebundle_packages() -> None:
                     backup = prebundle_dir / f"{pkg_name}.bak"
                     if backup.exists() or backup.is_symlink():
                         shutil.rmtree(backup) if backup.is_dir() else backup.unlink()
-                    prebundled.rename(backup)
+                    shutil.move(str(prebundled), str(backup))
 
                 if use_symlinks:
                     prebundled.symlink_to(venv_pkg)

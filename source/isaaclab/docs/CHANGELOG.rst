@@ -1,6 +1,17 @@
 Changelog
 ---------
 
+4.6.2 (2026-04-15)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed prebundle repoint failing in Docker builds with ``[Errno 18] Invalid
+  cross-device link``. Replaced ``Path.rename()`` with ``shutil.move()`` so the
+  backup step works across filesystem boundaries (e.g. overlay layers).
+
+
 4.6.1 (2026-04-14)
 ~~~~~~~~~~~~~~~~~~
 
