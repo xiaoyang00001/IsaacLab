@@ -63,10 +63,12 @@ class WrenchComposer:
         self._dirty = False
 
         # Avoid isinstance here due to potential circular import issues; check by attribute presence instead.
-        if hasattr(self._asset.data, "body_com_pose_w"):
-            self._get_com_pose_fn = lambda a=self._asset: a.data.body_com_pose_w
+        if hasattr(self._asset.data, "body_com_pos_w"):
+            self._get_com_pos_fn = lambda a=self._asset: a.data.body_com_pos_w
         else:
             raise ValueError(f"Unsupported asset type: {self._asset.__class__.__name__}")
+        if hasattr(self._asset.data, "body_link_quat_w"):
+            self._get_link_quat_fn = lambda a=self._asset: a.data.body_link_quat_w
 
         # -- Input buffers (5 total) --
         self._global_force_w = wp.zeros((self.num_envs, self.num_bodies), dtype=wp.vec3f, device=self.device)
@@ -464,7 +466,8 @@ class WrenchComposer:
 
         The dirty flag is cleared after composition.
         """
-        com_poses = self._get_com_pose_fn()
+        com_pos_w = self._get_com_pos_fn()  # needed to compute torque correction for global forces
+        link_quat_w = self._get_link_quat_fn()  # needed to rotate forces/torques from world to body frame
 
         wp.launch(
             compose_wrench_to_body_frame,
@@ -475,7 +478,8 @@ class WrenchComposer:
                 self._global_force_at_com_w,
                 self._local_force_b,
                 self._local_torque_b,
-                com_poses,
+                com_pos_w,
+                link_quat_w,
                 self._out_force_b,
                 self._out_torque_b,
             ],
