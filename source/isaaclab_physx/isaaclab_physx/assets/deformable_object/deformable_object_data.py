@@ -10,6 +10,7 @@ import warp as wp
 import omni.physics.tensors.impl.api as physx
 
 from isaaclab.utils.buffers import TimestampedBufferWarp as TimestampedBuffer
+from isaaclab.utils.warp import TorchArray
 
 from .kernels import compute_mean_vec3f_over_vertices, compute_nodal_state_w, vec6f
 
@@ -98,7 +99,7 @@ class DeformableObjectData:
     # Defaults.
     ##
 
-    default_nodal_state_w: wp.array = None
+    default_nodal_state_w: TorchArray = None
     """Default nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame.
     Shape is (num_instances, max_sim_vertices_per_body) with dtype vec6f.
     """
@@ -107,7 +108,7 @@ class DeformableObjectData:
     # Kinematic commands
     ##
 
-    nodal_kinematic_target: wp.array = None
+    nodal_kinematic_target: TorchArray = None
     """Simulation mesh kinematic targets for the deformable bodies.
     Shape is (num_instances, max_sim_vertices_per_body) with dtype vec4f.
 
@@ -122,7 +123,7 @@ class DeformableObjectData:
     ##
 
     @property
-    def nodal_pos_w(self) -> wp.array:
+    def nodal_pos_w(self) -> TorchArray:
         """Nodal positions in simulation world frame. Shape is (num_instances, max_sim_vertices_per_body) vec3f."""
         if self._nodal_pos_w.timestamp < self._sim_timestamp:
             # get_sim_nodal_positions() returns (N, V, 3) float32 — view as (N, V) vec3f
@@ -132,10 +133,10 @@ class DeformableObjectData:
                 .reshape((self._num_instances, self._max_sim_vertices))
             )
             self._nodal_pos_w.timestamp = self._sim_timestamp
-        return self._nodal_pos_w.data
+        return TorchArray(self._nodal_pos_w.data)
 
     @property
-    def nodal_vel_w(self) -> wp.array:
+    def nodal_vel_w(self) -> TorchArray:
         """Nodal velocities in simulation world frame. Shape is (num_instances, max_sim_vertices_per_body) vec3f."""
         if self._nodal_vel_w.timestamp < self._sim_timestamp:
             self._nodal_vel_w.data = (
@@ -144,10 +145,10 @@ class DeformableObjectData:
                 .reshape((self._num_instances, self._max_sim_vertices))
             )
             self._nodal_vel_w.timestamp = self._sim_timestamp
-        return self._nodal_vel_w.data
+        return TorchArray(self._nodal_vel_w.data)
 
     @property
-    def nodal_state_w(self) -> wp.array:
+    def nodal_state_w(self) -> TorchArray:
         """Nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame.
         Shape is (num_instances, max_sim_vertices_per_body) vec6f.
         """
@@ -155,15 +156,15 @@ class DeformableObjectData:
             wp.launch(
                 compute_nodal_state_w,
                 dim=(self._num_instances, self._max_sim_vertices),
-                inputs=[self.nodal_pos_w, self.nodal_vel_w],
+                inputs=[self.nodal_pos_w.warp, self.nodal_vel_w.warp],
                 outputs=[self._nodal_state_w.data],
                 device=self.device,
             )
             self._nodal_state_w.timestamp = self._sim_timestamp
-        return self._nodal_state_w.data
+        return TorchArray(self._nodal_state_w.data)
 
     @property
-    def sim_element_quat_w(self) -> wp.array:
+    def sim_element_quat_w(self) -> TorchArray:
         """Simulation mesh element-wise rotations as quaternions for the deformable bodies in simulation world frame.
         Shape is (num_instances, max_sim_elements_per_body, 4).
 
@@ -176,10 +177,10 @@ class DeformableObjectData:
                 .view(wp.quatf)
             )
             self._sim_element_quat_w.timestamp = self._sim_timestamp
-        return self._sim_element_quat_w.data
+        return TorchArray(self._sim_element_quat_w.data)
 
     @property
-    def collision_element_quat_w(self) -> wp.array:
+    def collision_element_quat_w(self) -> TorchArray:
         """Collision mesh element-wise rotations as quaternions for the deformable bodies in simulation world frame.
         Shape is (num_instances, max_collision_elements_per_body, 4).
 
@@ -192,10 +193,10 @@ class DeformableObjectData:
                 .view(wp.quatf)
             )
             self._collision_element_quat_w.timestamp = self._sim_timestamp
-        return self._collision_element_quat_w.data
+        return TorchArray(self._collision_element_quat_w.data)
 
     @property
-    def sim_element_deform_gradient_w(self) -> wp.array:
+    def sim_element_deform_gradient_w(self) -> TorchArray:
         """Simulation mesh element-wise second-order deformation gradient tensors for the deformable bodies
         in simulation world frame. Shape is (num_instances, max_sim_elements_per_body, 3, 3).
         """
@@ -204,10 +205,10 @@ class DeformableObjectData:
                 (self._num_instances, self._max_sim_elements, 3, 3)
             )
             self._sim_element_deform_gradient_w.timestamp = self._sim_timestamp
-        return self._sim_element_deform_gradient_w.data
+        return TorchArray(self._sim_element_deform_gradient_w.data)
 
     @property
-    def collision_element_deform_gradient_w(self) -> wp.array:
+    def collision_element_deform_gradient_w(self) -> TorchArray:
         """Collision mesh element-wise second-order deformation gradient tensors for the deformable bodies
         in simulation world frame. Shape is (num_instances, max_collision_elements_per_body, 3, 3).
         """
@@ -218,10 +219,10 @@ class DeformableObjectData:
                 )
             )
             self._collision_element_deform_gradient_w.timestamp = self._sim_timestamp
-        return self._collision_element_deform_gradient_w.data
+        return TorchArray(self._collision_element_deform_gradient_w.data)
 
     @property
-    def sim_element_stress_w(self) -> wp.array:
+    def sim_element_stress_w(self) -> TorchArray:
         """Simulation mesh element-wise second-order Cauchy stress tensors for the deformable bodies
         in simulation world frame. Shape is (num_instances, max_sim_elements_per_body, 3, 3).
         """
@@ -230,10 +231,10 @@ class DeformableObjectData:
                 (self._num_instances, self._max_sim_elements, 3, 3)
             )
             self._sim_element_stress_w.timestamp = self._sim_timestamp
-        return self._sim_element_stress_w.data
+        return TorchArray(self._sim_element_stress_w.data)
 
     @property
-    def collision_element_stress_w(self) -> wp.array:
+    def collision_element_stress_w(self) -> TorchArray:
         """Collision mesh element-wise second-order Cauchy stress tensors for the deformable bodies
         in simulation world frame. Shape is (num_instances, max_collision_elements_per_body, 3, 3).
         """
@@ -242,14 +243,14 @@ class DeformableObjectData:
                 (self._num_instances, self._max_collision_elements, 3, 3)
             )
             self._collision_element_stress_w.timestamp = self._sim_timestamp
-        return self._collision_element_stress_w.data
+        return TorchArray(self._collision_element_stress_w.data)
 
     ##
     # Derived properties.
     ##
 
     @property
-    def root_pos_w(self) -> wp.array:
+    def root_pos_w(self) -> TorchArray:
         """Root position from nodal positions of the simulation mesh for the deformable bodies in simulation
         world frame. Shape is (num_instances, 3).
 
@@ -259,15 +260,15 @@ class DeformableObjectData:
             wp.launch(
                 compute_mean_vec3f_over_vertices,
                 dim=(self._num_instances,),
-                inputs=[self.nodal_pos_w, self._max_sim_vertices],
+                inputs=[self.nodal_pos_w.warp, self._max_sim_vertices],
                 outputs=[self._root_pos_w.data],
                 device=self.device,
             )
             self._root_pos_w.timestamp = self._sim_timestamp
-        return self._root_pos_w.data
+        return TorchArray(self._root_pos_w.data)
 
     @property
-    def root_vel_w(self) -> wp.array:
+    def root_vel_w(self) -> TorchArray:
         """Root velocity from vertex velocities for the deformable bodies in simulation world frame.
         Shape is (num_instances, 3).
 
@@ -277,9 +278,9 @@ class DeformableObjectData:
             wp.launch(
                 compute_mean_vec3f_over_vertices,
                 dim=(self._num_instances,),
-                inputs=[self.nodal_vel_w, self._max_sim_vertices],
+                inputs=[self.nodal_vel_w.warp, self._max_sim_vertices],
                 outputs=[self._root_vel_w.data],
                 device=self.device,
             )
             self._root_vel_w.timestamp = self._sim_timestamp
-        return self._root_vel_w.data
+        return TorchArray(self._root_vel_w.data)

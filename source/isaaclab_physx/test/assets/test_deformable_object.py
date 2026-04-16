@@ -131,16 +131,16 @@ def test_initialization(sim, num_cubes, material_path):
 
     # Check buffers that exist and have correct shapes
     # nodal_state_w is (N, V) vec6f -> wp.to_torch gives (N, V, 6)
-    assert wp.to_torch(cube_object.data.nodal_state_w).shape == (num_cubes, cube_object.max_sim_vertices_per_body, 6)
-    # nodal_kinematic_target is (N, V) vec4f -> wp.to_torch gives (N, V, 4)
-    assert wp.to_torch(cube_object.data.nodal_kinematic_target).shape == (
+    assert cube_object.data.nodal_state_w.torch.shape == (num_cubes, cube_object.max_sim_vertices_per_body, 6)
+    # nodal_kinematic_target is (N, V) vec4f -> .torch gives (N, V, 4)
+    assert cube_object.data.nodal_kinematic_target.torch.shape == (
         num_cubes,
         cube_object.max_sim_vertices_per_body,
         4,
     )
     # root_pos_w is (N,) vec3f -> wp.to_torch gives (N, 3)
-    assert wp.to_torch(cube_object.data.root_pos_w).shape == (num_cubes, 3)
-    assert wp.to_torch(cube_object.data.root_vel_w).shape == (num_cubes, 3)
+    assert cube_object.data.root_pos_w.torch.shape == (num_cubes, 3)
+    assert cube_object.data.root_vel_w.torch.shape == (num_cubes, 3)
 
     # Simulate physics
     for _ in range(2):
@@ -148,7 +148,7 @@ def test_initialization(sim, num_cubes, material_path):
         cube_object.update(sim.cfg.dt)
 
     # Check sim data
-    assert wp.to_torch(cube_object.data.sim_element_quat_w).shape == (
+    assert cube_object.data.sim_element_quat_w.torch.shape == (
         num_cubes,
         cube_object.max_sim_elements_per_body,
         4,
@@ -160,7 +160,7 @@ def test_initialization(sim, num_cubes, material_path):
         3,
     )
     assert cube_object.data.sim_element_stress_w.shape == (num_cubes, cube_object.max_sim_elements_per_body, 3, 3)
-    assert wp.to_torch(cube_object.data.collision_element_quat_w).shape == (
+    assert cube_object.data.collision_element_quat_w.torch.shape == (
         num_cubes,
         cube_object.max_collision_elements_per_body,
         4,
@@ -210,15 +210,15 @@ def test_initialization_with_kinematic_enabled(sim, num_cubes):
     assert cube_object.is_initialized
 
     # Check buffers that exist and have correct shapes
-    assert wp.to_torch(cube_object.data.root_pos_w).shape == (num_cubes, 3)
-    assert wp.to_torch(cube_object.data.root_vel_w).shape == (num_cubes, 3)
+    assert cube_object.data.root_pos_w.torch.shape == (num_cubes, 3)
+    assert cube_object.data.root_vel_w.torch.shape == (num_cubes, 3)
 
     # Simulate physics
     for _ in range(2):
         sim.step()
         cube_object.update(sim.cfg.dt)
-        default_nodal_state_w = wp.to_torch(cube_object.data.default_nodal_state_w).clone()
-        torch.testing.assert_close(wp.to_torch(cube_object.data.nodal_state_w), default_nodal_state_w)
+        default_nodal_state_w = cube_object.data.default_nodal_state_w.torch.clone()
+        torch.testing.assert_close(cube_object.data.nodal_state_w.torch, default_nodal_state_w)
 
 
 @pytest.mark.parametrize("num_cubes", [1, 2])
@@ -232,8 +232,8 @@ def test_set_nodal_state(sim, num_cubes):
 
     for state_type_to_randomize in ["nodal_pos_w", "nodal_vel_w"]:
         state_dict = {
-            "nodal_pos_w": torch.zeros_like(wp.to_torch(cube_object.data.nodal_pos_w)),
-            "nodal_vel_w": torch.zeros_like(wp.to_torch(cube_object.data.nodal_vel_w)),
+            "nodal_pos_w": torch.zeros_like(cube_object.data.nodal_pos_w.torch),
+            "nodal_vel_w": torch.zeros_like(cube_object.data.nodal_vel_w.torch),
         }
 
         for _ in range(5):
@@ -253,9 +253,7 @@ def test_set_nodal_state(sim, num_cubes):
                 )
                 cube_object.write_nodal_state_to_sim(nodal_state)
 
-                torch.testing.assert_close(
-                    wp.to_torch(cube_object.data.nodal_state_w), nodal_state, rtol=1e-5, atol=1e-5
-                )
+                torch.testing.assert_close(cube_object.data.nodal_state_w.torch, nodal_state, rtol=1e-5, atol=1e-5)
 
                 sim.step()
                 cube_object.update(sim.cfg.dt)
@@ -278,7 +276,7 @@ def test_set_nodal_state_with_applied_transform(num_cubes, randomize_pos, random
         sim.reset()
 
         for _ in range(5):
-            nodal_state = wp.to_torch(cube_object.data.default_nodal_state_w).clone()
+            nodal_state = cube_object.data.default_nodal_state_w.torch.clone()
             mean_nodal_pos_default = nodal_state[..., :3].mean(dim=1)
 
             if randomize_pos:
@@ -306,9 +304,7 @@ def test_set_nodal_state_with_applied_transform(num_cubes, randomize_pos, random
                 sim.step()
                 cube_object.update(sim.cfg.dt)
 
-            torch.testing.assert_close(
-                wp.to_torch(cube_object.data.root_pos_w), mean_nodal_pos_init, rtol=1e-4, atol=1e-4
-            )
+            torch.testing.assert_close(cube_object.data.root_pos_w.torch, mean_nodal_pos_init, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.parametrize("num_cubes", [2, 4])
@@ -322,15 +318,15 @@ def test_set_kinematic_targets(sim, num_cubes):
     nodal_kinematic_targets = wp.to_torch(cube_object.root_view.get_sim_kinematic_targets()).clone()
 
     for _ in range(5):
-        cube_object.write_nodal_state_to_sim(wp.to_torch(cube_object.data.default_nodal_state_w))
+        cube_object.write_nodal_state_to_sim(cube_object.data.default_nodal_state_w.torch)
 
-        default_root_pos = wp.to_torch(cube_object.data.default_nodal_state_w).mean(dim=1)
+        default_root_pos = cube_object.data.default_nodal_state_w.torch.mean(dim=1)
 
         cube_object.reset()
 
         nodal_kinematic_targets[1:, :, 3] = 1.0
         nodal_kinematic_targets[0, :, 3] = 0.0
-        nodal_kinematic_targets[0, :, :3] = wp.to_torch(cube_object.data.default_nodal_state_w)[0, :, :3]
+        nodal_kinematic_targets[0, :, :3] = cube_object.data.default_nodal_state_w.torch[0, :, :3]
         cube_object.write_nodal_kinematic_target_to_sim(
             nodal_kinematic_targets[0:1], env_ids=torch.tensor([0], device=sim.device)
         )
@@ -340,10 +336,10 @@ def test_set_kinematic_targets(sim, num_cubes):
             cube_object.update(sim.cfg.dt)
 
             torch.testing.assert_close(
-                wp.to_torch(cube_object.data.nodal_pos_w)[0],
+                cube_object.data.nodal_pos_w.torch[0],
                 nodal_kinematic_targets[0, :, :3],
                 rtol=1e-5,
                 atol=1e-5,
             )
-            root_pos_w = wp.to_torch(cube_object.data.root_pos_w)
+            root_pos_w = cube_object.data.root_pos_w.torch
             assert torch.all(root_pos_w[1:, 2] < default_root_pos[1:, 2])

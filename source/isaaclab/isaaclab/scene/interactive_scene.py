@@ -613,10 +613,10 @@ class InteractiveScene:
         state["deformable_object"] = dict()
         for asset_name, deformable_object in self._deformable_objects.items():
             asset_state = dict()
-            asset_state["nodal_position"] = wp.to_torch(deformable_object.data.nodal_pos_w).clone()
+            asset_state["nodal_position"] = deformable_object.data.nodal_pos_w.torch.clone()
             if is_relative:
                 asset_state["nodal_position"][:, :3] -= self.env_origins
-            asset_state["nodal_velocity"] = wp.to_torch(deformable_object.data.nodal_vel_w).clone()
+            asset_state["nodal_velocity"] = deformable_object.data.nodal_vel_w.torch.clone()
             state["deformable_object"][asset_name] = asset_state
         # rigid objects
         state["rigid_object"] = dict()
