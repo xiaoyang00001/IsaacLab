@@ -7,7 +7,6 @@ import random
 
 import numpy as np
 import torch
-import warp as wp
 
 import isaaclab.utils.math as math_utils
 from isaaclab.sim.views import XformPrimView
@@ -85,7 +84,7 @@ class SceneBody(HasPose):
 
     def get_pose(self):
         """Get the 3D pose of the entity."""
-        body_link_state_w = wp.to_torch(self.scene[self.entity_name].data.body_link_state_w)
+        body_link_state_w = self.scene[self.entity_name].data.body_link_state_w.torch
         pose = body_link_state_w[
             :,
             self.scene[self.entity_name].data.body_names.index(self.body_name),

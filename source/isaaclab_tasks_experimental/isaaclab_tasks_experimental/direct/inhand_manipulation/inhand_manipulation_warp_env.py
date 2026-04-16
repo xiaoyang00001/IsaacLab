@@ -603,7 +603,7 @@ class InHandManipulationWarpEnv(DirectRLEnvWarp):
         self.goal_pos_w = wp.zeros(self.num_envs, dtype=wp.vec3f, device=self.device)
 
         # Initialize goal constants from Torch (avoid a one-off kernel launch).
-        default_root_pose = wp.to_torch(self.object.data.default_root_pose).to(self.device)
+        default_root_pose = self.object.data.default_root_pose.torch.to(self.device)
         in_hand_pos = default_root_pose[:, 0:3].clone()
         in_hand_pos[:, 2] -= 0.04
         self.in_hand_pos.assign(wp.from_torch(in_hand_pos, dtype=wp.vec3f))
