@@ -45,6 +45,17 @@ class FrameTransformerData(BaseFrameTransformerData):
         self._target_pos_source, self._target_quat_source = transform_to_vec_quat(self._target_transforms)
         self._target_pos_w, self._target_quat_w = transform_to_vec_quat(self._target_transforms_w)
 
+        # Pin TorchArray instances (stable pointers — avoids per-access allocation)
+        self._target_pose_source_ta = TorchArray(self._target_transforms)
+        self._target_pos_source_ta = TorchArray(self._target_pos_source)
+        self._target_quat_source_ta = TorchArray(self._target_quat_source)
+        self._target_pose_w_ta = TorchArray(self._target_transforms_w)
+        self._target_pos_w_ta = TorchArray(self._target_pos_w)
+        self._target_quat_w_ta = TorchArray(self._target_quat_w)
+        self._source_pose_w_ta = TorchArray(self._source_transforms)
+        self._source_pos_w_ta = TorchArray(self._source_pos_w)
+        self._source_quat_w_ta = TorchArray(self._source_quat_w)
+
     @property
     def target_frame_names(self) -> list[str]:
         """Names of the target frames."""
@@ -53,44 +64,44 @@ class FrameTransformerData(BaseFrameTransformerData):
     @property
     def target_pose_source(self) -> TorchArray:
         """Target poses relative to source frame, shape ``(num_envs, num_targets)``, dtype ``wp.transformf``."""
-        return TorchArray(self._target_transforms)
+        return self._target_pose_source_ta
 
     @property
     def target_pos_source(self) -> TorchArray:
         """Position of target frames relative to source frame [m], shape ``(num_envs, num_targets, 3)``."""
-        return TorchArray(self._target_pos_source)
+        return self._target_pos_source_ta
 
     @property
     def target_quat_source(self) -> TorchArray:
         """Orientation of target frames relative to source frame (xyzw), shape ``(num_envs, num_targets, 4)``."""
-        return TorchArray(self._target_quat_source)
+        return self._target_quat_source_ta
 
     @property
     def target_pose_w(self) -> TorchArray:
         """Target poses in world frame, shape ``(num_envs, num_targets)``, dtype ``wp.transformf``."""
-        return TorchArray(self._target_transforms_w)
+        return self._target_pose_w_ta
 
     @property
     def target_pos_w(self) -> TorchArray:
         """Position of target frames in world frame [m], shape ``(num_envs, num_targets, 3)``."""
-        return TorchArray(self._target_pos_w)
+        return self._target_pos_w_ta
 
     @property
     def target_quat_w(self) -> TorchArray:
         """Orientation of target frames in world frame (xyzw), shape ``(num_envs, num_targets, 4)``."""
-        return TorchArray(self._target_quat_w)
+        return self._target_quat_w_ta
 
     @property
     def source_pose_w(self) -> TorchArray:
         """Source pose in world frame, shape ``(num_envs,)``, dtype ``wp.transformf``."""
-        return TorchArray(self._source_transforms)
+        return self._source_pose_w_ta
 
     @property
     def source_pos_w(self) -> TorchArray:
         """Position of source frame in world frame [m], shape ``(num_envs, 3)``."""
-        return TorchArray(self._source_pos_w)
+        return self._source_pos_w_ta
 
     @property
     def source_quat_w(self) -> TorchArray:
         """Orientation of source frame in world frame (xyzw), shape ``(num_envs, 4)``."""
-        return TorchArray(self._source_quat_w)
+        return self._source_quat_w_ta
