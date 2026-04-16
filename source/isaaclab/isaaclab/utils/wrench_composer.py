@@ -47,7 +47,7 @@ class WrenchComposer:
 
         # Avoid isinstance here due to potential circular import issues; check by attribute presence instead.
         if hasattr(self._asset.data, "body_link_pose_w"):
-            self._get_link_pose_fn = lambda a=self._asset: a.data.body_link_pose_w
+            self._get_link_pose_fn = lambda a=self._asset: a.data.body_link_pose_w.warp
         else:
             raise ValueError(f"Unsupported asset type: {self._asset.__class__.__name__}")
 
