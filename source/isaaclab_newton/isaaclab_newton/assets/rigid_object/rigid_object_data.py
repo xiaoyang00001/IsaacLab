@@ -135,7 +135,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.transformf. In torch this resolves to (num_instances, 7).
         The position and quaternion are of the rigid body's actor frame.
         """
-        return TorchArray(self._default_root_pose)
+        return self._default_root_pose_ta
 
     @default_root_pose.setter
     def default_root_pose(self, value: wp.array) -> None:
@@ -158,7 +158,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.spatial_vectorf. In torch this resolves to (num_instances, 6).
         The linear and angular velocities are of the rigid body's center of mass frame.
         """
-        return TorchArray(self._default_root_vel)
+        return self._default_root_vel_ta
 
     @default_root_vel.setter
     def default_root_vel(self, value: wp.array) -> None:
@@ -186,7 +186,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the actor frame of the root rigid body relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
-        return TorchArray(self._sim_bind_root_link_pose_w)
+        return self._root_link_pose_w_ta
 
     @property
     def root_link_vel_w(self) -> TorchArray:
@@ -213,7 +213,7 @@ class RigidObjectData(BaseRigidObjectData):
             )
             self._root_link_vel_w.timestamp = self._sim_timestamp
 
-        return TorchArray(self._root_link_vel_w.data)
+        return self._root_link_vel_w_ta
 
     @property
     def root_com_pose_w(self) -> TorchArray:
@@ -239,7 +239,7 @@ class RigidObjectData(BaseRigidObjectData):
             )
             self._root_com_pose_w.timestamp = self._sim_timestamp
 
-        return TorchArray(self._root_com_pose_w.data)
+        return self._root_com_pose_w_ta
 
     @property
     def root_com_vel_w(self) -> TorchArray:
@@ -249,7 +249,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity contains the linear and angular velocities of the root rigid body's center of mass frame
         relative to the world.
         """
-        return TorchArray(self._sim_bind_root_com_vel_w)
+        return self._root_com_vel_w_ta
 
     """
     Body state properties.
@@ -262,7 +262,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1, 1), dtype = wp.float32.
         In torch this resolves to (num_instances, 1, 1).
         """
-        return TorchArray(self._sim_bind_body_mass)
+        return self._body_mass_ta
 
     @property
     def body_inertia(self) -> TorchArray:
@@ -271,7 +271,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1, 9), dtype = wp.float32.
         In torch this resolves to (num_instances, 1, 9).
         """
-        return TorchArray(self._sim_bind_body_inertia)
+        return self._body_inertia_ta
 
     @property
     def body_link_pose_w(self) -> TorchArray:
@@ -281,7 +281,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the actor frame of the rigid body relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
-        return TorchArray(self._sim_bind_body_link_pose_w)
+        return self._body_link_pose_w_ta
 
     @property
     def body_link_vel_w(self) -> TorchArray:
@@ -291,7 +291,9 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity contains the linear and angular velocities of the actor frame of the root
         rigid body relative to the world.
         """
-        return TorchArray(self.root_link_vel_w.warp.reshape((self._num_instances, 1)))
+        if self._body_link_vel_w_ta is None:
+            self._body_link_vel_w_ta = TorchArray(self.root_link_vel_w.warp.reshape((self._num_instances, 1)))
+        return self._body_link_vel_w_ta
 
     @property
     def body_com_pose_w(self) -> TorchArray:
@@ -301,7 +303,9 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the center of mass frame of the rigid body relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
-        return TorchArray(self.root_com_pose_w.warp.reshape((self._num_instances, 1)))
+        if self._body_com_pose_w_ta is None:
+            self._body_com_pose_w_ta = TorchArray(self.root_com_pose_w.warp.reshape((self._num_instances, 1)))
+        return self._body_com_pose_w_ta
 
     @property
     def body_com_vel_w(self) -> TorchArray:
@@ -311,7 +315,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity contains the linear and angular velocities of the root rigid body's center of mass frame
         relative to the world.
         """
-        return TorchArray(self._sim_bind_body_com_vel_w)
+        return self._body_com_vel_w_ta
 
     @property
     def body_com_acc_w(self) -> TorchArray:
@@ -337,7 +341,7 @@ class RigidObjectData(BaseRigidObjectData):
             # set the buffer data and timestamp
             self._body_com_acc_w.timestamp = self._sim_timestamp
             # update the previous velocity
-        return TorchArray(self._body_com_acc_w.data)
+        return self._body_com_acc_w_ta
 
     @property
     def body_com_pos_b(self) -> TorchArray:
@@ -346,7 +350,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the center of mass location relative to its body's link frame.
         """
-        return TorchArray(self._sim_bind_body_com_pos_b)
+        return self._body_com_pos_b_ta
 
     @property
     def body_com_pose_b(self) -> TorchArray:
@@ -376,7 +380,7 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._body_com_pose_b.timestamp = self._sim_timestamp
-        return TorchArray(self._body_com_pose_b.data)
+        return self._body_com_pose_b_ta
 
     """
     Derived Properties.
@@ -397,7 +401,7 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._projected_gravity_b.timestamp = self._sim_timestamp
-        return TorchArray(self._projected_gravity_b.data)
+        return self._projected_gravity_b_ta
 
     @property
     def heading_w(self) -> TorchArray:
@@ -418,7 +422,7 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._heading_w.timestamp = self._sim_timestamp
-        return TorchArray(self._heading_w.data)
+        return self._heading_w_ta
 
     @property
     def root_link_lin_vel_b(self) -> TorchArray:
@@ -432,6 +436,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_link_lin_vel_b = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=wp.vec3f, device=self.device
             )
+            self._root_link_lin_vel_b_ta = TorchArray(self._root_link_lin_vel_b.data)
         if self._root_link_lin_vel_b.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.quat_apply_inverse_1D_kernel,
@@ -441,7 +446,7 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._root_link_lin_vel_b.timestamp = self._sim_timestamp
-        return TorchArray(self._root_link_lin_vel_b.data)
+        return self._root_link_lin_vel_b_ta
 
     @property
     def root_link_ang_vel_b(self) -> TorchArray:
@@ -455,6 +460,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_link_ang_vel_b = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=wp.vec3f, device=self.device
             )
+            self._root_link_ang_vel_b_ta = TorchArray(self._root_link_ang_vel_b.data)
         if self._root_link_ang_vel_b.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.quat_apply_inverse_1D_kernel,
@@ -464,7 +470,7 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._root_link_ang_vel_b.timestamp = self._sim_timestamp
-        return TorchArray(self._root_link_ang_vel_b.data)
+        return self._root_link_ang_vel_b_ta
 
     @property
     def root_com_lin_vel_b(self) -> TorchArray:
@@ -478,6 +484,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_com_lin_vel_b = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=wp.vec3f, device=self.device
             )
+            self._root_com_lin_vel_b_ta = TorchArray(self._root_com_lin_vel_b.data)
         if self._root_com_lin_vel_b.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.quat_apply_inverse_1D_kernel,
@@ -487,7 +494,7 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._root_com_lin_vel_b.timestamp = self._sim_timestamp
-        return TorchArray(self._root_com_lin_vel_b.data)
+        return self._root_com_lin_vel_b_ta
 
     @property
     def root_com_ang_vel_b(self) -> TorchArray:
@@ -501,6 +508,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_com_ang_vel_b = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=wp.vec3f, device=self.device
             )
+            self._root_com_ang_vel_b_ta = TorchArray(self._root_com_ang_vel_b.data)
         if self._root_com_ang_vel_b.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.quat_apply_inverse_1D_kernel,
@@ -510,7 +518,7 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._root_com_ang_vel_b.timestamp = self._sim_timestamp
-        return TorchArray(self._root_com_ang_vel_b.data)
+        return self._root_com_ang_vel_b_ta
 
     """
     Sliced properties.
@@ -523,7 +531,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         This quantity is the position of the actor frame of the root rigid body relative to the world.
         """
-        return TorchArray(self._get_pos_from_transform(self._root_link_pos_w, self.root_link_pose_w.warp))
+        if self._root_link_pos_w_ta is None:
+            self._root_link_pos_w = self._get_pos_from_transform(self._root_link_pos_w, self.root_link_pose_w.warp)
+            self._root_link_pos_w_ta = TorchArray(self._root_link_pos_w)
+        return self._root_link_pos_w_ta
 
     @property
     def root_link_quat_w(self) -> TorchArray:
@@ -532,7 +543,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.quatf. In torch this resolves to (num_instances, 4).
         This quantity is the orientation of the actor frame of the root rigid body.
         """
-        return TorchArray(self._get_quat_from_transform(self._root_link_quat_w, self.root_link_pose_w.warp))
+        if self._root_link_quat_w_ta is None:
+            self._root_link_quat_w = self._get_quat_from_transform(self._root_link_quat_w, self.root_link_pose_w.warp)
+            self._root_link_quat_w_ta = TorchArray(self._root_link_quat_w)
+        return self._root_link_quat_w_ta
 
     @property
     def root_link_lin_vel_w(self) -> TorchArray:
@@ -541,7 +555,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         This quantity is the linear velocity of the root rigid body's actor frame relative to the world.
         """
-        return TorchArray(self._get_top_from_spatial_vector(self._root_link_lin_vel_w, self.root_link_vel_w.warp))
+        if self._root_link_lin_vel_w_ta is None:
+            self._root_link_lin_vel_w = self._get_top_from_spatial_vector(
+                self._root_link_lin_vel_w, self.root_link_vel_w.warp
+            )
+            self._root_link_lin_vel_w_ta = TorchArray(self._root_link_lin_vel_w)
+        return self._root_link_lin_vel_w_ta
 
     @property
     def root_link_ang_vel_w(self) -> TorchArray:
@@ -550,7 +569,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         This quantity is the angular velocity of the actor frame of the root rigid body relative to the world.
         """
-        return TorchArray(self._get_bottom_from_spatial_vector(self._root_link_ang_vel_w, self.root_link_vel_w.warp))
+        if self._root_link_ang_vel_w_ta is None:
+            self._root_link_ang_vel_w = self._get_bottom_from_spatial_vector(
+                self._root_link_ang_vel_w, self.root_link_vel_w.warp
+            )
+            self._root_link_ang_vel_w_ta = TorchArray(self._root_link_ang_vel_w)
+        return self._root_link_ang_vel_w_ta
 
     @property
     def root_com_pos_w(self) -> TorchArray:
@@ -559,7 +583,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         This quantity is the position of the center of mass frame of the root rigid body relative to the world.
         """
-        return TorchArray(self._get_pos_from_transform(self._root_com_pos_w, self.root_com_pose_w.warp))
+        if self._root_com_pos_w_ta is None:
+            self._root_com_pos_w = self._get_pos_from_transform(self._root_com_pos_w, self.root_com_pose_w.warp)
+            self._root_com_pos_w_ta = TorchArray(self._root_com_pos_w)
+        return self._root_com_pos_w_ta
 
     @property
     def root_com_quat_w(self) -> TorchArray:
@@ -568,7 +595,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.quatf. In torch this resolves to (num_instances, 4).
         This quantity is the orientation of the principal axes of inertia of the root rigid body relative to the world.
         """
-        return TorchArray(self._get_quat_from_transform(self._root_com_quat_w, self.root_com_pose_w.warp))
+        if self._root_com_quat_w_ta is None:
+            self._root_com_quat_w = self._get_quat_from_transform(self._root_com_quat_w, self.root_com_pose_w.warp)
+            self._root_com_quat_w_ta = TorchArray(self._root_com_quat_w)
+        return self._root_com_quat_w_ta
 
     @property
     def root_com_lin_vel_w(self) -> TorchArray:
@@ -577,7 +607,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         This quantity is the linear velocity of the root rigid body's center of mass frame relative to the world.
         """
-        return TorchArray(self._get_top_from_spatial_vector(self._root_com_lin_vel_w, self.root_com_vel_w.warp))
+        if self._root_com_lin_vel_w_ta is None:
+            self._root_com_lin_vel_w = self._get_top_from_spatial_vector(
+                self._root_com_lin_vel_w, self.root_com_vel_w.warp
+            )
+            self._root_com_lin_vel_w_ta = TorchArray(self._root_com_lin_vel_w)
+        return self._root_com_lin_vel_w_ta
 
     @property
     def root_com_ang_vel_w(self) -> TorchArray:
@@ -586,7 +621,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         This quantity is the angular velocity of the root rigid body's center of mass frame relative to the world.
         """
-        return TorchArray(self._get_bottom_from_spatial_vector(self._root_com_ang_vel_w, self.root_com_vel_w.warp))
+        if self._root_com_ang_vel_w_ta is None:
+            self._root_com_ang_vel_w = self._get_bottom_from_spatial_vector(
+                self._root_com_ang_vel_w, self.root_com_vel_w.warp
+            )
+            self._root_com_ang_vel_w_ta = TorchArray(self._root_com_ang_vel_w)
+        return self._root_com_ang_vel_w_ta
 
     @property
     def body_link_pos_w(self) -> TorchArray:
@@ -595,7 +635,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the position of the rigid bodies' actor frame relative to the world.
         """
-        return TorchArray(self._get_pos_from_transform(self._body_link_pos_w, self.body_link_pose_w.warp))
+        if self._body_link_pos_w_ta is None:
+            self._body_link_pos_w = self._get_pos_from_transform(self._body_link_pos_w, self.body_link_pose_w.warp)
+            self._body_link_pos_w_ta = TorchArray(self._body_link_pos_w)
+        return self._body_link_pos_w_ta
 
     @property
     def body_link_quat_w(self) -> TorchArray:
@@ -604,7 +647,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.quatf. In torch this resolves to (num_instances, 1, 4).
         This quantity is the orientation of the rigid bodies' actor frame relative to the world.
         """
-        return TorchArray(self._get_quat_from_transform(self._body_link_quat_w, self.body_link_pose_w.warp))
+        if self._body_link_quat_w_ta is None:
+            self._body_link_quat_w = self._get_quat_from_transform(self._body_link_quat_w, self.body_link_pose_w.warp)
+            self._body_link_quat_w_ta = TorchArray(self._body_link_quat_w)
+        return self._body_link_quat_w_ta
 
     @property
     def body_link_lin_vel_w(self) -> TorchArray:
@@ -613,7 +659,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the linear velocity of the rigid bodies' actor frame relative to the world.
         """
-        return TorchArray(self._get_top_from_spatial_vector(self._body_link_lin_vel_w, self.body_link_vel_w.warp))
+        if self._body_link_lin_vel_w_ta is None:
+            self._body_link_lin_vel_w = self._get_top_from_spatial_vector(
+                self._body_link_lin_vel_w, self.body_link_vel_w.warp
+            )
+            self._body_link_lin_vel_w_ta = TorchArray(self._body_link_lin_vel_w)
+        return self._body_link_lin_vel_w_ta
 
     @property
     def body_link_ang_vel_w(self) -> TorchArray:
@@ -622,7 +673,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the angular velocity of the rigid bodies' actor frame relative to the world.
         """
-        return TorchArray(self._get_bottom_from_spatial_vector(self._body_link_ang_vel_w, self.body_link_vel_w.warp))
+        if self._body_link_ang_vel_w_ta is None:
+            self._body_link_ang_vel_w = self._get_bottom_from_spatial_vector(
+                self._body_link_ang_vel_w, self.body_link_vel_w.warp
+            )
+            self._body_link_ang_vel_w_ta = TorchArray(self._body_link_ang_vel_w)
+        return self._body_link_ang_vel_w_ta
 
     @property
     def body_com_pos_w(self) -> TorchArray:
@@ -631,7 +687,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the position of the rigid bodies' center of mass frame.
         """
-        return TorchArray(self._get_pos_from_transform(self._body_com_pos_w, self.body_com_pose_w.warp))
+        if self._body_com_pos_w_ta is None:
+            self._body_com_pos_w = self._get_pos_from_transform(self._body_com_pos_w, self.body_com_pose_w.warp)
+            self._body_com_pos_w_ta = TorchArray(self._body_com_pos_w)
+        return self._body_com_pos_w_ta
 
     @property
     def body_com_quat_w(self) -> TorchArray:
@@ -640,7 +699,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.quatf. In torch this resolves to (num_instances, 1, 4).
         This quantity is the orientation of the principal axes of inertia of the rigid bodies.
         """
-        return TorchArray(self._get_quat_from_transform(self._body_com_quat_w, self.body_com_pose_w.warp))
+        if self._body_com_quat_w_ta is None:
+            self._body_com_quat_w = self._get_quat_from_transform(self._body_com_quat_w, self.body_com_pose_w.warp)
+            self._body_com_quat_w_ta = TorchArray(self._body_com_quat_w)
+        return self._body_com_quat_w_ta
 
     @property
     def body_com_lin_vel_w(self) -> TorchArray:
@@ -649,7 +711,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the linear velocity of the rigid bodies' center of mass frame.
         """
-        return TorchArray(self._get_top_from_spatial_vector(self._body_com_lin_vel_w, self.body_com_vel_w.warp))
+        if self._body_com_lin_vel_w_ta is None:
+            self._body_com_lin_vel_w = self._get_top_from_spatial_vector(
+                self._body_com_lin_vel_w, self.body_com_vel_w.warp
+            )
+            self._body_com_lin_vel_w_ta = TorchArray(self._body_com_lin_vel_w)
+        return self._body_com_lin_vel_w_ta
 
     @property
     def body_com_ang_vel_w(self) -> TorchArray:
@@ -658,7 +725,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the angular velocity of the rigid bodies' center of mass frame.
         """
-        return TorchArray(self._get_bottom_from_spatial_vector(self._body_com_ang_vel_w, self.body_com_vel_w.warp))
+        if self._body_com_ang_vel_w_ta is None:
+            self._body_com_ang_vel_w = self._get_bottom_from_spatial_vector(
+                self._body_com_ang_vel_w, self.body_com_vel_w.warp
+            )
+            self._body_com_ang_vel_w_ta = TorchArray(self._body_com_ang_vel_w)
+        return self._body_com_ang_vel_w_ta
 
     @property
     def body_com_lin_acc_w(self) -> TorchArray:
@@ -667,7 +739,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the linear acceleration of the rigid bodies' center of mass frame.
         """
-        return TorchArray(self._get_top_from_spatial_vector(self._body_com_lin_acc_w, self.body_com_acc_w.warp))
+        if self._body_com_lin_acc_w_ta is None:
+            self._body_com_lin_acc_w = self._get_top_from_spatial_vector(
+                self._body_com_lin_acc_w, self.body_com_acc_w.warp
+            )
+            self._body_com_lin_acc_w_ta = TorchArray(self._body_com_lin_acc_w)
+        return self._body_com_lin_acc_w_ta
 
     @property
     def body_com_ang_acc_w(self) -> TorchArray:
@@ -676,7 +753,12 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the angular acceleration of the rigid bodies' center of mass frame.
         """
-        return TorchArray(self._get_bottom_from_spatial_vector(self._body_com_ang_acc_w, self.body_com_acc_w.warp))
+        if self._body_com_ang_acc_w_ta is None:
+            self._body_com_ang_acc_w = self._get_bottom_from_spatial_vector(
+                self._body_com_ang_acc_w, self.body_com_acc_w.warp
+            )
+            self._body_com_ang_acc_w_ta = TorchArray(self._body_com_ang_acc_w)
+        return self._body_com_ang_acc_w_ta
 
     @property
     def body_com_quat_b(self) -> TorchArray:
@@ -686,7 +768,10 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.quatf. In torch this resolves to (num_instances, 1, 4).
         This quantity is the orientation of the principal axes of inertia relative to its body's link frame.
         """
-        return TorchArray(self._get_quat_from_transform(self._body_com_quat_b, self.body_com_pose_b.warp))
+        if self._body_com_quat_b_ta is None:
+            self._body_com_quat_b = self._get_quat_from_transform(self._body_com_quat_b, self.body_com_pose_b.warp)
+            self._body_com_quat_b_ta = TorchArray(self._body_com_quat_b)
+        return self._body_com_quat_b_ta
 
     def _create_simulation_bindings(self) -> None:
         """Create simulation bindings for the root data.
@@ -819,11 +904,66 @@ class RigidObjectData(BaseRigidObjectData):
         self._body_com_lin_acc_w = None
         self._body_com_ang_acc_w = None
 
+        # -- Pinned TorchArray instances (Category 1: sim-bound and pre-allocated buffers)
+        # Newton wp.array pointers are stable, so a TorchArray wrapping them is valid forever.
+        self._root_link_pose_w_ta = TorchArray(self._sim_bind_root_link_pose_w)
+        self._root_com_vel_w_ta = TorchArray(self._sim_bind_root_com_vel_w)
+        self._body_link_pose_w_ta = TorchArray(self._sim_bind_body_link_pose_w)
+        self._body_com_vel_w_ta = TorchArray(self._sim_bind_body_com_vel_w)
+        self._default_root_pose_ta = TorchArray(self._default_root_pose)
+        self._default_root_vel_ta = TorchArray(self._default_root_vel)
+        self._body_mass_ta = TorchArray(self._sim_bind_body_mass)
+        self._body_inertia_ta = TorchArray(self._sim_bind_body_inertia)
+        self._body_com_pos_b_ta = TorchArray(self._sim_bind_body_com_pos_b)
+
+        # -- Pinned TorchArray instances (Category 2: TimestampedBuffer properties)
+        self._root_link_vel_w_ta = TorchArray(self._root_link_vel_w.data)
+        self._root_com_pose_w_ta = TorchArray(self._root_com_pose_w.data)
+        self._body_com_acc_w_ta = TorchArray(self._body_com_acc_w.data)
+        self._body_com_pose_b_ta = TorchArray(self._body_com_pose_b.data)
+        self._projected_gravity_b_ta = TorchArray(self._projected_gravity_b.data)
+        self._heading_w_ta = TorchArray(self._heading_w.data)
+
+        # -- Pinned TorchArray instances (Category 3: lazy/sliced properties, pinned on first access)
+        self._root_link_pos_w_ta: TorchArray | None = None
+        self._root_link_quat_w_ta: TorchArray | None = None
+        self._root_link_lin_vel_w_ta: TorchArray | None = None
+        self._root_link_ang_vel_w_ta: TorchArray | None = None
+        self._root_com_pos_w_ta: TorchArray | None = None
+        self._root_com_quat_w_ta: TorchArray | None = None
+        self._root_com_lin_vel_w_ta: TorchArray | None = None
+        self._root_com_ang_vel_w_ta: TorchArray | None = None
+        self._body_link_pos_w_ta: TorchArray | None = None
+        self._body_link_quat_w_ta: TorchArray | None = None
+        self._body_link_vel_w_ta: TorchArray | None = None
+        self._body_link_lin_vel_w_ta: TorchArray | None = None
+        self._body_link_ang_vel_w_ta: TorchArray | None = None
+        self._body_com_pose_w_ta: TorchArray | None = None
+        self._body_com_pos_w_ta: TorchArray | None = None
+        self._body_com_quat_w_ta: TorchArray | None = None
+        self._body_com_lin_vel_w_ta: TorchArray | None = None
+        self._body_com_ang_vel_w_ta: TorchArray | None = None
+        self._body_com_lin_acc_w_ta: TorchArray | None = None
+        self._body_com_ang_acc_w_ta: TorchArray | None = None
+        self._body_com_quat_b_ta: TorchArray | None = None
+        self._root_link_lin_vel_b_ta: TorchArray | None = None
+        self._root_link_ang_vel_b_ta: TorchArray | None = None
+        self._root_com_lin_vel_b_ta: TorchArray | None = None
+        self._root_com_ang_vel_b_ta: TorchArray | None = None
+        # -- deprecated state properties (lazy)
+        self._root_state_w_ta: TorchArray | None = None
+        self._root_link_state_w_ta: TorchArray | None = None
+        self._root_com_state_w_ta: TorchArray | None = None
+        self._default_root_state_ta: TorchArray | None = None
+        self._body_state_w_ta: TorchArray | None = None
+        self._body_link_state_w_ta: TorchArray | None = None
+        self._body_com_state_w_ta: TorchArray | None = None
+
     """
     Internal helpers.
     """
 
-    def _get_pos_from_transform(self, source: wp.array | None, transform: wp.array) -> TorchArray:
+    def _get_pos_from_transform(self, source: wp.array | None, transform: wp.array) -> wp.array:
         """Generates a position array from a transform array.
 
         Args:
@@ -870,7 +1010,7 @@ class RigidObjectData(BaseRigidObjectData):
                 )
         return source
 
-    def _get_quat_from_transform(self, source: wp.array | None, transform: wp.array) -> TorchArray:
+    def _get_quat_from_transform(self, source: wp.array | None, transform: wp.array) -> wp.array:
         """Generates a quaternion array from a transform array.
 
         Args:
@@ -918,7 +1058,7 @@ class RigidObjectData(BaseRigidObjectData):
         # Return the source array. (no-op if the array is contiguous.)
         return source
 
-    def _get_top_from_spatial_vector(self, source: wp.array | None, spatial_vector: wp.array) -> TorchArray:
+    def _get_top_from_spatial_vector(self, source: wp.array | None, spatial_vector: wp.array) -> wp.array:
         """Gets the top part of a spatial vector array.
 
         For instance the linear velocity is the top part of a velocity vector.
@@ -968,7 +1108,7 @@ class RigidObjectData(BaseRigidObjectData):
         # Return the source array. (no-op if the array is contiguous.)
         return source
 
-    def _get_bottom_from_spatial_vector(self, source: wp.array | None, spatial_vector: wp.array) -> TorchArray:
+    def _get_bottom_from_spatial_vector(self, source: wp.array | None, spatial_vector: wp.array) -> wp.array:
         """Gets the bottom part of a spatial vector array.
 
         For instance the angular velocity is the bottom part of a velocity vector.
@@ -1035,6 +1175,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_state_w = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=shared_kernels.vec13f, device=self.device
             )
+            self._root_state_w_ta = TorchArray(self._root_state_w.data)
         if self._root_state_w.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.concat_root_pose_and_vel_to_state,
@@ -1050,7 +1191,7 @@ class RigidObjectData(BaseRigidObjectData):
             )
             self._root_state_w.timestamp = self._sim_timestamp
 
-        return TorchArray(self._root_state_w.data)
+        return self._root_state_w_ta
 
     @property
     def root_link_state_w(self) -> TorchArray:
@@ -1065,6 +1206,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_link_state_w = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=shared_kernels.vec13f, device=self.device
             )
+            self._root_link_state_w_ta = TorchArray(self._root_link_state_w.data)
         if self._root_link_state_w.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.concat_root_pose_and_vel_to_state,
@@ -1080,7 +1222,7 @@ class RigidObjectData(BaseRigidObjectData):
             )
             self._root_link_state_w.timestamp = self._sim_timestamp
 
-        return TorchArray(self._root_link_state_w.data)
+        return self._root_link_state_w_ta
 
     @property
     def root_com_state_w(self) -> TorchArray:
@@ -1095,6 +1237,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_com_state_w = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=shared_kernels.vec13f, device=self.device
             )
+            self._root_com_state_w_ta = TorchArray(self._root_com_state_w.data)
         if self._root_com_state_w.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.concat_root_pose_and_vel_to_state,
@@ -1110,7 +1253,7 @@ class RigidObjectData(BaseRigidObjectData):
             )
             self._root_com_state_w.timestamp = self._sim_timestamp
 
-        return TorchArray(self._root_com_state_w.data)
+        return self._root_com_state_w_ta
 
     @property
     def default_root_state(self) -> TorchArray:
@@ -1127,6 +1270,7 @@ class RigidObjectData(BaseRigidObjectData):
         )
         if self._default_root_state is None:
             self._default_root_state = wp.zeros((self._num_instances), dtype=shared_kernels.vec13f, device=self.device)
+            self._default_root_state_ta = TorchArray(self._default_root_state)
         wp.launch(
             shared_kernels.concat_root_pose_and_vel_to_state,
             dim=self._num_instances,
@@ -1139,7 +1283,7 @@ class RigidObjectData(BaseRigidObjectData):
             ],
             device=self.device,
         )
-        return TorchArray(self._default_root_state)
+        return self._default_root_state_ta
 
     @property
     def body_state_w(self) -> TorchArray:
@@ -1155,6 +1299,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_state_w = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=shared_kernels.vec13f, device=self.device
             )
+            self._root_state_w_ta = TorchArray(self._root_state_w.data)
         if self._root_state_w.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.concat_root_pose_and_vel_to_state,
@@ -1169,7 +1314,9 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._root_state_w.timestamp = self._sim_timestamp
-        return TorchArray(self._root_state_w.data.reshape((self._num_instances, 1)))
+        if self._body_state_w_ta is None:
+            self._body_state_w_ta = TorchArray(self._root_state_w.data.reshape((self._num_instances, 1)))
+        return self._body_state_w_ta
 
     @property
     def body_link_state_w(self) -> TorchArray:
@@ -1185,6 +1332,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_link_state_w = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=shared_kernels.vec13f, device=self.device
             )
+            self._root_link_state_w_ta = TorchArray(self._root_link_state_w.data)
         if self._root_link_state_w.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.concat_root_pose_and_vel_to_state,
@@ -1199,7 +1347,9 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._root_link_state_w.timestamp = self._sim_timestamp
-        return TorchArray(self._root_link_state_w.data.reshape((self._num_instances, 1)))
+        if self._body_link_state_w_ta is None:
+            self._body_link_state_w_ta = TorchArray(self._root_link_state_w.data.reshape((self._num_instances, 1)))
+        return self._body_link_state_w_ta
 
     @property
     def body_com_state_w(self) -> TorchArray:
@@ -1214,6 +1364,7 @@ class RigidObjectData(BaseRigidObjectData):
             self._root_com_state_w = TimestampedBuffer(
                 shape=(self._num_instances,), dtype=shared_kernels.vec13f, device=self.device
             )
+            self._root_com_state_w_ta = TorchArray(self._root_com_state_w.data)
         if self._root_com_state_w.timestamp < self._sim_timestamp:
             wp.launch(
                 shared_kernels.concat_root_pose_and_vel_to_state,
@@ -1228,4 +1379,6 @@ class RigidObjectData(BaseRigidObjectData):
                 device=self.device,
             )
             self._root_com_state_w.timestamp = self._sim_timestamp
-        return TorchArray(self._root_com_state_w.data.reshape((self._num_instances, 1)))
+        if self._body_com_state_w_ta is None:
+            self._body_com_state_w_ta = TorchArray(self._root_com_state_w.data.reshape((self._num_instances, 1)))
+        return self._body_com_state_w_ta
