@@ -1,6 +1,16 @@
 Changelog
 ---------
 
+0.5.14 (2026-04-16)
+~~~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* :class:`~isaaclab_newton.assets.articulation.ArticulationData` properties now
+  return :class:`~isaaclab.utils.warp.TorchArray` instead of raw ``wp.array``.
+
+
 0.5.13 (2026-04-13)
 ~~~~~~~~~~~~~~~~~~~
 
