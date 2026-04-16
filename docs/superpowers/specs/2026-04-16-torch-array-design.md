@@ -274,6 +274,14 @@ scaled = robot.data.joint_pos.torch * scale_factor
      (`wp.to_torch(data.X)` → `data.X.torch`)
    - Verify `.warp` can be passed to `wp.launch()` successfully
 
+3. **Validation — run existing test suites**:
+   - PhysX mock articulation view: `./isaaclab.sh -p -m pytest source/isaaclab_physx/test/test_mock_interfaces/test_mock_articulation_view.py`
+   - PhysX mock articulation view (warp): `./isaaclab.sh -p -m pytest source/isaaclab_physx/test/test_mock_interfaces/test_mock_articulation_view_warp.py`
+   - Newton mock articulation view: `./isaaclab.sh -p -m pytest source/isaaclab_newton/test/test_mock_interfaces/test_mock_articulation_view.py`
+   - PhysX articulation asset tests (requires GPU sim): `./isaaclab.sh -p -m pytest source/isaaclab_physx/test/assets/test_articulation.py`
+   - Newton articulation asset tests (requires GPU sim): `./isaaclab.sh -p -m pytest source/isaaclab_newton/test/assets/test_articulation.py`
+   - Pre-commit checks: `./isaaclab.sh -f`
+
 ## Future Work
 
 - Extend to `RigidObject`, `RigidObjectCollection`, `DeformableObject`
