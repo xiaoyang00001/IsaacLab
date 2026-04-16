@@ -435,7 +435,7 @@ class RigidObjectCollection(BaseRigidObjectCollection):
                 full_data,
             ],
             outputs=[
-                self.data.body_link_pose_w,
+                self.data.body_link_pose_w.warp,
                 None,  # body_link_state_w
                 None,  # body_state_w
             ],
@@ -519,14 +519,14 @@ class RigidObjectCollection(BaseRigidObjectCollection):
             dim=(env_ids.shape[0], body_ids.shape[0]),
             inputs=[
                 body_poses,
-                self.data.body_com_pos_b,
+                self.data.body_com_pos_b.warp,
                 env_ids,
                 body_ids,
                 full_data,
             ],
             outputs=[
-                self.data.body_com_pose_w,
-                self.data.body_link_pose_w,
+                self.data.body_com_pose_w.warp,
+                self.data.body_link_pose_w.warp,
                 None,  # body_com_state_w
                 None,  # body_link_state_w
                 None,  # body_state_w
@@ -620,8 +620,8 @@ class RigidObjectCollection(BaseRigidObjectCollection):
                 full_data,
             ],
             outputs=[
-                self.data.body_com_vel_w,
-                self.data.body_com_acc_w,
+                self.data.body_com_vel_w.warp,
+                self.data.body_com_acc_w.warp,
                 None,  # body_state_w
                 None,  # body_com_state_w
             ],
@@ -715,16 +715,16 @@ class RigidObjectCollection(BaseRigidObjectCollection):
             dim=(env_ids.shape[0], body_ids.shape[0]),
             inputs=[
                 body_velocities,
-                self.data.body_com_pos_b,
-                self.data.body_link_pose_w,
+                self.data.body_com_pos_b.warp,
+                self.data.body_link_pose_w.warp,
                 env_ids,
                 body_ids,
                 full_data,
             ],
             outputs=[
-                self.data.body_link_vel_w,
-                self.data.body_com_vel_w,
-                self.data.body_com_acc_w,
+                self.data.body_link_vel_w.warp,
+                self.data.body_com_vel_w.warp,
+                self.data.body_com_acc_w.warp,
                 None,  # body_link_state_w
                 None,  # body_state_w
                 None,  # body_com_state_w
