@@ -1011,8 +1011,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the position of the actor frame of the root rigid body relative to the world.
         """
+        self._root_link_pos_w = self._get_pos_from_transform(self._root_link_pos_w, self.root_link_pose_w.warp)
         if self._root_link_pos_w_ta is None:
-            self._root_link_pos_w = self._get_pos_from_transform(self._root_link_pos_w, self.root_link_pose_w.warp)
             self._root_link_pos_w_ta = TorchArray(self._root_link_pos_w)
         return self._root_link_pos_w_ta
 
@@ -1024,8 +1024,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the orientation of the actor frame of the root rigid body.
         """
+        self._root_link_quat_w = self._get_quat_from_transform(self._root_link_quat_w, self.root_link_pose_w.warp)
         if self._root_link_quat_w_ta is None:
-            self._root_link_quat_w = self._get_quat_from_transform(self._root_link_quat_w, self.root_link_pose_w.warp)
             self._root_link_quat_w_ta = TorchArray(self._root_link_quat_w)
         return self._root_link_quat_w_ta
 
@@ -1037,10 +1037,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the linear velocity of the root rigid body's actor frame relative to the world.
         """
+        self._root_link_lin_vel_w = self._get_top_from_spatial_vector(
+            self._root_link_lin_vel_w, self.root_link_vel_w.warp
+        )
         if self._root_link_lin_vel_w_ta is None:
-            self._root_link_lin_vel_w = self._get_top_from_spatial_vector(
-                self._root_link_lin_vel_w, self.root_link_vel_w.warp
-            )
             self._root_link_lin_vel_w_ta = TorchArray(self._root_link_lin_vel_w)
         return self._root_link_lin_vel_w_ta
 
@@ -1052,10 +1052,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the angular velocity of the actor frame of the root rigid body relative to the world.
         """
+        self._root_link_ang_vel_w = self._get_bottom_from_spatial_vector(
+            self._root_link_ang_vel_w, self.root_link_vel_w.warp
+        )
         if self._root_link_ang_vel_w_ta is None:
-            self._root_link_ang_vel_w = self._get_bottom_from_spatial_vector(
-                self._root_link_ang_vel_w, self.root_link_vel_w.warp
-            )
             self._root_link_ang_vel_w_ta = TorchArray(self._root_link_ang_vel_w)
         return self._root_link_ang_vel_w_ta
 
@@ -1067,8 +1067,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the position of the center of mass frame of the root rigid body relative to the world.
         """
+        self._root_com_pos_w = self._get_pos_from_transform(self._root_com_pos_w, self.root_com_pose_w.warp)
         if self._root_com_pos_w_ta is None:
-            self._root_com_pos_w = self._get_pos_from_transform(self._root_com_pos_w, self.root_com_pose_w.warp)
             self._root_com_pos_w_ta = TorchArray(self._root_com_pos_w)
         return self._root_com_pos_w_ta
 
@@ -1080,8 +1080,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the orientation of the principal axes of inertia of the root rigid body relative to the world.
         """
+        self._root_com_quat_w = self._get_quat_from_transform(self._root_com_quat_w, self.root_com_pose_w.warp)
         if self._root_com_quat_w_ta is None:
-            self._root_com_quat_w = self._get_quat_from_transform(self._root_com_quat_w, self.root_com_pose_w.warp)
             self._root_com_quat_w_ta = TorchArray(self._root_com_quat_w)
         return self._root_com_quat_w_ta
 
@@ -1093,10 +1093,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the linear velocity of the root rigid body's center of mass frame relative to the world.
         """
+        self._root_com_lin_vel_w = self._get_top_from_spatial_vector(
+            self._root_com_lin_vel_w, self.root_com_vel_w.warp
+        )
         if self._root_com_lin_vel_w_ta is None:
-            self._root_com_lin_vel_w = self._get_top_from_spatial_vector(
-                self._root_com_lin_vel_w, self.root_com_vel_w.warp
-            )
             self._root_com_lin_vel_w_ta = TorchArray(self._root_com_lin_vel_w)
         return self._root_com_lin_vel_w_ta
 
@@ -1108,10 +1108,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the angular velocity of the root rigid body's center of mass frame relative to the world.
         """
+        self._root_com_ang_vel_w = self._get_bottom_from_spatial_vector(
+            self._root_com_ang_vel_w, self.root_com_vel_w.warp
+        )
         if self._root_com_ang_vel_w_ta is None:
-            self._root_com_ang_vel_w = self._get_bottom_from_spatial_vector(
-                self._root_com_ang_vel_w, self.root_com_vel_w.warp
-            )
             self._root_com_ang_vel_w_ta = TorchArray(self._root_com_ang_vel_w)
         return self._root_com_ang_vel_w_ta
 
@@ -1124,8 +1124,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the position of the articulation bodies' actor frame relative to the world.
         """
+        self._body_link_pos_w = self._get_pos_from_transform(self._body_link_pos_w, self.body_link_pose_w.warp)
         if self._body_link_pos_w_ta is None:
-            self._body_link_pos_w = self._get_pos_from_transform(self._body_link_pos_w, self.body_link_pose_w.warp)
             self._body_link_pos_w_ta = TorchArray(self._body_link_pos_w)
         return self._body_link_pos_w_ta
 
@@ -1138,8 +1138,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the orientation of the articulation bodies' actor frame relative to the world.
         """
+        self._body_link_quat_w = self._get_quat_from_transform(self._body_link_quat_w, self.body_link_pose_w.warp)
         if self._body_link_quat_w_ta is None:
-            self._body_link_quat_w = self._get_quat_from_transform(self._body_link_quat_w, self.body_link_pose_w.warp)
             self._body_link_quat_w_ta = TorchArray(self._body_link_quat_w)
         return self._body_link_quat_w_ta
 
@@ -1152,10 +1152,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the linear velocity of the articulation bodies' actor frame relative to the world.
         """
+        self._body_link_lin_vel_w = self._get_top_from_spatial_vector(
+            self._body_link_lin_vel_w, self.body_link_vel_w.warp
+        )
         if self._body_link_lin_vel_w_ta is None:
-            self._body_link_lin_vel_w = self._get_top_from_spatial_vector(
-                self._body_link_lin_vel_w, self.body_link_vel_w.warp
-            )
             self._body_link_lin_vel_w_ta = TorchArray(self._body_link_lin_vel_w)
         return self._body_link_lin_vel_w_ta
 
@@ -1168,10 +1168,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the angular velocity of the articulation bodies' actor frame relative to the world.
         """
+        self._body_link_ang_vel_w = self._get_bottom_from_spatial_vector(
+            self._body_link_ang_vel_w, self.body_link_vel_w.warp
+        )
         if self._body_link_ang_vel_w_ta is None:
-            self._body_link_ang_vel_w = self._get_bottom_from_spatial_vector(
-                self._body_link_ang_vel_w, self.body_link_vel_w.warp
-            )
             self._body_link_ang_vel_w_ta = TorchArray(self._body_link_ang_vel_w)
         return self._body_link_ang_vel_w_ta
 
@@ -1184,8 +1184,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the position of the articulation bodies' center of mass frame.
         """
+        self._body_com_pos_w = self._get_pos_from_transform(self._body_com_pos_w, self.body_com_pose_w.warp)
         if self._body_com_pos_w_ta is None:
-            self._body_com_pos_w = self._get_pos_from_transform(self._body_com_pos_w, self.body_com_pose_w.warp)
             self._body_com_pos_w_ta = TorchArray(self._body_com_pos_w)
         return self._body_com_pos_w_ta
 
@@ -1198,8 +1198,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the orientation of the principal axes of inertia of the articulation bodies.
         """
+        self._body_com_quat_w = self._get_quat_from_transform(self._body_com_quat_w, self.body_com_pose_w.warp)
         if self._body_com_quat_w_ta is None:
-            self._body_com_quat_w = self._get_quat_from_transform(self._body_com_quat_w, self.body_com_pose_w.warp)
             self._body_com_quat_w_ta = TorchArray(self._body_com_quat_w)
         return self._body_com_quat_w_ta
 
@@ -1212,10 +1212,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the linear velocity of the articulation bodies' center of mass frame.
         """
+        self._body_com_lin_vel_w = self._get_top_from_spatial_vector(
+            self._body_com_lin_vel_w, self.body_com_vel_w.warp
+        )
         if self._body_com_lin_vel_w_ta is None:
-            self._body_com_lin_vel_w = self._get_top_from_spatial_vector(
-                self._body_com_lin_vel_w, self.body_com_vel_w.warp
-            )
             self._body_com_lin_vel_w_ta = TorchArray(self._body_com_lin_vel_w)
         return self._body_com_lin_vel_w_ta
 
@@ -1228,10 +1228,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the angular velocity of the articulation bodies' center of mass frame.
         """
+        self._body_com_ang_vel_w = self._get_bottom_from_spatial_vector(
+            self._body_com_ang_vel_w, self.body_com_vel_w.warp
+        )
         if self._body_com_ang_vel_w_ta is None:
-            self._body_com_ang_vel_w = self._get_bottom_from_spatial_vector(
-                self._body_com_ang_vel_w, self.body_com_vel_w.warp
-            )
             self._body_com_ang_vel_w_ta = TorchArray(self._body_com_ang_vel_w)
         return self._body_com_ang_vel_w_ta
 
@@ -1244,10 +1244,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the linear acceleration of the articulation bodies' center of mass frame.
         """
+        self._body_com_lin_acc_w = self._get_top_from_spatial_vector(
+            self._body_com_lin_acc_w, self.body_com_acc_w.warp
+        )
         if self._body_com_lin_acc_w_ta is None:
-            self._body_com_lin_acc_w = self._get_top_from_spatial_vector(
-                self._body_com_lin_acc_w, self.body_com_acc_w.warp
-            )
             self._body_com_lin_acc_w_ta = TorchArray(self._body_com_lin_acc_w)
         return self._body_com_lin_acc_w_ta
 
@@ -1260,10 +1260,10 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the angular acceleration of the articulation bodies' center of mass frame.
         """
+        self._body_com_ang_acc_w = self._get_bottom_from_spatial_vector(
+            self._body_com_ang_acc_w, self.body_com_acc_w.warp
+        )
         if self._body_com_ang_acc_w_ta is None:
-            self._body_com_ang_acc_w = self._get_bottom_from_spatial_vector(
-                self._body_com_ang_acc_w, self.body_com_acc_w.warp
-            )
             self._body_com_ang_acc_w_ta = TorchArray(self._body_com_ang_acc_w)
         return self._body_com_ang_acc_w_ta
 
@@ -1277,8 +1277,8 @@ class ArticulationData(BaseArticulationData):
 
         This quantity is the orientation of the principal axes of inertia relative to its body's link frame.
         """
+        self._body_com_quat_b = self._get_quat_from_transform(self._body_com_quat_b, self.body_com_pose_b.warp)
         if self._body_com_quat_b_ta is None:
-            self._body_com_quat_b = self._get_quat_from_transform(self._body_com_quat_b, self.body_com_pose_b.warp)
             self._body_com_quat_b_ta = TorchArray(self._body_com_quat_b)
         return self._body_com_quat_b_ta
 
@@ -1406,6 +1406,48 @@ class ArticulationData(BaseArticulationData):
             self._sim_bind_joint_velocity_target = wp.zeros(
                 (self._num_instances, 0), dtype=wp.float32, device=self.device
             )
+
+        # Re-pin TorchArray wrappers to the newly created sim bindings.
+        # After a full simulation reset the solver recreates its internal arrays, so
+        # any TorchArray that was wrapping the old pointer becomes stale.  We rebind
+        # them here.  On the very first call (from __init__) the TorchArrays do not
+        # exist yet — _create_buffers() will create them — so we guard with hasattr.
+        if hasattr(self, "_root_link_pose_w_ta"):
+            self._root_link_pose_w_ta.rebind(self._sim_bind_root_link_pose_w)
+            self._root_com_vel_w_ta.rebind(self._sim_bind_root_com_vel_w)
+            self._body_link_pose_w_ta.rebind(self._sim_bind_body_link_pose_w)
+            self._body_com_vel_w_ta.rebind(self._sim_bind_body_com_vel_w)
+            self._joint_pos_ta.rebind(self._sim_bind_joint_pos)
+            self._joint_vel_ta.rebind(self._sim_bind_joint_vel)
+            self._joint_stiffness_ta.rebind(self._sim_bind_joint_stiffness_sim)
+            self._joint_damping_ta.rebind(self._sim_bind_joint_damping_sim)
+            self._joint_armature_ta.rebind(self._sim_bind_joint_armature)
+            self._joint_friction_coeff_ta.rebind(self._sim_bind_joint_friction_coeff)
+            self._joint_pos_limits_lower_ta.rebind(self._sim_bind_joint_pos_limits_lower)
+            self._joint_pos_limits_upper_ta.rebind(self._sim_bind_joint_pos_limits_upper)
+            self._joint_vel_limits_ta.rebind(self._sim_bind_joint_vel_limits_sim)
+            self._joint_effort_limits_ta.rebind(self._sim_bind_joint_effort_limits_sim)
+            self._body_mass_ta.rebind(self._sim_bind_body_mass)
+            self._body_inertia_ta.rebind(self._sim_bind_body_inertia)
+            self._body_com_pos_b_ta.rebind(self._sim_bind_body_com_pos_b)
+            # Invalidate lazy sliced TorchArrays so they are re-created from the
+            # new sim bindings on next access.
+            self._root_link_pos_w_ta = None
+            self._root_link_quat_w_ta = None
+            self._root_link_lin_vel_w_ta = None
+            self._root_link_ang_vel_w_ta = None
+            self._root_com_pos_w_ta = None
+            self._root_com_quat_w_ta = None
+            self._root_com_lin_vel_w_ta = None
+            self._root_com_ang_vel_w_ta = None
+            self._body_link_pos_w_ta = None
+            self._body_link_quat_w_ta = None
+            self._body_link_lin_vel_w_ta = None
+            self._body_link_ang_vel_w_ta = None
+            self._body_com_pos_w_ta = None
+            self._body_com_quat_w_ta = None
+            self._body_com_lin_vel_w_ta = None
+            self._body_com_ang_vel_w_ta = None
 
     def _create_buffers(self) -> None:
         """Create buffers for the root data."""
@@ -1546,7 +1588,8 @@ class ArticulationData(BaseArticulationData):
         self._default_root_state = None
 
         # -- Pinned TorchArray instances (Category 1: sim-bound and pre-allocated buffers)
-        # Newton wp.array pointers are stable, so a TorchArray wrapping them is valid forever.
+        # Sim-bound pointers are re-created on full reset; _create_simulation_bindings()
+        # calls rebind() on each TorchArray to keep them in sync.
         self._root_link_pose_w_ta = TorchArray(self._sim_bind_root_link_pose_w)
         self._root_com_vel_w_ta = TorchArray(self._sim_bind_root_com_vel_w)
         self._body_link_pose_w_ta = TorchArray(self._sim_bind_body_link_pose_w)

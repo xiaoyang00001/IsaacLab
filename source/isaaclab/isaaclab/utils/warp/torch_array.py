@@ -64,6 +64,18 @@ class TorchArray:
     # Core accessors
     # ------------------------------------------------------------------
 
+    def rebind(self, wp_array: wp.array) -> None:
+        """Rebind this wrapper to a new warp array, invalidating the torch cache.
+
+        This is needed when the underlying simulation memory is re-created (e.g. after
+        a full simulation reset) and the old warp array pointer becomes stale.
+
+        Args:
+            wp_array: The new warp array to wrap.
+        """
+        self._warp = wp_array
+        self._torch_cache = None
+
     @property
     def warp(self) -> wp.array:
         """The underlying warp array."""
