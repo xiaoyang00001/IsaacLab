@@ -514,7 +514,7 @@ def test_set_rigid_object_state(num_cubes, device):
 
                     # assert that set root quantities are equal to the ones set in the state_dict
                     for key, expected_value in state_dict.items():
-                        value = wp.to_torch(getattr(cube_object.data, key))
+                        value = getattr(cube_object.data, key).torch
                         torch.testing.assert_close(value, expected_value, rtol=1e-3, atol=1e-3)
 
                     cube_object.update(sim.cfg.dt)
