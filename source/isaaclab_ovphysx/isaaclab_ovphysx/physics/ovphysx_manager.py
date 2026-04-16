@@ -138,12 +138,14 @@ class OvPhysxManager(PhysicsManager):
 
     @classmethod
     def _release_physx(cls) -> None:
-        """Release the ovphysx instance if it exists.  Safe to call multiple times."""
-        if cls._physx is not None:
-            import contextlib
+        """Release the ovphysx instance if it exists.  Safe to call multiple times.
 
-            with contextlib.suppress(Exception):
-                cls._physx.release()
+        With ovphysx<=0.3.7 and Kit's pxr in the same process, physx.release()
+        deadlocks due to dual-Carbonite static destructor races.  Skip the
+        native release and let os._exit() (registered via atexit) terminate the
+        process; GPU resources are reclaimed by the driver.
+        """
+        if cls._physx is not None:
             cls._physx = None
 
     @classmethod
@@ -204,11 +206,19 @@ class OvPhysxManager(PhysicsManager):
 
         # Without worker threads the stepper runs simulate()+fetchResults()
         # synchronously, blocking the calling thread for the full GPU step time.
-        cls._physx.set_setting("/persistent/physics/numThreads", "8")
-        cls._physx.set_setting("/physics/physxDispatcher", "true")
-        cls._physx.set_setting("/physics/updateToUsd", "false")
-        cls._physx.set_setting("/physics/updateVelocitiesToUsd", "false")
-        cls._physx.set_setting("/physics/updateParticlesToUsd", "false")
+        #
+        # COMPAT(ovphysx<=0.3.7): The public 0.3.7 wheel exposes typed config
+        # setters (set_config_int32 etc.) rather than the Carbonite-settings-based
+        # set_setting() added in newer internal builds.  This guard keeps both
+        # working.  REVERT once the public wheel ships set_setting().
+        if hasattr(cls._physx, "set_setting"):
+            cls._physx.set_setting("/persistent/physics/numThreads", "8")
+            cls._physx.set_setting("/physics/physxDispatcher", "true")
+            cls._physx.set_setting("/physics/updateToUsd", "false")
+            cls._physx.set_setting("/physics/updateVelocitiesToUsd", "false")
+            cls._physx.set_setting("/physics/updateParticlesToUsd", "false")
+        else:
+            cls._physx.set_config_int32(ovphysx.ConfigInt32.NUM_THREADS, 8)
 
         # FIXME(malesiani): re-evaluate this when carbonite ships an isolated copy.
         # At process exit, two Carbonite instances are in memory:
@@ -235,7 +245,9 @@ class OvPhysxManager(PhysicsManager):
         if not cls._atexit_registered:
 
             def _atexit_release_and_exit():
-                cls._release_physx()
+                # Skip physx.release() -- it deadlocks due to dual-Carbonite
+                # static destructor races (ovphysx's bundled libcarb vs Kit's).
+                # GPU resources are reclaimed by the driver at process exit.
                 os._exit(0)
 
             atexit.register(_atexit_release_and_exit)
