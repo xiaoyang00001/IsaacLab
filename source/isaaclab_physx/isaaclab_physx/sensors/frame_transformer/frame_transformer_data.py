@@ -8,6 +8,7 @@ from __future__ import annotations
 import warp as wp
 
 from isaaclab.sensors.frame_transformer import BaseFrameTransformerData
+from isaaclab.utils.warp import TorchArray
 
 from isaaclab_physx.sensors.kernels import concat_pos_and_quat_to_pose_1d_kernel, concat_pos_and_quat_to_pose_kernel
 
@@ -21,7 +22,7 @@ class FrameTransformerData(BaseFrameTransformerData):
         return self._target_frame_names
 
     @property
-    def target_pose_source(self) -> wp.array:
+    def target_pose_source(self) -> TorchArray:
         """Pose of target frame(s) relative to source frame.
 
         Shape is (num_instances, num_target_frames), dtype = wp.transformf. In torch this resolves to
@@ -34,28 +35,28 @@ class FrameTransformerData(BaseFrameTransformerData):
             outputs=[self._target_pose_source],
             device=self._device,
         )
-        return self._target_pose_source
+        return TorchArray(self._target_pose_source)
 
     @property
-    def target_pos_source(self) -> wp.array:
+    def target_pos_source(self) -> TorchArray:
         """Position of target frame(s) relative to source frame.
 
         Shape is (num_instances, num_target_frames), dtype = wp.vec3f. In torch this resolves to
         (num_instances, num_target_frames, 3).
         """
-        return self._target_pos_source
+        return TorchArray(self._target_pos_source)
 
     @property
-    def target_quat_source(self) -> wp.array:
+    def target_quat_source(self) -> TorchArray:
         """Orientation of target frame(s) relative to source frame.
 
         Shape is (num_instances, num_target_frames), dtype = wp.quatf. In torch this resolves to
         (num_instances, num_target_frames, 4). The orientation is provided in (x, y, z, w) format.
         """
-        return self._target_quat_source
+        return TorchArray(self._target_quat_source)
 
     @property
-    def target_pose_w(self) -> wp.array:
+    def target_pose_w(self) -> TorchArray:
         """Pose of target frame(s) after offset in world frame.
 
         Shape is (num_instances, num_target_frames), dtype = wp.transformf. In torch this resolves to
@@ -68,28 +69,28 @@ class FrameTransformerData(BaseFrameTransformerData):
             outputs=[self._target_pose_w],
             device=self._device,
         )
-        return self._target_pose_w
+        return TorchArray(self._target_pose_w)
 
     @property
-    def target_pos_w(self) -> wp.array:
+    def target_pos_w(self) -> TorchArray:
         """Position of target frame(s) after offset in world frame.
 
         Shape is (num_instances, num_target_frames), dtype = wp.vec3f. In torch this resolves to
         (num_instances, num_target_frames, 3).
         """
-        return self._target_pos_w
+        return TorchArray(self._target_pos_w)
 
     @property
-    def target_quat_w(self) -> wp.array:
+    def target_quat_w(self) -> TorchArray:
         """Orientation of target frame(s) after offset in world frame.
 
         Shape is (num_instances, num_target_frames), dtype = wp.quatf. In torch this resolves to
         (num_instances, num_target_frames, 4). The orientation is provided in (x, y, z, w) format.
         """
-        return self._target_quat_w
+        return TorchArray(self._target_quat_w)
 
     @property
-    def source_pose_w(self) -> wp.array:
+    def source_pose_w(self) -> TorchArray:
         """Pose of source frame after offset in world frame.
 
         Shape is (num_instances,), dtype = wp.transformf. In torch this resolves to (num_instances, 7).
@@ -102,24 +103,24 @@ class FrameTransformerData(BaseFrameTransformerData):
             outputs=[self._source_pose_w],
             device=self._device,
         )
-        return self._source_pose_w
+        return TorchArray(self._source_pose_w)
 
     @property
-    def source_pos_w(self) -> wp.array:
+    def source_pos_w(self) -> TorchArray:
         """Position of source frame after offset in world frame.
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._source_pos_w
+        return TorchArray(self._source_pos_w)
 
     @property
-    def source_quat_w(self) -> wp.array:
+    def source_quat_w(self) -> TorchArray:
         """Orientation of source frame after offset in world frame.
 
         Shape is (num_instances,), dtype = wp.quatf. In torch this resolves to (num_instances, 4).
         The orientation is provided in (x, y, z, w) format.
         """
-        return self._source_quat_w
+        return TorchArray(self._source_quat_w)
 
     def create_buffers(
         self,
