@@ -239,3 +239,48 @@ class TestTorchArrayDeprecationBridge:
             assert issubclass(w[0].category, DeprecationWarning)
             expected = torch.full((5,), 3.0, device=device)
             torch.testing.assert_close(result, expected)
+
+    def test_radd_works(self):
+        """Test scalar + TorchArray works."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        ta = TorchArray(wp.array([1.0, 2.0], dtype=wp.float32, device="cpu"))
+        result = 1.0 + ta
+        assert torch.allclose(result, torch.tensor([2.0, 3.0]))
+
+    def test_sub_works(self):
+        """Test TorchArray - value works."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        ta = TorchArray(wp.array([3.0, 4.0], dtype=wp.float32, device="cpu"))
+        result = ta - 1.0
+        assert torch.allclose(result, torch.tensor([2.0, 3.0]))
+
+    def test_mul_works(self):
+        """Test TorchArray * value works."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        ta = TorchArray(wp.array([2.0, 3.0], dtype=wp.float32, device="cpu"))
+        result = ta * 2.0
+        assert torch.allclose(result, torch.tensor([4.0, 6.0]))
+
+    def test_neg_works(self):
+        """Test -TorchArray works."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        ta = TorchArray(wp.array([1.0, -2.0], dtype=wp.float32, device="cpu"))
+        result = -ta
+        assert torch.allclose(result, torch.tensor([-1.0, 2.0]))
+
+    def test_comparison_works(self):
+        """Test comparison operators."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        ta = TorchArray(wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device="cpu"))
+        result = ta > 1.5
+        assert result.tolist() == [False, True, True]
