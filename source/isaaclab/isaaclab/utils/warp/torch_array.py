@@ -41,7 +41,7 @@ class TorchArray:
         ta = TorchArray(arr)
 
         # Explicit access (preferred)
-        ta.warp   # -> wp.array, shape (100,), dtype vec3f
+        ta.warp  # -> wp.array, shape (100,), dtype vec3f
         ta.torch  # -> torch.Tensor, shape (100, 3)
 
         # Deprecation bridge (warns once, then silent)
