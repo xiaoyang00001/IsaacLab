@@ -8,26 +8,27 @@ from __future__ import annotations
 import warp as wp
 
 from isaaclab.sensors.imu import BaseImuData
+from isaaclab.utils.warp import TorchArray
 
 
 class ImuData(BaseImuData):
     """Data container for the PhysX IMU sensor."""
 
     @property
-    def ang_vel_b(self) -> wp.array:
+    def ang_vel_b(self) -> TorchArray:
         """IMU frame angular velocity relative to the world expressed in IMU frame [rad/s].
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._ang_vel_b
+        return TorchArray(self._ang_vel_b)
 
     @property
-    def lin_acc_b(self) -> wp.array:
+    def lin_acc_b(self) -> TorchArray:
         """IMU frame linear acceleration relative to the world expressed in IMU frame [m/s^2].
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._lin_acc_b
+        return TorchArray(self._lin_acc_b)
 
     def create_buffers(self, num_envs: int, device: str) -> None:
         """Create internal buffers for sensor data.

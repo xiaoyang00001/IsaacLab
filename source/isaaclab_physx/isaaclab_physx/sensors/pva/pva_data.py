@@ -10,6 +10,7 @@ import logging
 import warp as wp
 
 from isaaclab.sensors.pva import BasePvaData
+from isaaclab.utils.warp import TorchArray
 
 from isaaclab_physx.sensors.kernels import concat_pos_and_quat_to_pose_1d_kernel
 
@@ -20,7 +21,7 @@ class PvaData(BasePvaData):
     """Data container for the PhysX PVA sensor."""
 
     @property
-    def pose_w(self) -> wp.array:
+    def pose_w(self) -> TorchArray:
         """Pose of the sensor origin in world frame.
 
         Shape is (num_instances,), dtype = wp.transformf. In torch this resolves to (num_instances, 7).
@@ -33,64 +34,64 @@ class PvaData(BasePvaData):
             outputs=[self._pose_w],
             device=self._device,
         )
-        return self._pose_w
+        return TorchArray(self._pose_w)
 
     @property
-    def pos_w(self) -> wp.array:
+    def pos_w(self) -> TorchArray:
         """Position of the sensor origin in world frame.
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._pos_w
+        return TorchArray(self._pos_w)
 
     @property
-    def quat_w(self) -> wp.array:
+    def quat_w(self) -> TorchArray:
         """Orientation of the sensor origin in world frame.
 
         Shape is (num_instances,), dtype = wp.quatf. In torch this resolves to (num_instances, 4).
         The orientation is provided in (x, y, z, w) format.
         """
-        return self._quat_w
+        return TorchArray(self._quat_w)
 
     @property
-    def projected_gravity_b(self) -> wp.array:
+    def projected_gravity_b(self) -> TorchArray:
         """Gravity direction unit vector projected on the PVA frame.
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._projected_gravity_b
+        return TorchArray(self._projected_gravity_b)
 
     @property
-    def lin_vel_b(self) -> wp.array:
+    def lin_vel_b(self) -> TorchArray:
         """PVA frame linear velocity relative to the world expressed in PVA frame.
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._lin_vel_b
+        return TorchArray(self._lin_vel_b)
 
     @property
-    def ang_vel_b(self) -> wp.array:
+    def ang_vel_b(self) -> TorchArray:
         """PVA frame angular velocity relative to the world expressed in PVA frame.
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._ang_vel_b
+        return TorchArray(self._ang_vel_b)
 
     @property
-    def lin_acc_b(self) -> wp.array:
+    def lin_acc_b(self) -> TorchArray:
         """PVA frame linear acceleration relative to the world expressed in PVA frame.
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._lin_acc_b
+        return TorchArray(self._lin_acc_b)
 
     @property
-    def ang_acc_b(self) -> wp.array:
+    def ang_acc_b(self) -> TorchArray:
         """PVA frame angular acceleration relative to the world expressed in PVA frame.
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
-        return self._ang_acc_b
+        return TorchArray(self._ang_acc_b)
 
     def create_buffers(self, num_envs: int, device: str) -> None:
         """Create internal buffers for sensor data.
