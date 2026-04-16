@@ -11,6 +11,7 @@ import logging
 import warp as wp
 
 from isaaclab.sensors.contact_sensor.base_contact_sensor_data import BaseContactSensorData
+from isaaclab.utils.warp import TorchArray
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,12 @@ class ContactSensorData(BaseContactSensorData):
     _first_transition: wp.array | None
 
     @property
-    def pose_w(self) -> wp.array | None:
+    def pose_w(self) -> TorchArray | None:
         """Not supported by Newton contact sensor."""
         raise NotImplementedError("pose_w is not supported by the Newton contact sensor.")
 
     @property
-    def pos_w(self) -> wp.array | None:
+    def pos_w(self) -> TorchArray | None:
         """Position of the sensor origin in world frame.
 
         `wp.vec3f` array whose shape is (N,) where N is the number of sensors. Note, that when casted to as a
@@ -46,10 +47,12 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.track_pose` is False, then this quantity is None.
         """
-        return self._pos_w
+        if self._pos_w is None:
+            return None
+        return TorchArray(self._pos_w)
 
     @property
-    def quat_w(self) -> wp.array | None:
+    def quat_w(self) -> TorchArray | None:
         """Orientation of the sensor origin in quaternion (x, y, z, w) in world frame.
 
         `wp.quatf` whose shape is (N,) where N is the number of sensors. Note, that when casted to as a `torch.Tensor`,
@@ -58,10 +61,12 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.track_pose` is False, then this quantity is None.
         """
-        return self._quat_w
+        if self._quat_w is None:
+            return None
+        return TorchArray(self._quat_w)
 
     @property
-    def net_forces_w(self) -> wp.array2d | None:
+    def net_forces_w(self) -> TorchArray | None:
         """The net (total) contact forces in world frame.
 
         `wp.vec3f` array whose shape is (N, S) where N is the number of environments and S is the number of sensors.
@@ -71,10 +76,12 @@ class ContactSensorData(BaseContactSensorData):
             This quantity is the sum of the contact forces acting on each sensor. It must not be confused
             with the total contact forces acting on the sensors (which also includes the tangential forces).
         """
-        return self._net_forces_w
+        if self._net_forces_w is None:
+            return None
+        return TorchArray(self._net_forces_w)
 
     @property
-    def net_forces_w_history(self) -> wp.array3d | None:
+    def net_forces_w_history(self) -> TorchArray | None:
         """The net (total) contact forces in world frame.
 
         `wp.vec3f` array whose shape is (N, T, S) where N is the number of environments, T is the configured history
@@ -87,10 +94,12 @@ class ContactSensorData(BaseContactSensorData):
             This quantity is the sum of the contact forces acting on each sensor. It must not be confused
             with the total contact forces acting on the sensors (which also includes the tangential forces).
         """
-        return self._net_forces_w_history
+        if self._net_forces_w_history is None:
+            return None
+        return TorchArray(self._net_forces_w_history)
 
     @property
-    def force_matrix_w(self) -> wp.array3d | None:
+    def force_matrix_w(self) -> TorchArray | None:
         """The contact forces between sensors and filter objects in world frame.
 
         `wp.vec3f` array whose shape is (N, S, F) where N is the number of environments, S is number of sensors
@@ -100,10 +109,12 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.filter_prim_paths_expr` is empty, then this quantity is None.
         """
-        return self._force_matrix_w
+        if self._force_matrix_w is None:
+            return None
+        return TorchArray(self._force_matrix_w)
 
     @property
-    def force_matrix_w_history(self) -> wp.array4d | None:
+    def force_matrix_w_history(self) -> TorchArray | None:
         """The contact forces between sensors and filter objects in world frame.
 
         `wp.vec3f` array whose shape is (N, T, S, F) where N is the number of environments, T is the configured history
@@ -115,20 +126,22 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.filter_prim_paths_expr` is empty, then this quantity is None.
         """
-        return self._force_matrix_w_history
+        if self._force_matrix_w_history is None:
+            return None
+        return TorchArray(self._force_matrix_w_history)
 
     @property
-    def contact_pos_w(self) -> wp.array | None:
+    def contact_pos_w(self) -> TorchArray | None:
         """Not supported by Newton contact sensor."""
         raise NotImplementedError("contact_pos_w is not supported by the Newton contact sensor.")
 
     @property
-    def friction_forces_w(self) -> wp.array | None:
+    def friction_forces_w(self) -> TorchArray | None:
         """Not supported by Newton contact sensor."""
         raise NotImplementedError("friction_forces_w is not supported by the Newton contact sensor.")
 
     @property
-    def last_air_time(self) -> wp.array2d | None:
+    def last_air_time(self) -> TorchArray | None:
         """Time spent (in s) in the air before the last contact.
 
         `wp.float32` array whose shape is (N, S) where N is the number of environments and S is the number of sensors.
@@ -137,10 +150,12 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.track_air_time` is False, then this quantity is None.
         """
-        return self._last_air_time
+        if self._last_air_time is None:
+            return None
+        return TorchArray(self._last_air_time)
 
     @property
-    def current_air_time(self) -> wp.array2d | None:
+    def current_air_time(self) -> TorchArray | None:
         """Time spent (in s) in the air since the last detach.
 
         `wp.float32` array whose shape is (N, S) where N is the number of environments and S is the number of sensors.
@@ -149,10 +164,12 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.track_air_time` is False, then this quantity is None.
         """
-        return self._current_air_time
+        if self._current_air_time is None:
+            return None
+        return TorchArray(self._current_air_time)
 
     @property
-    def last_contact_time(self) -> wp.array2d | None:
+    def last_contact_time(self) -> TorchArray | None:
         """Time spent (in s) in contact before the last detach.
 
         `wp.float32` array whose shape is (N, S) where N is the number of environments and S is the number of sensors.
@@ -161,10 +178,12 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.track_air_time` is False, then this quantity is None.
         """
-        return self._last_contact_time
+        if self._last_contact_time is None:
+            return None
+        return TorchArray(self._last_contact_time)
 
     @property
-    def current_contact_time(self) -> wp.array2d | None:
+    def current_contact_time(self) -> TorchArray | None:
         """Time spent (in s) in contact since the last contact.
 
         `wp.float32` array whose shape is (N, S) where N is the number of environments and S is the number of sensors.
@@ -173,7 +192,9 @@ class ContactSensorData(BaseContactSensorData):
         Note:
             If the :attr:`ContactSensorCfg.track_air_time` is False, then this quantity is None.
         """
-        return self._current_contact_time
+        if self._current_contact_time is None:
+            return None
+        return TorchArray(self._current_contact_time)
 
     def create_buffers(
         self,

@@ -20,6 +20,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.app.settings_manager import get_settings_manager
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sensors.contact_sensor import BaseContactSensor
+from isaaclab.utils.warp import TorchArray
 
 from isaaclab_physx.physics import PhysxManager as SimulationManager
 
@@ -189,7 +190,7 @@ class ContactSensor(BaseContactSensor):
             device=self._device,
         )
 
-    def compute_first_contact(self, dt: float, abs_tol: float = 1.0e-8) -> wp.array:
+    def compute_first_contact(self, dt: float, abs_tol: float = 1.0e-8) -> TorchArray:
         """Checks if bodies that have established contact within the last :attr:`dt` seconds.
 
         This function checks if the bodies have established contact within the last :attr:`dt` seconds
@@ -232,9 +233,9 @@ class ContactSensor(BaseContactSensor):
             outputs=[self._data._first_transition],
             device=self._device,
         )
-        return self._data._first_transition
+        return TorchArray(self._data._first_transition)
 
-    def compute_first_air(self, dt: float, abs_tol: float = 1.0e-8) -> wp.array:
+    def compute_first_air(self, dt: float, abs_tol: float = 1.0e-8) -> TorchArray:
         """Checks if bodies that have broken contact within the last :attr:`dt` seconds.
 
         This function checks if the bodies have broken contact within the last :attr:`dt` seconds
@@ -277,7 +278,7 @@ class ContactSensor(BaseContactSensor):
             outputs=[self._data._first_transition],
             device=self._device,
         )
-        return self._data._first_transition
+        return TorchArray(self._data._first_transition)
 
     """
     Implementation.
@@ -478,13 +479,13 @@ class ContactSensor(BaseContactSensor):
         if self.body_physx_view is None:
             return
         # Convert warp data to torch at the boundary for visualization
-        net_forces_torch = wp.to_torch(self._data._net_forces_w)  # (N, B, 3)
+        net_forces_torch = self._data.net_forces_w.torch  # (N, B, 3)
         net_contact_force_w = torch.linalg.norm(net_forces_torch, dim=-1)
         # marker indices: 0 = contact, 1 = no contact
         marker_indices = torch.where(net_contact_force_w > self.cfg.force_threshold, 0, 1)
         # check if prim is visualized
         if self.cfg.track_pose:
-            frame_origins = wp.to_torch(self._data._pos_w)  # (N, B, 3)
+            frame_origins = self._data.pos_w.torch  # (N, B, 3)
         else:
             pose = self.body_physx_view.get_transforms()  # (N*B, 7) float32
             pose_torch = wp.to_torch(pose)
