@@ -121,6 +121,28 @@ class TorchArray:
         return f"TorchArray(shape={self.shape}, dtype={self.dtype}, device={self.device})"
 
     # ------------------------------------------------------------------
+    # Indexing (deprecation bridge — delegates to .torch)
+    # ------------------------------------------------------------------
+
+    def __getitem__(self, key):
+        """Index into the torch view of this array.
+
+        Supports all torch indexing: ``int``, ``slice``, ``tuple``,
+        boolean masks, and fancy indexing (ND).
+        """
+        self._warn_implicit()
+        return self.torch[key]
+
+    def __setitem__(self, key, value):
+        """Write through the torch view into the shared warp memory.
+
+        Supports all torch indexing: ``int``, ``slice``, ``tuple``,
+        boolean masks, and fancy indexing (ND).
+        """
+        self._warn_implicit()
+        self.torch[key] = value
+
+    # ------------------------------------------------------------------
     # Deprecation bridge
     # ------------------------------------------------------------------
 

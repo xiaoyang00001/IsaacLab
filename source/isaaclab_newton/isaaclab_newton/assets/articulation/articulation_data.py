@@ -1430,24 +1430,42 @@ class ArticulationData(BaseArticulationData):
             self._body_mass_ta.rebind(self._sim_bind_body_mass)
             self._body_inertia_ta.rebind(self._sim_bind_body_inertia)
             self._body_com_pos_b_ta.rebind(self._sim_bind_body_com_pos_b)
-            # Invalidate lazy sliced TorchArrays so they are re-created from the
-            # new sim bindings on next access.
+            # Invalidate lazy sliced TorchArrays AND their backing wp.arrays
+            # so they are re-created from the new sim bindings on next access.
+            # Without this, contiguous strided views hold stale pointers into
+            # freed transform memory after sim reset.
             self._root_link_pos_w_ta = None
+            self._root_link_pos_w = None
             self._root_link_quat_w_ta = None
+            self._root_link_quat_w = None
             self._root_link_lin_vel_w_ta = None
+            self._root_link_lin_vel_w = None
             self._root_link_ang_vel_w_ta = None
+            self._root_link_ang_vel_w = None
             self._root_com_pos_w_ta = None
+            self._root_com_pos_w = None
             self._root_com_quat_w_ta = None
+            self._root_com_quat_w = None
             self._root_com_lin_vel_w_ta = None
+            self._root_com_lin_vel_w = None
             self._root_com_ang_vel_w_ta = None
+            self._root_com_ang_vel_w = None
             self._body_link_pos_w_ta = None
+            self._body_link_pos_w = None
             self._body_link_quat_w_ta = None
+            self._body_link_quat_w = None
             self._body_link_lin_vel_w_ta = None
+            self._body_link_lin_vel_w = None
             self._body_link_ang_vel_w_ta = None
+            self._body_link_ang_vel_w = None
             self._body_com_pos_w_ta = None
+            self._body_com_pos_w = None
             self._body_com_quat_w_ta = None
+            self._body_com_quat_w = None
             self._body_com_lin_vel_w_ta = None
+            self._body_com_lin_vel_w = None
             self._body_com_ang_vel_w_ta = None
+            self._body_com_ang_vel_w = None
 
     def _create_buffers(self) -> None:
         """Create buffers for the root data."""

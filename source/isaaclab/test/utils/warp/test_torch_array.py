@@ -284,3 +284,48 @@ class TestTorchArrayDeprecationBridge:
         ta = TorchArray(wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device="cpu"))
         result = ta > 1.5
         assert result.tolist() == [False, True, True]
+
+    def test_getitem_1d(self):
+        """Test 1D indexing via __getitem__."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        ta = TorchArray(wp.array([10.0, 20.0, 30.0], dtype=wp.float32, device="cpu"))
+        assert ta[0].item() == 10.0
+        assert ta[-1].item() == 30.0
+        assert ta[1:].tolist() == [20.0, 30.0]
+
+    def test_getitem_nd(self):
+        """Test ND indexing via __getitem__ with structured types."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        wp_arr = wp.zeros((3, 4), dtype=wp.vec3f, device="cpu")
+        ta = TorchArray(wp_arr)
+        # torch view is (3, 4, 3)
+        result = ta[:, 0, :]
+        assert result.shape == (3, 3)
+        result = ta[0, :, 2]
+        assert result.shape == (4,)
+
+    def test_setitem_writes_through(self):
+        """Test __setitem__ writes through to shared warp memory."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = True
+        wp_arr = wp.array([1.0, 2.0, 3.0], dtype=wp.float32, device="cpu")
+        ta = TorchArray(wp_arr)
+        ta[0] = 99.0
+        assert wp_arr.numpy()[0] == 99.0
+
+    def test_getitem_warns(self):
+        """Test __getitem__ emits deprecation warning."""
+        from isaaclab.utils.warp.torch_array import TorchArray
+
+        TorchArray._deprecation_warned = False
+        ta = TorchArray(wp.array([1.0, 2.0], dtype=wp.float32, device="cpu"))
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _ = ta[0]
+            deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+            assert len(deprecation_warnings) == 1
