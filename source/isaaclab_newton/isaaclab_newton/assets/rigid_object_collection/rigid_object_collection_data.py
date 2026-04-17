@@ -632,6 +632,33 @@ class RigidObjectCollectionData(BaseRigidObjectCollectionData):
             copy=False,
         )
 
+        # Re-pin TorchArray wrappers to the newly created sim bindings.
+        # After a full simulation reset the solver recreates its internal arrays, so
+        # any TorchArray that was wrapping the old pointer becomes stale.  We rebind
+        # them here.  On the very first call (from __init__) the TorchArrays do not
+        # exist yet — _create_buffers() will create them — so we guard with hasattr.
+        if hasattr(self, "_body_link_pose_w_ta"):
+            # Category 1: eagerly-pinned sim-bound TorchArrays
+            self._body_link_pose_w_ta.rebind(self._sim_bind_body_link_pose_w)
+            self._body_com_vel_w_ta.rebind(self._sim_bind_body_com_vel_w)
+            self._body_com_pos_b_ta.rebind(self._sim_bind_body_com_pos_b)
+            self._body_mass_ta.rebind(self._sim_bind_body_mass)
+            self._body_inertia_ta.rebind(self._body_inertia)
+            # Invalidate lazy sliced TorchArrays so they are re-created from the
+            # new sim bindings on next access.  Without this, contiguous strided
+            # views hold stale pointers into freed transform memory after sim reset.
+            self._body_link_pos_w_ta = None
+            self._body_link_quat_w_ta = None
+            self._body_link_lin_vel_w_ta = None
+            self._body_link_ang_vel_w_ta = None
+            self._body_com_pos_w_ta = None
+            self._body_com_quat_w_ta = None
+            self._body_com_lin_vel_w_ta = None
+            self._body_com_ang_vel_w_ta = None
+            self._body_com_lin_acc_w_ta = None
+            self._body_com_ang_acc_w_ta = None
+            self._body_com_quat_b_ta = None
+
     def _create_buffers(self) -> None:
         """Create buffers for computing and caching derived quantities."""
         super()._create_buffers()
