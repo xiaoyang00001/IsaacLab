@@ -79,7 +79,63 @@ class ArticulationData(BaseArticulationData):
         self.GRAVITY_VEC_W = wp.from_torch(gravity_dir, dtype=wp.vec3f)
         self.FORWARD_VEC_B = wp.from_torch(forward_vec, dtype=wp.vec3f)
 
+        self._create_simulation_bindings()
         self._create_buffers()
+
+    def _create_simulation_bindings(self) -> None:
+        """Cache PhysX view getter results as direct simulation bindings.
+
+        The PhysX view API returns the same wp.array object on every call --
+        data is updated in-place by the solver. We cache these once and wrap
+        them in TorchArrays for zero-overhead property access.
+        """
+        self._sim_bind_root_link_pose_w = self._root_view.get_root_transforms().view(wp.transformf)
+        self._sim_bind_root_com_vel_w = self._root_view.get_root_velocities().view(wp.spatial_vectorf)
+        self._sim_bind_body_link_pose_w = self._root_view.get_link_transforms().view(wp.transformf)
+        self._sim_bind_body_com_vel_w = self._root_view.get_link_velocities().view(wp.spatial_vectorf)
+        self._sim_bind_body_com_acc_w = self._root_view.get_link_accelerations().view(wp.spatial_vectorf)
+        self._sim_bind_body_incoming_joint_wrench_b = (
+            self._root_view.get_link_incoming_joint_force().view(wp.spatial_vectorf)
+        )
+        self._sim_bind_joint_pos = self._root_view.get_dof_positions()
+        self._sim_bind_joint_vel = self._root_view.get_dof_velocities()
+
+        # Rebind TorchArrays if they already exist (after sim reset)
+        if hasattr(self, "_root_link_pose_w_ta"):
+            # Category A rebinds
+            self._root_link_pose_w_ta.rebind(self._sim_bind_root_link_pose_w)
+            self._root_com_vel_w_ta.rebind(self._sim_bind_root_com_vel_w)
+            self._body_link_pose_w_ta.rebind(self._sim_bind_body_link_pose_w)
+            self._body_com_vel_w_ta.rebind(self._sim_bind_body_com_vel_w)
+            self._body_com_acc_w_ta.rebind(self._sim_bind_body_com_acc_w)
+            self._body_incoming_joint_wrench_b_ta.rebind(self._sim_bind_body_incoming_joint_wrench_b)
+            self._joint_pos_ta.rebind(self._sim_bind_joint_pos)
+            self._joint_vel_ta.rebind(self._sim_bind_joint_vel)
+            # Reset Category B timestamps so kernels re-run with new inputs
+            for buf in [
+                self._root_link_vel_w, self._root_com_pose_w, self._body_link_vel_w,
+                self._body_com_pose_w, self._body_com_pose_b, self._projected_gravity_b,
+                self._heading_w, self._root_link_lin_vel_b, self._root_link_ang_vel_b,
+                self._root_com_lin_vel_b, self._root_com_ang_vel_b, self._joint_acc,
+                self._root_state_w, self._root_link_state_w, self._root_com_state_w,
+                self._body_state_w, self._body_link_state_w, self._body_com_state_w,
+            ]:
+                buf.timestamp = -1.0
+            # Invalidate Category D sliced buffers (both TorchArray and backing wp.array)
+            for attr in [
+                "_root_link_pos_w", "_root_link_quat_w",
+                "_root_link_lin_vel_w", "_root_link_ang_vel_w",
+                "_root_com_pos_w", "_root_com_quat_w",
+                "_root_com_lin_vel_w", "_root_com_ang_vel_w",
+                "_body_link_pos_w", "_body_link_quat_w",
+                "_body_link_lin_vel_w", "_body_link_ang_vel_w",
+                "_body_com_pos_w", "_body_com_quat_w",
+                "_body_com_lin_vel_w", "_body_com_ang_vel_w",
+                "_body_com_lin_acc_w", "_body_com_ang_acc_w",
+                "_body_com_pos_b", "_body_com_quat_b",
+            ]:
+                setattr(self, f"{attr}_ta", None)
+                setattr(self, attr, None)
 
     @property
     def is_primed(self) -> bool:
@@ -1145,25 +1201,17 @@ class ArticulationData(BaseArticulationData):
         self._num_fixed_tendons = self._root_view.max_fixed_tendons
         self._num_spatial_tendons = self._root_view.max_spatial_tendons
 
-        # -- link frame w.r.t. world frame
-        self._root_link_pose_w = TimestampedBuffer((self._num_instances), self.device, wp.transformf)
+        # -- Category B: computed from Category A via kernels (keep TimestampedBuffer)
+        # link frame w.r.t. world frame
         self._root_link_vel_w = TimestampedBuffer((self._num_instances), self.device, wp.spatial_vectorf)
-        self._body_link_pose_w = TimestampedBuffer((self._num_instances, self._num_bodies), self.device, wp.transformf)
         self._body_link_vel_w = TimestampedBuffer(
             (self._num_instances, self._num_bodies), self.device, wp.spatial_vectorf
         )
-        # -- com frame w.r.t. link frame
+        # -- com frame w.r.t. link frame (Category A* — CPU→GPU copy needed)
         self._body_com_pose_b = TimestampedBuffer((self._num_instances, self._num_bodies), self.device, wp.transformf)
-        # -- com frame w.r.t. world frame
+        # -- com frame w.r.t. world frame (computed)
         self._root_com_pose_w = TimestampedBuffer((self._num_instances), self.device, wp.transformf)
-        self._root_com_vel_w = TimestampedBuffer((self._num_instances), self.device, wp.spatial_vectorf)
         self._body_com_pose_w = TimestampedBuffer((self._num_instances, self._num_bodies), self.device, wp.transformf)
-        self._body_com_vel_w = TimestampedBuffer(
-            (self._num_instances, self._num_bodies), self.device, wp.spatial_vectorf
-        )
-        self._body_com_acc_w = TimestampedBuffer(
-            (self._num_instances, self._num_bodies), self.device, wp.spatial_vectorf
-        )
         # -- combined state (these are cached as they concatenate)
         self._root_state_w = TimestampedBuffer((self._num_instances), self.device, shared_kernels.vec13f)
         self._root_link_state_w = TimestampedBuffer((self._num_instances), self.device, shared_kernels.vec13f)
@@ -1177,13 +1225,8 @@ class ArticulationData(BaseArticulationData):
         self._body_com_state_w = TimestampedBuffer(
             (self._num_instances, self._num_bodies), self.device, shared_kernels.vec13f
         )
-        # -- joint state
-        self._joint_pos = TimestampedBuffer((self._num_instances, self._num_joints), self.device, wp.float32)
-        self._joint_vel = TimestampedBuffer((self._num_instances, self._num_joints), self.device, wp.float32)
+        # -- joint state (only acceleration is computed, pos/vel are Category A)
         self._joint_acc = TimestampedBuffer((self._num_instances, self._num_joints), self.device, wp.float32)
-        self._body_incoming_joint_wrench_b = TimestampedBuffer(
-            (self._num_instances, self._num_bodies, self._num_joints), self.device, wp.spatial_vectorf
-        )
         # -- derived properties (these are cached to avoid repeated memory allocations)
         self._projected_gravity_b = TimestampedBuffer((self._num_instances), self.device, wp.vec3f)
         self._heading_w = TimestampedBuffer((self._num_instances), self.device, wp.float32)
@@ -1292,6 +1335,79 @@ class ArticulationData(BaseArticulationData):
         self._body_mass = wp.clone(self._root_view.get_masses(), device=self.device)
         self._body_inertia = wp.clone(self._root_view.get_inertias(), device=self.device)
         self._default_root_state = None
+
+        # -- Pin TorchArrays for all categories
+        # Category A: direct simulation bindings (updated in-place by solver)
+        self._root_link_pose_w_ta = TorchArray(self._sim_bind_root_link_pose_w)
+        self._root_com_vel_w_ta = TorchArray(self._sim_bind_root_com_vel_w)
+        self._body_link_pose_w_ta = TorchArray(self._sim_bind_body_link_pose_w)
+        self._body_com_vel_w_ta = TorchArray(self._sim_bind_body_com_vel_w)
+        self._body_com_acc_w_ta = TorchArray(self._sim_bind_body_com_acc_w)
+        self._body_incoming_joint_wrench_b_ta = TorchArray(self._sim_bind_body_incoming_joint_wrench_b)
+        self._joint_pos_ta = TorchArray(self._sim_bind_joint_pos)
+        self._joint_vel_ta = TorchArray(self._sim_bind_joint_vel)
+        # Category B: computed from Category A via kernels
+        self._root_link_vel_w_ta = TorchArray(self._root_link_vel_w.data)
+        self._root_com_pose_w_ta = TorchArray(self._root_com_pose_w.data)
+        self._body_link_vel_w_ta = TorchArray(self._body_link_vel_w.data)
+        self._body_com_pose_w_ta = TorchArray(self._body_com_pose_w.data)
+        self._body_com_pose_b_ta = TorchArray(self._body_com_pose_b.data)
+        self._projected_gravity_b_ta = TorchArray(self._projected_gravity_b.data)
+        self._heading_w_ta = TorchArray(self._heading_w.data)
+        self._root_link_lin_vel_b_ta = TorchArray(self._root_link_lin_vel_b.data)
+        self._root_link_ang_vel_b_ta = TorchArray(self._root_link_ang_vel_b.data)
+        self._root_com_lin_vel_b_ta = TorchArray(self._root_com_lin_vel_b.data)
+        self._root_com_ang_vel_b_ta = TorchArray(self._root_com_ang_vel_b.data)
+        self._joint_acc_ta = TorchArray(self._joint_acc.data)
+        self._root_state_w_ta = TorchArray(self._root_state_w.data)
+        self._root_link_state_w_ta = TorchArray(self._root_link_state_w.data)
+        self._root_com_state_w_ta = TorchArray(self._root_com_state_w.data)
+        self._body_state_w_ta = TorchArray(self._body_state_w.data)
+        self._body_link_state_w_ta = TorchArray(self._body_link_state_w.data)
+        self._body_com_state_w_ta = TorchArray(self._body_com_state_w.data)
+        # Category C: pre-allocated constants
+        self._default_root_pose_ta = TorchArray(self._default_root_pose)
+        self._default_root_vel_ta = TorchArray(self._default_root_vel)
+        self._default_joint_pos_ta = TorchArray(self._default_joint_pos)
+        self._default_joint_vel_ta = TorchArray(self._default_joint_vel)
+        self._joint_pos_target_ta = TorchArray(self._joint_pos_target)
+        self._joint_vel_target_ta = TorchArray(self._joint_vel_target)
+        self._joint_effort_target_ta = TorchArray(self._joint_effort_target)
+        self._computed_torque_ta = TorchArray(self._computed_torque)
+        self._applied_torque_ta = TorchArray(self._applied_torque)
+        self._joint_stiffness_ta = TorchArray(self._joint_stiffness)
+        self._joint_damping_ta = TorchArray(self._joint_damping)
+        self._joint_armature_ta = TorchArray(self._joint_armature)
+        self._joint_friction_coeff_ta = TorchArray(self._joint_friction_coeff)
+        self._joint_dynamic_friction_coeff_ta = TorchArray(self._joint_dynamic_friction_coeff)
+        self._joint_viscous_friction_coeff_ta = TorchArray(self._joint_viscous_friction_coeff)
+        self._joint_pos_limits_ta = TorchArray(self._joint_pos_limits)
+        self._joint_vel_limits_ta = TorchArray(self._joint_vel_limits)
+        self._joint_effort_limits_ta = TorchArray(self._joint_effort_limits)
+        self._soft_joint_pos_limits_ta = TorchArray(self._soft_joint_pos_limits)
+        self._soft_joint_vel_limits_ta = TorchArray(self._soft_joint_vel_limits)
+        self._gear_ratio_ta = TorchArray(self._gear_ratio)
+        # Category D: sliced properties (lazy-initialized on first access)
+        self._root_link_pos_w_ta: TorchArray | None = None
+        self._root_link_quat_w_ta: TorchArray | None = None
+        self._root_link_lin_vel_w_ta: TorchArray | None = None
+        self._root_link_ang_vel_w_ta: TorchArray | None = None
+        self._root_com_pos_w_ta: TorchArray | None = None
+        self._root_com_quat_w_ta: TorchArray | None = None
+        self._root_com_lin_vel_w_ta: TorchArray | None = None
+        self._root_com_ang_vel_w_ta: TorchArray | None = None
+        self._body_link_pos_w_ta: TorchArray | None = None
+        self._body_link_quat_w_ta: TorchArray | None = None
+        self._body_link_lin_vel_w_ta: TorchArray | None = None
+        self._body_link_ang_vel_w_ta: TorchArray | None = None
+        self._body_com_pos_w_ta: TorchArray | None = None
+        self._body_com_quat_w_ta: TorchArray | None = None
+        self._body_com_lin_vel_w_ta: TorchArray | None = None
+        self._body_com_ang_vel_w_ta: TorchArray | None = None
+        self._body_com_lin_acc_w_ta: TorchArray | None = None
+        self._body_com_ang_acc_w_ta: TorchArray | None = None
+        self._body_com_pos_b_ta: TorchArray | None = None
+        self._body_com_quat_b_ta: TorchArray | None = None
 
     """
     Internal helpers.
