@@ -148,7 +148,7 @@ class OpenXRDevice(DeviceBase):
                 "isaaclab_right_a",
                 lambda ev: self._toggle_anchor_rotation(),
             )
-
+            
     def __del__(self):
         """Clean up resources when the object is destroyed.
 

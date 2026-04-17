@@ -26,6 +26,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
+from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 
@@ -42,7 +43,9 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_contr
     G1_UPPER_BODY_IK_ACTION_CFG,
 )
 
-
+FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
+FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 ##
 # Scene definition
 ##
@@ -76,7 +79,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
 
     # Humanoid robot w/ arms higher
-    robot: ArticulationCfg = G1_29DOF_CFG
+    robot: ArticulationCfg = FIXED_G1_29DOF_CFG
 
     # Ground plane
     ground = AssetBaseCfg(
@@ -97,17 +100,17 @@ class ActionsCfg:
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
-    lower_body_joint_pos = AgileBasedLowerBodyActionCfg(
-        asset_name="robot",
-        joint_names=[
-            ".*_hip_.*_joint",
-            ".*_knee_joint",
-            ".*_ankle_.*_joint",
-        ],
-        policy_output_scale=0.25,
-        obs_group_name="lower_body_policy",  # need to be the same name as the on in ObservationCfg
-        policy_path=f"{ISAACLAB_NUCLEUS_DIR}/Policies/Agile/agile_locomotion.pt",
-    )
+    # lower_body_joint_pos = AgileBasedLowerBodyActionCfg(
+    #     asset_name="robot",
+    #     joint_names=[
+    #         ".*_hip_.*_joint",
+    #         ".*_knee_joint",
+    #         ".*_ankle_.*_joint",
+    #     ],
+    #     policy_output_scale=0.25,
+    #     obs_group_name="lower_body_policy",  # need to be the same name as the on in ObservationCfg
+    #     policy_path=f"{ISAACLAB_NUCLEUS_DIR}/Policies/Agile/agile_locomotion.pt",
+    # )
 
 
 @configclass
@@ -142,14 +145,21 @@ class ObservationsCfg:
             func=manip_mdp.object_obs,
             params={"left_eef_link_name": "left_wrist_yaw_link", "right_eef_link_name": "right_wrist_yaw_link"},
         )
-
+        # left_wrist_cam = ObsTerm(
+        #     func=base_mdp.image,
+        #     params={"sensor_cfg": SceneEntityCfg("left_hand_cam"), "data_type": "rgb", "normalize": False},
+        # )
+        # right_wrist_cam = ObsTerm(
+        #     func=base_mdp.image,
+        #     params={"sensor_cfg": SceneEntityCfg("right_hand_cam"), "data_type": "rgb", "normalize": False},
+        # )
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = False
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
-    lower_body_policy: AgileTeacherPolicyObservationsCfg = AgileTeacherPolicyObservationsCfg()
+    # lower_body_policy: AgileTeacherPolicyObservationsCfg = AgileTeacherPolicyObservationsCfg()
 
 
 @configclass
@@ -217,7 +227,30 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.xr.fixed_anchor_height = True
         # Ensure XR anchor rotation follows the robot pelvis (yaw only), with smoothing for comfort
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
-
+        # # Added Camera attached to left wrist link
+        # self.scene.left_hand_cam = CameraCfg(
+        #     prim_path="{ENV_REGEX_NS}/Robot/left_wrist_yaw_link/cam",
+        #     update_period=0.0,
+        #     height=256,
+        #     width=256,
+        #     data_types=["rgb"],
+        #     spawn=sim_utils.PinholeCameraCfg(
+        #         focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 10.0)
+        #     ),
+        #     offset=CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.0), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+        # )
+        # # Added Camera attached to right wrist link
+        # self.scene.right_hand_cam = CameraCfg(
+        #     prim_path="{ENV_REGEX_NS}/Robot/right_wrist_yaw_link/cam",
+        #     update_period=0.0,
+        #     height=256,
+        #     width=256,
+        #     data_types=["rgb"],
+        #     spawn=sim_utils.PinholeCameraCfg(
+        #         focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 10.0)
+        #     ),
+        #     offset=CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.0), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+        # )
         self.teleop_devices = DevicesCfg(
             devices={
                 "handtracking": OpenXRDeviceCfg(
@@ -229,9 +262,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                             sim_device=self.sim.device,
                             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
                         ),
-                        G1LowerBodyStandingRetargeterCfg(
-                            sim_device=self.sim.device,
-                        ),
+                        # G1LowerBodyStandingRetargeterCfg(
+                        #     sim_device=self.sim.device,
+                        # ),
                     ],
                     sim_device=self.sim.device,
                     xr_cfg=self.xr,
@@ -243,9 +276,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                             sim_device=self.sim.device,
                             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
                         ),
-                        G1LowerBodyStandingMotionControllerRetargeterCfg(
-                            sim_device=self.sim.device,
-                        ),
+                        # G1LowerBodyStandingMotionControllerRetargeterCfg(
+                        #     sim_device=self.sim.device,
+                        # ),
                     ],
                     sim_device=self.sim.device,
                     xr_cfg=self.xr,

@@ -80,7 +80,7 @@ if args_cli.enable_pinocchio:
     # installed by IsaacLab and not the one installed by Isaac Sim.
     # pinocchio is required by the Pink IK controllers and the GR1T2 retargeter
     import pinocchio  # noqa: F401
-if "handtracking" in args_cli.teleop_device.lower():
+if any(keyword in args_cli.teleop_device.lower() for keyword in ["handtracking", "motion_controllers", "openxr"]):
     app_launcher_args["xr"] = True
 
 # launch the simulator
@@ -235,7 +235,8 @@ def create_environment_config(
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
     env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
-
+    env_cfg.recorders.export_in_record_pre_reset = False
+    env_cfg.recorders.record_initial_state = None
     return env_cfg, success_term
 
 
@@ -256,7 +257,7 @@ def create_environment(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg) -> gym.En
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
         return env
     except Exception as e:
-        logger.error(f"Failed to create environment: {e}")
+        logger.exception(f"Failed to create environment: {e}")
         exit(1)
 
 

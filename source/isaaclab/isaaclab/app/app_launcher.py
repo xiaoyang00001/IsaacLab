@@ -21,6 +21,10 @@ import signal
 import sys
 from typing import Any, Literal
 
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import torch
+
 with contextlib.suppress(ModuleNotFoundError):
     import isaacsim  # noqa: F401
 
