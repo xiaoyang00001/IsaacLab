@@ -79,6 +79,10 @@ class ArticulationData(BaseArticulationData):
         self.GRAVITY_VEC_W = wp.from_torch(gravity_dir, dtype=wp.vec3f)
         self.FORWARD_VEC_B = wp.from_torch(forward_vec, dtype=wp.vec3f)
 
+        # Flag indicating that joint positions have been written but FK has not yet been run.
+        # When True, body_link_pose_w (and dependents) call update_articulations_kinematic() before returning.
+        self._fk_dirty = False
+
         self._create_simulation_bindings()
         self._create_buffers()
 
@@ -94,8 +98,8 @@ class ArticulationData(BaseArticulationData):
         self._sim_bind_body_link_pose_w = self._root_view.get_link_transforms().view(wp.transformf)
         self._sim_bind_body_com_vel_w = self._root_view.get_link_velocities().view(wp.spatial_vectorf)
         self._sim_bind_body_com_acc_w = self._root_view.get_link_accelerations().view(wp.spatial_vectorf)
-        self._sim_bind_body_incoming_joint_wrench_b = (
-            self._root_view.get_link_incoming_joint_force().view(wp.spatial_vectorf)
+        self._sim_bind_body_incoming_joint_wrench_b = self._root_view.get_link_incoming_joint_force().view(
+            wp.spatial_vectorf
         )
         self._sim_bind_joint_pos = self._root_view.get_dof_positions()
         self._sim_bind_joint_vel = self._root_view.get_dof_velocities()
@@ -113,26 +117,48 @@ class ArticulationData(BaseArticulationData):
             self._joint_vel_ta.rebind(self._sim_bind_joint_vel)
             # Reset Category B timestamps so kernels re-run with new inputs
             for buf in [
-                self._root_link_vel_w, self._root_com_pose_w, self._body_link_vel_w,
-                self._body_com_pose_w, self._body_com_pose_b, self._projected_gravity_b,
-                self._heading_w, self._root_link_lin_vel_b, self._root_link_ang_vel_b,
-                self._root_com_lin_vel_b, self._root_com_ang_vel_b, self._joint_acc,
-                self._root_state_w, self._root_link_state_w, self._root_com_state_w,
-                self._body_state_w, self._body_link_state_w, self._body_com_state_w,
+                self._root_link_vel_w,
+                self._root_com_pose_w,
+                self._body_link_vel_w,
+                self._body_com_pose_w,
+                self._body_com_pose_b,
+                self._projected_gravity_b,
+                self._heading_w,
+                self._root_link_lin_vel_b,
+                self._root_link_ang_vel_b,
+                self._root_com_lin_vel_b,
+                self._root_com_ang_vel_b,
+                self._joint_acc,
+                self._root_state_w,
+                self._root_link_state_w,
+                self._root_com_state_w,
+                self._body_state_w,
+                self._body_link_state_w,
+                self._body_com_state_w,
             ]:
                 buf.timestamp = -1.0
             # Invalidate Category D sliced buffers (both TorchArray and backing wp.array)
             for attr in [
-                "_root_link_pos_w", "_root_link_quat_w",
-                "_root_link_lin_vel_w", "_root_link_ang_vel_w",
-                "_root_com_pos_w", "_root_com_quat_w",
-                "_root_com_lin_vel_w", "_root_com_ang_vel_w",
-                "_body_link_pos_w", "_body_link_quat_w",
-                "_body_link_lin_vel_w", "_body_link_ang_vel_w",
-                "_body_com_pos_w", "_body_com_quat_w",
-                "_body_com_lin_vel_w", "_body_com_ang_vel_w",
-                "_body_com_lin_acc_w", "_body_com_ang_acc_w",
-                "_body_com_pos_b", "_body_com_quat_b",
+                "_root_link_pos_w",
+                "_root_link_quat_w",
+                "_root_link_lin_vel_w",
+                "_root_link_ang_vel_w",
+                "_root_com_pos_w",
+                "_root_com_quat_w",
+                "_root_com_lin_vel_w",
+                "_root_com_ang_vel_w",
+                "_body_link_pos_w",
+                "_body_link_quat_w",
+                "_body_link_lin_vel_w",
+                "_body_link_ang_vel_w",
+                "_body_com_pos_w",
+                "_body_com_quat_w",
+                "_body_com_lin_vel_w",
+                "_body_com_ang_vel_w",
+                "_body_com_lin_acc_w",
+                "_body_com_ang_acc_w",
+                "_body_com_pos_b",
+                "_body_com_quat_b",
             ]:
                 setattr(self, f"{attr}_ta", None)
                 setattr(self, attr, None)
@@ -167,6 +193,8 @@ class ArticulationData(BaseArticulationData):
         """
         # update the simulation timestamp
         self._sim_timestamp += dt
+        # After a physics step, the solver has updated all sim bindings in-place.
+        self._fk_dirty = False
         # Trigger an update of the joint acceleration buffer at a higher frequency
         # since we do finite differencing.
         self.joint_acc
@@ -592,6 +620,8 @@ class ArticulationData(BaseArticulationData):
         This quantity is the pose of the articulation root's actor frame relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
+        if self._fk_dirty:
+            self._run_fk_and_rebind()
         return self._root_link_pose_w_ta
 
     @property
@@ -692,6 +722,8 @@ class ArticulationData(BaseArticulationData):
         This quantity is the pose of the articulation links' actor frame relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
+        if self._fk_dirty:
+            self._run_fk_and_rebind()
         return self._body_link_pose_w_ta
 
     @property
@@ -999,9 +1031,7 @@ class ArticulationData(BaseArticulationData):
         This quantity is the position of the actor frame of the root rigid body relative to the world.
         """
         if self._root_link_pos_w_ta is None:
-            self._root_link_pos_w_ta = TorchArray(
-                self._get_pos_from_transform(self._sim_bind_root_link_pose_w)
-            )
+            self._root_link_pos_w_ta = TorchArray(self._get_pos_from_transform(self._sim_bind_root_link_pose_w))
         return self._root_link_pos_w_ta
 
     @property
@@ -1012,9 +1042,7 @@ class ArticulationData(BaseArticulationData):
         This quantity is the orientation of the actor frame of the root rigid body.
         """
         if self._root_link_quat_w_ta is None:
-            self._root_link_quat_w_ta = TorchArray(
-                self._get_quat_from_transform(self._sim_bind_root_link_pose_w)
-            )
+            self._root_link_quat_w_ta = TorchArray(self._get_quat_from_transform(self._sim_bind_root_link_pose_w))
         return self._root_link_quat_w_ta
 
     @property
@@ -1027,9 +1055,7 @@ class ArticulationData(BaseArticulationData):
         if self._root_link_lin_vel_w_ta is None:
             # Ensure root_link_vel_w (Cat B) is computed
             self.root_link_vel_w
-            self._root_link_lin_vel_w_ta = TorchArray(
-                self._get_lin_vel_from_spatial_vector(self._root_link_vel_w.data)
-            )
+            self._root_link_lin_vel_w_ta = TorchArray(self._get_lin_vel_from_spatial_vector(self._root_link_vel_w.data))
         return self._root_link_lin_vel_w_ta
 
     @property
@@ -1042,9 +1068,7 @@ class ArticulationData(BaseArticulationData):
         if self._root_link_ang_vel_w_ta is None:
             # Ensure root_link_vel_w (Cat B) is computed
             self.root_link_vel_w
-            self._root_link_ang_vel_w_ta = TorchArray(
-                self._get_ang_vel_from_spatial_vector(self._root_link_vel_w.data)
-            )
+            self._root_link_ang_vel_w_ta = TorchArray(self._get_ang_vel_from_spatial_vector(self._root_link_vel_w.data))
         return self._root_link_ang_vel_w_ta
 
     @property
@@ -1057,9 +1081,7 @@ class ArticulationData(BaseArticulationData):
         if self._root_com_pos_w_ta is None:
             # Ensure root_com_pose_w (Cat B) is computed
             self.root_com_pose_w
-            self._root_com_pos_w_ta = TorchArray(
-                self._get_pos_from_transform(self._root_com_pose_w.data)
-            )
+            self._root_com_pos_w_ta = TorchArray(self._get_pos_from_transform(self._root_com_pose_w.data))
         return self._root_com_pos_w_ta
 
     @property
@@ -1072,9 +1094,7 @@ class ArticulationData(BaseArticulationData):
         if self._root_com_quat_w_ta is None:
             # Ensure root_com_pose_w (Cat B) is computed
             self.root_com_pose_w
-            self._root_com_quat_w_ta = TorchArray(
-                self._get_quat_from_transform(self._root_com_pose_w.data)
-            )
+            self._root_com_quat_w_ta = TorchArray(self._get_quat_from_transform(self._root_com_pose_w.data))
         return self._root_com_quat_w_ta
 
     @property
@@ -1112,9 +1132,7 @@ class ArticulationData(BaseArticulationData):
         This quantity is the position of the articulation bodies' actor frame relative to the world.
         """
         if self._body_link_pos_w_ta is None:
-            self._body_link_pos_w_ta = TorchArray(
-                self._get_pos_from_transform(self._sim_bind_body_link_pose_w)
-            )
+            self._body_link_pos_w_ta = TorchArray(self._get_pos_from_transform(self._sim_bind_body_link_pose_w))
         return self._body_link_pos_w_ta
 
     @property
@@ -1126,9 +1144,7 @@ class ArticulationData(BaseArticulationData):
         This quantity is the orientation of the articulation bodies' actor frame relative to the world.
         """
         if self._body_link_quat_w_ta is None:
-            self._body_link_quat_w_ta = TorchArray(
-                self._get_quat_from_transform(self._sim_bind_body_link_pose_w)
-            )
+            self._body_link_quat_w_ta = TorchArray(self._get_quat_from_transform(self._sim_bind_body_link_pose_w))
         return self._body_link_quat_w_ta
 
     @property
@@ -1142,9 +1158,7 @@ class ArticulationData(BaseArticulationData):
         if self._body_link_lin_vel_w_ta is None:
             # Ensure body_link_vel_w (Cat B) is computed
             self.body_link_vel_w
-            self._body_link_lin_vel_w_ta = TorchArray(
-                self._get_lin_vel_from_spatial_vector(self._body_link_vel_w.data)
-            )
+            self._body_link_lin_vel_w_ta = TorchArray(self._get_lin_vel_from_spatial_vector(self._body_link_vel_w.data))
         return self._body_link_lin_vel_w_ta
 
     @property
@@ -1158,9 +1172,7 @@ class ArticulationData(BaseArticulationData):
         if self._body_link_ang_vel_w_ta is None:
             # Ensure body_link_vel_w (Cat B) is computed
             self.body_link_vel_w
-            self._body_link_ang_vel_w_ta = TorchArray(
-                self._get_ang_vel_from_spatial_vector(self._body_link_vel_w.data)
-            )
+            self._body_link_ang_vel_w_ta = TorchArray(self._get_ang_vel_from_spatial_vector(self._body_link_vel_w.data))
         return self._body_link_ang_vel_w_ta
 
     @property
@@ -1174,9 +1186,7 @@ class ArticulationData(BaseArticulationData):
         if self._body_com_pos_w_ta is None:
             # Ensure body_com_pose_w (Cat B) is computed
             self.body_com_pose_w
-            self._body_com_pos_w_ta = TorchArray(
-                self._get_pos_from_transform(self._body_com_pose_w.data)
-            )
+            self._body_com_pos_w_ta = TorchArray(self._get_pos_from_transform(self._body_com_pose_w.data))
         return self._body_com_pos_w_ta
 
     @property
@@ -1190,9 +1200,7 @@ class ArticulationData(BaseArticulationData):
         if self._body_com_quat_w_ta is None:
             # Ensure body_com_pose_w (Cat B) is computed
             self.body_com_pose_w
-            self._body_com_quat_w_ta = TorchArray(
-                self._get_quat_from_transform(self._body_com_pose_w.data)
-            )
+            self._body_com_quat_w_ta = TorchArray(self._get_quat_from_transform(self._body_com_pose_w.data))
         return self._body_com_quat_w_ta
 
     @property
@@ -1262,9 +1270,7 @@ class ArticulationData(BaseArticulationData):
         if self._body_com_pos_b_ta is None:
             # Ensure body_com_pose_b (Cat A*) is up-to-date
             self.body_com_pose_b
-            self._body_com_pos_b_ta = TorchArray(
-                self._get_pos_from_transform(self._body_com_pose_b.data)
-            )
+            self._body_com_pos_b_ta = TorchArray(self._get_pos_from_transform(self._body_com_pose_b.data))
         return self._body_com_pos_b_ta
 
     @property
@@ -1279,9 +1285,7 @@ class ArticulationData(BaseArticulationData):
         if self._body_com_quat_b_ta is None:
             # Ensure body_com_pose_b (Cat A*) is up-to-date
             self.body_com_pose_b
-            self._body_com_quat_b_ta = TorchArray(
-                self._get_quat_from_transform(self._body_com_pose_b.data)
-            )
+            self._body_com_quat_b_ta = TorchArray(self._get_quat_from_transform(self._body_com_pose_b.data))
         return self._body_com_quat_b_ta
 
     def _create_buffers(self) -> None:
@@ -1504,6 +1508,36 @@ class ArticulationData(BaseArticulationData):
     """
     Internal helpers.
     """
+
+    def _run_fk_and_rebind(self) -> None:
+        """Run forward kinematics and rebind sim bindings if PhysX swapped buffers.
+
+        After joint position or root pose writes, the PhysX link transforms are stale
+        until ``update_articulations_kinematic()`` is called. PhysX may return a new
+        buffer pointer after FK, so we must rebind our cached sim bindings and
+        invalidate any sliced TorchArrays that point into the old memory.
+        """
+        self._physics_sim_view.update_articulations_kinematic()
+
+        # Re-fetch body link transforms — PhysX may swap the buffer after FK.
+        new_body = self._root_view.get_link_transforms().view(wp.transformf)
+        if new_body.ptr != self._sim_bind_body_link_pose_w.ptr:
+            self._sim_bind_body_link_pose_w = new_body
+            self._body_link_pose_w_ta.rebind(new_body)
+            # Invalidate sliced TorchArrays derived from body link transforms
+            self._body_link_pos_w_ta = None
+            self._body_link_quat_w_ta = None
+
+        # Re-fetch root link transforms (shares underlying PhysX data).
+        new_root = self._root_view.get_root_transforms().view(wp.transformf)
+        if new_root.ptr != self._sim_bind_root_link_pose_w.ptr:
+            self._sim_bind_root_link_pose_w = new_root
+            self._root_link_pose_w_ta.rebind(new_root)
+            # Invalidate sliced TorchArrays derived from root link transforms
+            self._root_link_pos_w_ta = None
+            self._root_link_quat_w_ta = None
+
+        self._fk_dirty = False
 
     def _get_pos_from_transform(self, transform: wp.array) -> wp.array:
         """Generates a position array from a transform array.

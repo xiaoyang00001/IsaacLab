@@ -469,14 +469,16 @@ class Articulation(BaseArticulation):
         # Update the timestamps
         self.data._root_link_state_w.timestamp = -1.0
         self.data._root_state_w.timestamp = -1.0
-        # Need to invalidate the buffer to trigger the update with the new state.
-        self.data._body_link_pose_w.timestamp = -1.0
+        # Invalidate Category B/state buffers that derive from root link pose.
+        # Note: _body_link_pose_w is Category A (direct sim binding, no timestamp).
         self.data._body_com_pose_w.timestamp = -1.0
         self.data._body_state_w.timestamp = -1.0
         self.data._body_link_state_w.timestamp = -1.0
         self.data._body_com_state_w.timestamp = -1.0
+        # Mark FK dirty so body_link_pose_w runs update_articulations_kinematic() on next access.
+        self.data._fk_dirty = True
         # set into simulation
-        self.root_view.set_root_transforms(self.data._root_link_pose_w.data.view(wp.float32), indices=env_ids)
+        self.root_view.set_root_transforms(self.data._sim_bind_root_link_pose_w.view(wp.float32), indices=env_ids)
 
     def write_root_link_pose_to_sim_mask(
         self,
@@ -561,14 +563,16 @@ class Articulation(BaseArticulation):
         self.data._root_com_state_w.timestamp = -1.0
         self.data._root_link_state_w.timestamp = -1.0
         self.data._root_state_w.timestamp = -1.0
-        # Need to invalidate the buffer to trigger the update with the new state.
-        self.data._body_link_pose_w.timestamp = -1.0
+        # Invalidate Category B/state buffers that derive from root link pose.
+        # Note: _body_link_pose_w is Category A (direct sim binding, no timestamp).
         self.data._body_com_pose_w.timestamp = -1.0
         self.data._body_state_w.timestamp = -1.0
         self.data._body_link_state_w.timestamp = -1.0
         self.data._body_com_state_w.timestamp = -1.0
+        # Mark FK dirty so body_link_pose_w runs update_articulations_kinematic() on next access.
+        self.data._fk_dirty = True
         # set into simulation
-        self.root_view.set_root_transforms(self.data._root_link_pose_w.data.view(wp.float32), indices=env_ids)
+        self.root_view.set_root_transforms(self.data._sim_bind_root_link_pose_w.view(wp.float32), indices=env_ids)
 
     def write_root_com_pose_to_sim_mask(
         self,
@@ -707,7 +711,7 @@ class Articulation(BaseArticulation):
         self.data._root_state_w.timestamp = -1.0
         self.data._root_com_state_w.timestamp = -1.0
         # set into simulation
-        self.root_view.set_root_velocities(self.data._root_com_vel_w.data.view(wp.float32), indices=env_ids)
+        self.root_view.set_root_velocities(self.data._sim_bind_root_com_vel_w.view(wp.float32), indices=env_ids)
 
     def write_root_com_velocity_to_sim_mask(
         self,
@@ -904,18 +908,19 @@ class Articulation(BaseArticulation):
             ],
             device=self.device,
         )
-        # Need to invalidate the buffer to trigger the update with the new root pose.
-        self.data._body_com_vel_w.timestamp = -1.0
+        # Invalidate Category B/state buffers that derive from joint positions.
+        # Note: _body_com_vel_w and _body_link_pose_w are Category A (direct sim bindings, no timestamp).
         self.data._body_link_vel_w.timestamp = -1.0
         self.data._body_com_pose_b.timestamp = -1.0
         self.data._body_com_pose_w.timestamp = -1.0
-        self.data._body_link_pose_w.timestamp = -1.0
 
         self.data._body_state_w.timestamp = -1.0
         self.data._body_link_state_w.timestamp = -1.0
         self.data._body_com_state_w.timestamp = -1.0
+        # Mark FK dirty so body_link_pose_w runs update_articulations_kinematic() on next access.
+        self.data._fk_dirty = True
         # set into simulation
-        self.root_view.set_dof_positions(self.data._joint_pos.data, indices=env_ids)
+        self.root_view.set_dof_positions(self.data._sim_bind_joint_pos, indices=env_ids)
 
     def write_joint_position_to_sim_mask(
         self,
@@ -992,7 +997,7 @@ class Articulation(BaseArticulation):
             device=self.device,
         )
         # set into simulation
-        self.root_view.set_dof_velocities(self.data._joint_vel.data, indices=env_ids)
+        self.root_view.set_dof_velocities(self.data._sim_bind_joint_vel, indices=env_ids)
 
     def write_joint_velocity_to_sim_mask(
         self,
