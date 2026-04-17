@@ -1466,6 +1466,12 @@ class ArticulationData(BaseArticulationData):
             self._body_com_lin_vel_w = None
             self._body_com_ang_vel_w_ta = None
             self._body_com_ang_vel_w = None
+            self._body_com_lin_acc_w_ta = None
+            self._body_com_lin_acc_w = None
+            self._body_com_ang_acc_w_ta = None
+            self._body_com_ang_acc_w = None
+            self._body_com_quat_b_ta = None
+            self._body_com_quat_b = None
 
     def _create_buffers(self) -> None:
         """Create buffers for the root data."""
