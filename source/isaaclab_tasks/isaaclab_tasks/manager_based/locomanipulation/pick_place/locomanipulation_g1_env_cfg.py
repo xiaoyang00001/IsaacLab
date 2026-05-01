@@ -15,6 +15,11 @@ from isaaclab.devices.openxr.retargeters.humanoid.unitree.g1_motion_controller_l
 from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_motion_ctrl_retargeter import (
     G1TriHandUpperBodyMotionControllerRetargeterCfg,
 )
+from isaaclab.devices.openxr.zeromq_game_sub_device import ZeroMqGameSubDeviceCfg
+from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_zeromq_retargeter import (
+    G1TriHandUpperBodyZeroMqRetargeterCfg,
+)
+
 from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_retargeter import (
     G1TriHandUpperBodyRetargeterCfg,
 )
@@ -269,9 +274,28 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                     sim_device=self.sim.device,
                     xr_cfg=self.xr,
                 ),
-                "motion_controllers": OpenXRDeviceCfg(
+                # "motion_controllers": OpenXRDeviceCfg(
+                #     retargeters=[
+                #         G1TriHandUpperBodyMotionControllerRetargeterCfg(
+                #             enable_visualization=True,
+                #             sim_device=self.sim.device,
+                #             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
+                #         ),
+                #         # G1LowerBodyStandingMotionControllerRetargeterCfg(
+                #         #     sim_device=self.sim.device,
+                #         # ),
+                #     ],
+                #     sim_device=self.sim.device,
+                #     xr_cfg=self.xr,
+                # ),
+                "motion_controllers": ZeroMqGameSubDeviceCfg(
+                    endpoint="tcp://192.168.10.46:14025",
+                    topic="state",
+                    local_player_id=1,
+                    target_remote_player_id=2,
+                    auto_start=True,
                     retargeters=[
-                        G1TriHandUpperBodyMotionControllerRetargeterCfg(
+                        G1TriHandUpperBodyZeroMqRetargeterCfg(
                             enable_visualization=True,
                             sim_device=self.sim.device,
                             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
@@ -281,7 +305,6 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                         # ),
                     ],
                     sim_device=self.sim.device,
-                    xr_cfg=self.xr,
                 ),
             }
         )
