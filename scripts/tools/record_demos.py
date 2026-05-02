@@ -261,6 +261,26 @@ def create_environment(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg) -> gym.En
         exit(1)
 
 
+class MultiTeleopDevice:
+    """Wrapper to combine multiple teleoperation devices into a single interface."""
+    def __init__(self, devices: list):
+        self.devices = devices
+
+    def advance(self) -> torch.Tensor:
+        actions = [dev.advance() for dev in self.devices]
+        return torch.cat(actions, dim=-1)
+
+    def reset(self):
+        for dev in self.devices:
+            if hasattr(dev, "reset"):
+                dev.reset()
+
+    def add_callback(self, key: str, func):
+        for dev in self.devices:
+            if hasattr(dev, "add_callback"):
+                dev.add_callback(key, func)
+
+
 def setup_teleop_device(callbacks: dict[str, Callable]) -> object:
     """Set up the teleoperation device based on configuration.
 
@@ -279,11 +299,22 @@ def setup_teleop_device(callbacks: dict[str, Callable]) -> object:
     """
     teleop_interface = None
     try:
-        if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:
-            teleop_interface = create_teleop_device(args_cli.teleop_device, env_cfg.teleop_devices.devices, callbacks)
-        else:
+        if hasattr(env_cfg, "teleop_devices"):
+            device_names = [d.strip() for d in args_cli.teleop_device.split(",")]
+            valid_devices = [d for d in device_names if d in env_cfg.teleop_devices.devices]
+            
+            if len(valid_devices) > 0:
+                interfaces = []
+                for name in valid_devices:
+                    interfaces.append(create_teleop_device(name, env_cfg.teleop_devices.devices, callbacks))
+                if len(interfaces) == 1:
+                    teleop_interface = interfaces[0]
+                else:
+                    teleop_interface = MultiTeleopDevice(interfaces)
+
+        if teleop_interface is None:
             logger.warning(
-                f"No teleop device '{args_cli.teleop_device}' found in environment config. Creating default."
+                f"No valid teleop device(s) '{args_cli.teleop_device}' found in environment config. Creating default."
             )
             # Create fallback teleop device
             if args_cli.teleop_device.lower() == "keyboard":

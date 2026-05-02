@@ -35,6 +35,7 @@ from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 
+import copy
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
@@ -51,6 +52,10 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_contr
 FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
+
+REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
+REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
+REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
 ##
 # Scene definition
 ##
@@ -86,6 +91,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Humanoid robot w/ arms higher
     robot: ArticulationCfg = FIXED_G1_29DOF_CFG
 
+    remote_robot: ArticulationCfg = REMOTE_FIXED_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/RemoteRobot")
+
     # Ground plane
     ground = AssetBaseCfg(
         prim_path="/World/GroundPlane",
@@ -104,6 +111,10 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
+
+    remote_upper_body_ik = copy.deepcopy(G1_UPPER_BODY_IK_ACTION_CFG)
+    remote_upper_body_ik.asset_name = "remote_robot"
+    remote_upper_body_ik.controller.articulation_name = "remote_robot"
 
     # lower_body_joint_pos = AgileBasedLowerBodyActionCfg(
     #     asset_name="robot",
@@ -135,6 +146,12 @@ class ObservationsCfg:
         )
         robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("robot")})
         robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("robot")})
+        remote_robot_joint_pos = ObsTerm(
+            func=base_mdp.joint_pos,
+            params={"asset_cfg": SceneEntityCfg("remote_robot")},
+        )
+        remote_robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
+        remote_robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
         object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
         object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
         robot_links_state = ObsTerm(func=manip_mdp.get_all_robot_link_state)
@@ -213,6 +230,11 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         anchor_rot=(1.0, 0.0, 0.0, 0.0),
     )
 
+    xr2: XrCfg = XrCfg(
+        anchor_pos=(0.0, 0.0, -0.35),
+        anchor_rot=(1.0, 0.0, 0.0, 0.0),
+    )
+
     def __post_init__(self):
         """Post initialization."""
         # general settings
@@ -227,11 +249,17 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
 
         # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
         self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
+        self.actions.remote_upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
 
-        self.xr.anchor_prim_path = "/World/envs/env_0/Robot/pelvis"
+        # For Large-Space 1:1 Tracking mode, both VR devices share the identical world physical space.
+        # We explicitly DO NOT bind the XRAnchor to any robot pelvis to prevent double-offsetting.
+        # self.xr.anchor_prim_path = "/World/envs/env_0/Robot/pelvis"
         self.xr.fixed_anchor_height = True
-        # Ensure XR anchor rotation follows the robot pelvis (yaw only), with smoothing for comfort
-        self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
+        # self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
+
+        # self.xr2.anchor_prim_path = "/World/envs/env_0/RemoteRobot/pelvis"
+        self.xr2.fixed_anchor_height = True
+        # self.xr2.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
         # # Added Camera attached to left wrist link
         # self.scene.left_hand_cam = CameraCfg(
         #     prim_path="{ENV_REGEX_NS}/Robot/left_wrist_yaw_link/cam",
@@ -260,34 +288,15 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
             devices={
                 "handtracking": OpenXRDeviceCfg(
                     retargeters=[
-                        G1TriHandUpperBodyRetargeterCfg(
+                        G1TriHandUpperBodyMotionControllerRetargeterCfg(
                             enable_visualization=True,
-                            # OpenXR hand tracking has 26 joints per hand
-                            num_open_xr_hand_joints=2 * 26,
                             sim_device=self.sim.device,
                             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
                         ),
-                        # G1LowerBodyStandingRetargeterCfg(
-                        #     sim_device=self.sim.device,
-                        # ),
                     ],
                     sim_device=self.sim.device,
                     xr_cfg=self.xr,
                 ),
-                # "motion_controllers": OpenXRDeviceCfg(
-                #     retargeters=[
-                #         G1TriHandUpperBodyMotionControllerRetargeterCfg(
-                #             enable_visualization=True,
-                #             sim_device=self.sim.device,
-                #             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                #         ),
-                #         # G1LowerBodyStandingMotionControllerRetargeterCfg(
-                #         #     sim_device=self.sim.device,
-                #         # ),
-                #     ],
-                #     sim_device=self.sim.device,
-                #     xr_cfg=self.xr,
-                # ),
                 "motion_controllers": ZeroMqGameSubDeviceCfg(
                     endpoint="tcp://192.168.10.46:14025",
                     topic="state",
@@ -298,11 +307,8 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                         G1TriHandUpperBodyZeroMqRetargeterCfg(
                             enable_visualization=True,
                             sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
+                            hand_joint_names=self.actions.remote_upper_body_ik.hand_joint_names,
                         ),
-                        # G1LowerBodyStandingMotionControllerRetargeterCfg(
-                        #     sim_device=self.sim.device,
-                        # ),
                     ],
                     sim_device=self.sim.device,
                 ),
