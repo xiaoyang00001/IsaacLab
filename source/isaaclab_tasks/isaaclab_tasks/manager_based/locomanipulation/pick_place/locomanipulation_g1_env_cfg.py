@@ -2,7 +2,8 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
-
+import os
+from copy import deepcopy
 import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -52,10 +53,15 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_contr
 FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
+FIXED_G1_29DOF_CFG.init_state.pos = (14.3896, -12.4998, -0.3018)
+FIXED_G1_29DOF_CFG.init_state.rot = (-0.9986, 0.0, 0.0, 0.0523)
 
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
-REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
-REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
+# REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
+# REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
+REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (16.1596, -13.0698, -0.4118)
+REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.0, 0.0, 0.0, 1.0)
+
 ##
 # Scene definition
 ##
@@ -88,6 +94,14 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    # 本地仓库背景
+    background = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Background",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[10.0, 2.0, -1.1818], rot=[0.7071, 0.0, 0.0, 0.7071]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
+        ),
+    )
     # Humanoid robot w/ arms higher
     robot: ArticulationCfg = FIXED_G1_29DOF_CFG
 
@@ -152,8 +166,8 @@ class ObservationsCfg:
         )
         remote_robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
         remote_robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
-        object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
-        object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
+        # object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
+        # object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
         robot_links_state = ObsTerm(func=manip_mdp.get_all_robot_link_state)
 
         left_eef_pos = ObsTerm(func=manip_mdp.get_eef_pos, params={"link_name": "left_wrist_yaw_link"})
@@ -190,9 +204,9 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=locomanip_mdp.time_out, time_out=True)
 
-    object_dropping = DoneTerm(
-        func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
-    )
+    # object_dropping = DoneTerm(
+    #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
+    # )
 
     success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
 
