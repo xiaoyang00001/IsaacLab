@@ -78,13 +78,50 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    object = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
+    plate = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Plate",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.0716, 0.55, 0.70]),
         spawn=UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
-            scale=(0.75, 0.75, 0.75),
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/nut_pour_task/nut_pour_assets/sorting_bowl_yellow.usd",
+            scale=(1.5, 1.5, 1.5),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=10.0),
+        ),
+    )
+
+    orange1 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Orange1",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.1284, 0.45, 0.70]),
+        spawn=sim_utils.SphereCfg(
+            radius=0.035,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.4, 0.0)),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.15),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+    )
+
+    orange2 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Orange2",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.1284, 0.55, 0.70]),
+        spawn=sim_utils.SphereCfg(
+            radius=0.035,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.4, 0.0)),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.15),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+    )
+
+    orange3 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Orange3",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.1284, 0.65, 0.70]),
+        spawn=sim_utils.SphereCfg(
+            radius=0.035,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.4, 0.0)),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.15),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
         ),
     )
 
@@ -152,8 +189,8 @@ class ObservationsCfg:
         )
         remote_robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
         remote_robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
-        object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
-        object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
+        # object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
+        # object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
         robot_links_state = ObsTerm(func=manip_mdp.get_all_robot_link_state)
 
         left_eef_pos = ObsTerm(func=manip_mdp.get_eef_pos, params={"link_name": "left_wrist_yaw_link"})
@@ -163,10 +200,10 @@ class ObservationsCfg:
 
         hand_joint_state = ObsTerm(func=manip_mdp.get_robot_joint_state, params={"joint_names": [".*_hand.*"]})
 
-        object = ObsTerm(
-            func=manip_mdp.object_obs,
-            params={"left_eef_link_name": "left_wrist_yaw_link", "right_eef_link_name": "right_wrist_yaw_link"},
-        )
+        # object = ObsTerm(
+        #     func=manip_mdp.object_obs,
+        #     params={"left_eef_link_name": "left_wrist_yaw_link", "right_eef_link_name": "right_wrist_yaw_link"},
+        # )
         # left_wrist_cam = ObsTerm(
         #     func=base_mdp.image,
         #     params={"sensor_cfg": SceneEntityCfg("left_hand_cam"), "data_type": "rgb", "normalize": False},
@@ -190,11 +227,11 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=locomanip_mdp.time_out, time_out=True)
 
-    object_dropping = DoneTerm(
-        func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
-    )
+    # object_dropping = DoneTerm(
+    #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
+    # )
 
-    success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
+    success = DoneTerm(func=manip_mdp.task_done_oranges_in_plate)
 
 
 ##

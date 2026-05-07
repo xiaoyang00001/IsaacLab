@@ -220,3 +220,45 @@ def task_done_exhaust_pipe(
     done = torch.logical_and(done, blue_exhaust_to_bin_z < max_blue_exhaust_to_bin_z)
 
     return done
+
+
+def task_done_oranges_in_plate(
+    env: ManagerBasedRLEnv,
+    orange1_cfg: SceneEntityCfg = SceneEntityCfg("orange1"),
+    orange2_cfg: SceneEntityCfg = SceneEntityCfg("orange2"),
+    orange3_cfg: SceneEntityCfg = SceneEntityCfg("orange3"),
+    plate_cfg: SceneEntityCfg = SceneEntityCfg("plate"),
+    max_distance: float = 0.15,
+) -> torch.Tensor:
+    """Determine if the oranges are in the plate.
+
+    Args:
+        env: The RL environment instance.
+        orange1_cfg: Configuration for orange 1 entity.
+        orange2_cfg: Configuration for orange 2 entity.
+        orange3_cfg: Configuration for orange 3 entity.
+        plate_cfg: Configuration for plate entity.
+        max_distance: Maximum distance from the center of the plate for an orange to be considered 'in'.
+
+    Returns:
+        Boolean tensor indicating which environments have completed the task.
+    """
+    orange1: RigidObject = env.scene[orange1_cfg.name]
+    orange2: RigidObject = env.scene[orange2_cfg.name]
+    orange3: RigidObject = env.scene[orange3_cfg.name]
+    plate: RigidObject = env.scene[plate_cfg.name]
+
+    orange1_pos = orange1.data.root_pos_w - env.scene.env_origins
+    orange2_pos = orange2.data.root_pos_w - env.scene.env_origins
+    orange3_pos = orange3.data.root_pos_w - env.scene.env_origins
+    plate_pos = plate.data.root_pos_w - env.scene.env_origins
+
+    dist1 = torch.norm(orange1_pos - plate_pos, dim=-1)
+    dist2 = torch.norm(orange2_pos - plate_pos, dim=-1)
+    dist3 = torch.norm(orange3_pos - plate_pos, dim=-1)
+
+    done = dist1 < max_distance
+    done = torch.logical_and(done, dist2 < max_distance)
+    done = torch.logical_and(done, dist3 < max_distance)
+
+    return done
