@@ -26,6 +26,7 @@ from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_
 )
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -91,6 +92,35 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
             scale=(0.75, 0.75, 0.75),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+        ),
+    )
+
+    # 测试箱子：落在 ConveyorBelt_A08_06 传送带 +y 端（入料端）。
+    # 传送带沿 Y 轴延伸，y∈[-11.42, -8.70]，中心 x=15.30，带面 z=-0.0155。
+    # 箱子沿 -y 方向流向机器人（robot1 y≈-12.50，robot2 y≈-13.07）。
+    test_box = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/TestBox",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=[15.3, -9.0, 0.0845],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        # spawn=sim_utils.CuboidCfg(
+        #     size=(0.20, 0.20, 0.20),
+        #     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.5, 0.1)),
+        #     physics_material=sim_utils.RigidBodyMaterialCfg(
+        #         static_friction=1.2,
+        #         dynamic_friction=1.0,
+        #         restitution=0.0,
+        #     ),
+        #     rigid_props=sim_utils.RigidBodyPropertiesCfg(
+        #         linear_damping=0.1,
+        #         angular_damping=1000.0,
+        #     ),
+        #     mass_props=sim_utils.MassPropertiesCfg(mass=0.5),
+        #     collision_props=sim_utils.CollisionPropertiesCfg(),
+        # ),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
         ),
     )
 
@@ -211,6 +241,39 @@ class TerminationsCfg:
     success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
 
 
+@configclass
+class EventsCfg:
+    """Runtime events（仓库场景：传送带自动运行 + 回合重置时复位球体）。"""
+
+    # prestartup：在 PhysX 初始化前为 SM_CardBoxD_05.usd 注入刚体物理 API。
+    # UsdFileCfg 只会 modify（而非 define）RigidBodyAPI，此事件补上 define 步骤。
+    setup_test_box_physics = EventTerm(
+        func=locomanip_mdp.setup_usd_rigid_object_physics,
+        mode="prestartup",
+        params={
+            "prim_path_template": "/World/envs/env_{}/TestBox",
+            "mass": 0.5,
+            "linear_damping": 0.1,
+            "angular_damping": 1000.0,
+        },
+    )
+
+    # 启动时打印 ConveyorBelt_A08_06 的世界包围盒，用于校准 test_box 坐标。
+    print_conveyor_bbox = EventTerm(
+        func=locomanip_mdp.print_conveyor_world_bbox,
+        mode="startup",
+        params={"prim_name": "ConveyorBelt_A08_06"},
+    )
+
+    # 每 0.05s 强制恢复箱子的 -y 速度，沿传送带流向机器人（y≈-12~-13）。
+    drive_test_box = EventTerm(
+        func=locomanip_mdp.drive_object_on_conveyor,
+        mode="interval",
+        interval_range_s=(0.05, 0.05),
+        params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
+    )
+
+
 ##
 # MDP settings
 ##
@@ -227,7 +290,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
     """
 
     # Scene settings
-    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
+    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
