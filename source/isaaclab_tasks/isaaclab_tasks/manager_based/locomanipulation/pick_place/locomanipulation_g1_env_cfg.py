@@ -53,9 +53,12 @@ FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 
+
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
-REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
-REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
+
+
+FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
+FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
 ##
 # Scene definition
 ##
@@ -298,10 +301,10 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                     xr_cfg=self.xr,
                 ),
                 "motion_controllers": ZeroMqGameSubDeviceCfg(
-                    endpoint="tcp://192.168.10.46:14025",
+                    endpoint="tcp://192.168.10.95:14025",
                     topic="state",
-                    local_player_id=1,
-                    target_remote_player_id=2,
+                    local_player_id=2,
+                    target_remote_player_id=1,
                     auto_start=True,
                     retargeters=[
                         G1TriHandUpperBodyZeroMqRetargeterCfg(
