@@ -295,6 +295,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands = None
+    events: EventsCfg = EventsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
 
     # Unused managers
