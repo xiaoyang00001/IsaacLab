@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from isaacsim.core.utils.stage import get_current_stage
-from pxr import PhysxSchema, UsdGeom, UsdPhysics
+from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -22,6 +22,7 @@ def setup_usd_rigid_object_physics(
     mass: float = 0.5,
     linear_damping: float = 0.1,
     angular_damping: float = 1000.0,
+    mesh_approximation: str = "convexHull",
 ):
     """Ensure the target USD prim has rigid-body APIs defined before simulation starts."""
     stage = get_current_stage()
@@ -58,9 +59,26 @@ def setup_usd_rigid_object_physics(
         physx_api.CreateLinearDampingAttr(float(linear_damping))
         physx_api.CreateAngularDampingAttr(float(angular_damping))
 
+        # For dynamic rigid bodies, triangle mesh collision is not supported.
+        # Force mesh collision approximation on the root prim and all child mesh prims.
+        mesh_collision_api = UsdPhysics.MeshCollisionAPI.Get(stage, prim.GetPath())
+        if not mesh_collision_api:
+            mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(prim)
+        mesh_collision_api.GetApproximationAttr().Set(mesh_approximation)
+        for child_prim in Usd.PrimRange(prim):
+            if not child_prim.IsA(UsdGeom.Mesh):
+                continue
+            child_collision_api = UsdPhysics.CollisionAPI.Get(stage, child_prim.GetPath())
+            if not child_collision_api:
+                UsdPhysics.CollisionAPI.Apply(child_prim)
+            child_mesh_collision_api = UsdPhysics.MeshCollisionAPI.Get(stage, child_prim.GetPath())
+            if not child_mesh_collision_api:
+                child_mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(child_prim)
+            child_mesh_collision_api.GetApproximationAttr().Set(mesh_approximation)
+
         print(
             f"[locomanip_event] setup_usd_rigid_object_physics applied on {prim_path} "
-            f"(mass={mass}, lin_damp={linear_damping}, ang_damp={angular_damping})"
+            f"(mass={mass}, lin_damp={linear_damping}, ang_damp={angular_damping}, mesh={mesh_approximation})"
         )
 
 
