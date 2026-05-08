@@ -53,15 +53,15 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_contr
 FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
-FIXED_G1_29DOF_CFG.init_state.pos = (14.3896, -12.4998, -0.3018)
-FIXED_G1_29DOF_CFG.init_state.rot = (-0.9986, 0.0, 0.0, 0.0523)
+# FIXED_G1_29DOF_CFG.init_state.pos = (14.3896, -12.4998, -0.3018)
+# FIXED_G1_29DOF_CFG.init_state.rot = (-0.9986, 0.0, 0.0, 0.0523)
 
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
 # REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
 # REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
-REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (16.1596, -13.0698, -0.4118)
-REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.0, 0.0, 0.0, 1.0)
-
+# REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (16.1596, -13.0698, -0.4118)
+# REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.0, 0.0, 0.0, 1.0)
+# REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.65, 0, 0.75)
 ##
 # Scene definition
 ##

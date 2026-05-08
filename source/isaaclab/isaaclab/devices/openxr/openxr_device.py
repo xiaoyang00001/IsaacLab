@@ -26,6 +26,7 @@ from isaaclab.devices.retargeter_base import RetargeterBase
 from ..device_base import DeviceBase, DeviceCfg
 from .xr_anchor_utils import XrAnchorSynchronizer
 from .xr_cfg import XrCfg
+from .zeromq_game_client import ZeroMqGameClient
 
 # For testing purposes, we need to mock the XRCore, XRPoseValidityFlags classes
 XRCore = None
@@ -148,6 +149,12 @@ class OpenXRDevice(DeviceBase):
                 "isaaclab_right_a",
                 lambda ev: self._toggle_anchor_rotation(),
             )
+        
+        # Initialize ZeroMQ Game Client
+        try:
+            ZeroMqGameClient.get_instance().init("tcp://192.168.10.46:14026",2)
+        except Exception as e:
+            logger.warning(f"Failed to initialize ZeroMqGameClient: {e}")
             
     def __del__(self):
         """Clean up resources when the object is destroyed.
@@ -273,6 +280,19 @@ class OpenXRDevice(DeviceBase):
                     data[DeviceBase.TrackingTarget.CONTROLLER_LEFT] = left_ctrl
                 if right_ctrl.size:
                     data[DeviceBase.TrackingTarget.CONTROLLER_RIGHT] = right_ctrl
+
+                left_pose = left_ctrl[0].tolist() if left_ctrl.size else None
+                left_inputs = left_ctrl[1].tolist() if left_ctrl.size else None
+                right_pose = right_ctrl[0].tolist() if right_ctrl.size else None
+                right_inputs = right_ctrl[1].tolist() if right_ctrl.size else None
+
+                try:
+                    ZeroMqGameClient.get_instance().send_motion_controller_tracking(
+                        left_pose, left_inputs, right_pose, right_inputs
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send motion controller tracking via ZMQ: {e}")
+
             except Exception:
                 # Ignore controller data if XRCore/controller APIs are unavailable
                 pass
