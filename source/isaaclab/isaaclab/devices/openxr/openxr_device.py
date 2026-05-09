@@ -152,7 +152,7 @@ class OpenXRDevice(DeviceBase):
         
         # Initialize ZeroMQ Game Client
         try:
-            ZeroMqGameClient.get_instance().init("tcp://192.168.10.46:14026",1)
+            ZeroMqGameClient.get_instance().init("tcp://192.168.1.149:14026",1)
         except Exception as e:
             logger.warning(f"Failed to initialize ZeroMqGameClient: {e}")
             
@@ -485,6 +485,31 @@ class OpenXRDevice(DeviceBase):
                 button_0 = float(input_device.get_input_gesture_value("a", "click"))
             if input_device.has_input_gesture("b", "click"):
                 button_1 = float(input_device.get_input_gesture_value("b", "click"))
+
+        # Button callbacks for A, X, Y
+        if not hasattr(self, "_prev_btn_states"):
+            self._prev_btn_states = {}
+        dev_id = id(input_device)
+        if dev_id not in self._prev_btn_states:
+            self._prev_btn_states[dev_id] = {"a": 0.0, "x": 0.0, "y": 0.0}
+
+        btn_a = float(input_device.get_input_gesture_value("a", "click")) if input_device.has_input_gesture("a", "click") else 0.0
+        btn_x = float(input_device.get_input_gesture_value("x", "click")) if input_device.has_input_gesture("x", "click") else 0.0
+        btn_y = float(input_device.get_input_gesture_value("y", "click")) if input_device.has_input_gesture("y", "click") else 0.0
+
+        if btn_a > 0.5 and self._prev_btn_states[dev_id]["a"] <= 0.5:
+            if "RESET" in self._additional_callbacks:
+                self._additional_callbacks["RESET"]()
+        if btn_x > 0.5 and self._prev_btn_states[dev_id]["x"] <= 0.5:
+            if "START" in self._additional_callbacks:
+                self._additional_callbacks["START"]()
+        if btn_y > 0.5 and self._prev_btn_states[dev_id]["y"] <= 0.5:
+            if "STOP" in self._additional_callbacks:
+                self._additional_callbacks["STOP"]()
+
+        self._prev_btn_states[dev_id]["a"] = btn_a
+        self._prev_btn_states[dev_id]["x"] = btn_x
+        self._prev_btn_states[dev_id]["y"] = btn_y
 
         pose_row = [
             position[0],

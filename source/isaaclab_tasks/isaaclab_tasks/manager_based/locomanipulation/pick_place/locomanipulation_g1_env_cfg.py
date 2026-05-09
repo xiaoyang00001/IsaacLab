@@ -157,8 +157,8 @@ class ActionsCfg:
     remote_upper_body_ik.asset_name = "remote_robot"
     remote_upper_body_ik.controller.articulation_name = "remote_robot"
 
-    object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.10.46:15555")
-    object_sync1 = ZmqObjectSyncActionCfg(asset_name="test_box1", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.10.46:15555")
+    object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.1.149:15555")
+    object_sync1 = ZmqObjectSyncActionCfg(asset_name="test_box1", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.1.149:15555")
 
 
 
@@ -383,7 +383,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                     xr_cfg=self.xr,
                 ),
                 "motion_controllers": ZeroMqGameSubDeviceCfg(
-                    endpoint="tcp://192.168.10.46:14025",
+                    endpoint="tcp://192.168.1.149:14025",
                     topic="state",
                     local_player_id=1,
                     target_remote_player_id=2,
