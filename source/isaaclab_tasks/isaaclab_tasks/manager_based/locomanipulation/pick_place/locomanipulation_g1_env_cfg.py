@@ -39,6 +39,10 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retri
 
 import copy
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
+
+ZMQ_SYNC_ROLE = "publisher"
+
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
     AgileTeacherPolicyObservationsCfg,
@@ -54,13 +58,10 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_contr
 FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
-FIXED_G1_29DOF_CFG.init_state.pos = (14.3896, -12.4998, -0.3018)
-FIXED_G1_29DOF_CFG.init_state.rot = (-0.9986, 0.0, 0.0, 0.0523)
-
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
-# REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
-# REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
-REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (16.1596, -13.0698, -0.4118)
+
+FIXED_G1_29DOF_CFG.init_state.rot = (1,0,0,0)
+REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (1.25, 0, 0.75)
 REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.0, 0.0, 0.0, 1.0)
 
 ##
@@ -78,7 +79,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -0.3], rot=[1.0, 0.0, 0.0, 0.0]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[-4.0, 0.55, -0.3], rot=[1.0, 0.0, 0.0, 0.0]),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
@@ -87,7 +88,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-4.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
             scale=(0.75, 0.75, 0.75),
@@ -101,33 +102,29 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[15.3, -9.0, 0.0845],
+            pos=[0.78886, 1.17033, 0.845],
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
-        # spawn=sim_utils.CuboidCfg(
-        #     size=(0.20, 0.20, 0.20),
-        #     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.5, 0.1)),
-        #     physics_material=sim_utils.RigidBodyMaterialCfg(
-        #         static_friction=1.2,
-        #         dynamic_friction=1.0,
-        #         restitution=0.0,
-        #     ),
-        #     rigid_props=sim_utils.RigidBodyPropertiesCfg(
-        #         linear_damping=0.1,
-        #         angular_damping=1000.0,
-        #     ),
-        #     mass_props=sim_utils.MassPropertiesCfg(mass=0.5),
-        #     collision_props=sim_utils.CollisionPropertiesCfg(),
-        # ),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg() if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
     )
-
+    test_box1 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/TestBox1",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=[0.42787, 1.67696, 0.845],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg() if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+        ),
+    )
     # 本地仓库背景
     background = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Background",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[10.0, 2.0, -1.1818], rot=[0.7071, 0.0, 0.0, 0.7071]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[-4.68,14.39363, 0], rot=[0.7071, 0.0, 0.0, 0.7071]),
         spawn=UsdFileCfg(
             usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
         ),
@@ -138,16 +135,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     remote_robot: ArticulationCfg = REMOTE_FIXED_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/RemoteRobot")
 
     # Ground plane
-    ground = AssetBaseCfg(
-        prim_path="/World/GroundPlane",
-        spawn=GroundPlaneCfg(),
-    )
+    # ground = AssetBaseCfg(
+    #     prim_path="/World/GroundPlane",
+    #     spawn=GroundPlaneCfg(),
+    # )
 
     # Lights
-    light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
-    )
+    # light = AssetBaseCfg(
+    #     prim_path="/World/light",
+    #     spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+    # )
 
 
 @configclass
@@ -160,17 +157,9 @@ class ActionsCfg:
     remote_upper_body_ik.asset_name = "remote_robot"
     remote_upper_body_ik.controller.articulation_name = "remote_robot"
 
-    # lower_body_joint_pos = AgileBasedLowerBodyActionCfg(
-    #     asset_name="robot",
-    #     joint_names=[
-    #         ".*_hip_.*_joint",
-    #         ".*_knee_joint",
-    #         ".*_ankle_.*_joint",
-    #     ],
-    #     policy_output_scale=0.25,
-    #     obs_group_name="lower_body_policy",  # need to be the same name as the on in ObservationCfg
-    #     policy_path=f"{ISAACLAB_NUCLEUS_DIR}/Policies/Agile/agile_locomotion.pt",
-    # )
+    object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.10.46:15555")
+    object_sync1 = ZmqObjectSyncActionCfg(asset_name="test_box1", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.10.46:15555")
+
 
 
 @configclass
@@ -258,6 +247,17 @@ class EventsCfg:
         },
     )
 
+    setup_test_box1_physics = EventTerm(
+        func=locomanip_mdp.setup_usd_rigid_object_physics,
+        mode="prestartup",
+        params={
+            "prim_path_template": "/World/envs/env_{}/TestBox1",
+            "mass": 0.5,
+            "linear_damping": 0.1,
+            "angular_damping": 1000.0,
+        },
+    )
+
     # 启动时打印 ConveyorBelt_A08_06 的世界包围盒，用于校准 test_box 坐标。
     print_conveyor_bbox = EventTerm(
         func=locomanip_mdp.print_conveyor_world_bbox,
@@ -271,6 +271,13 @@ class EventsCfg:
         mode="interval",
         interval_range_s=(0.05, 0.05),
         params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
+    )
+
+    drive_test_box1 = EventTerm(
+        func=locomanip_mdp.drive_object_on_conveyor,
+        mode="interval",
+        interval_range_s=(0.05, 0.05),
+        params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
     )
 
 
