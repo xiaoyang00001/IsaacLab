@@ -28,6 +28,11 @@ from .xr_anchor_utils import XrAnchorSynchronizer
 from .xr_cfg import XrCfg
 from .zeromq_game_client import ZeroMqGameClient
 
+try:
+    from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG
+except ImportError:
+    NETWORK_CFG = None
+
 # For testing purposes, we need to mock the XRCore, XRPoseValidityFlags classes
 XRCore = None
 XRPoseValidityFlags = None
@@ -81,6 +86,7 @@ class OpenXRDevice(DeviceBase):
             retargeters: List of retargeter instances to use for transforming raw tracking data.
         """
         super().__init__(retargeters)
+        self._cfg = cfg
         self._xr_cfg = cfg.xr_cfg or XrCfg()
         self._additional_callbacks = dict()
         self._xr_core = XRCore.get_singleton() if XRCore is not None else None
@@ -152,7 +158,7 @@ class OpenXRDevice(DeviceBase):
         
         # Initialize ZeroMQ Game Client
         try:
-            ZeroMqGameClient.get_instance().init("tcp://192.168.1.149:14026",1)
+            ZeroMqGameClient.get_instance().init(self._cfg.zmq_game_server_endpoint, self._cfg.zmq_player_id)
         except Exception as e:
             logger.warning(f"Failed to initialize ZeroMqGameClient: {e}")
             
@@ -554,3 +560,9 @@ class OpenXRDeviceCfg(DeviceCfg):
 
     xr_cfg: XrCfg | None = None
     class_type: type[DeviceBase] = OpenXRDevice
+
+    zmq_game_server_endpoint: str = NETWORK_CFG.zmq_game_server_endpoint if NETWORK_CFG is not None else "tcp://127.0.0.1:14026"
+    """ZeroMQ game server endpoint for motion controller data publishing."""
+
+    zmq_player_id: int = NETWORK_CFG.zmq_player_id if NETWORK_CFG is not None else 1
+    """Player ID for the ZeroMQ game client."""

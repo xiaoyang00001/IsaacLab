@@ -11,6 +11,7 @@ except ModuleNotFoundError:
 
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG
 
 if TYPE_CHECKING:
     from isaaclab.envs.manager_based_env import ManagerBasedEnv
@@ -44,7 +45,7 @@ class ZmqObjectSyncActionCfg(ActionTermCfg):
     role: str = "none"
     """The role of this synchronization: 'publisher', 'subscriber', or 'none'."""
 
-    endpoint: str = "tcp://192.168.10.46:15555"
+    endpoint: str = NETWORK_CFG.zmq_object_sync_endpoint
     """The ZMQ endpoint to bind/connect to."""
 
     def __post_init__(self):

@@ -44,6 +44,11 @@ from isaaclab.devices.device_base import DeviceBase, DeviceCfg
 from isaaclab.devices.openxr.common import HAND_JOINT_NAMES
 from isaaclab.devices.retargeter_base import RetargeterBase
 
+try:
+    from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG
+except ImportError:
+    NETWORK_CFG = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -474,10 +479,10 @@ class ZeroMqGameSubDevice(DeviceBase):
 class ZeroMqGameSubDeviceCfg(DeviceCfg):
     """Configuration for the ZeroMQ MGXR Isaac Lab device."""
 
-    endpoint: str = "tcp://127.0.0.1:5555"
+    endpoint: str = NETWORK_CFG.zmq_game_sub_endpoint if NETWORK_CFG is not None else "tcp://127.0.0.1:5555"
     topic: str = "state"
-    local_player_id: int = 0
-    target_remote_player_id: int | None = None
+    local_player_id: int = NETWORK_CFG.local_player_id if NETWORK_CFG is not None else 0
+    target_remote_player_id: int | None = NETWORK_CFG.target_remote_player_id if NETWORK_CFG is not None else None
     auto_start: bool = True
     receive_timeout_ms: int = 20
     receive_high_water_mark: int = 10
