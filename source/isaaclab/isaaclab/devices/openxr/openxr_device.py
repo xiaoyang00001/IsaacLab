@@ -152,7 +152,7 @@ class OpenXRDevice(DeviceBase):
         
         # Initialize ZeroMQ Game Client
         try:
-            ZeroMqGameClient.get_instance().init("tcp://192.168.10.46:14026",2)
+            ZeroMqGameClient.get_instance().init("tcp://192.168.10.46:14026",1)
         except Exception as e:
             logger.warning(f"Failed to initialize ZeroMqGameClient: {e}")
             

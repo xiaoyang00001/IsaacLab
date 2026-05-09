@@ -38,6 +38,10 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retri
 
 import copy
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
+
+# ZMQ_SYNC_ROLE = os.environ.get("ZMQ_SYNC_ROLE", "none")
+ZMQ_SYNC_ROLE = "publisher"
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
     AgileTeacherPolicyObservationsCfg,
@@ -57,8 +61,8 @@ FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 # FIXED_G1_29DOF_CFG.init_state.rot = (-0.9986, 0.0, 0.0, 0.0523)
 
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
-# REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
-# REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
+REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 1.1, 0.75)
+REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.7071, 0.0, 0.0, -0.7071)
 # REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (16.1596, -13.0698, -0.4118)
 # REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.0, 0.0, 0.0, 1.0)
 # REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (0.65, 0, 0.75)
@@ -90,18 +94,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         spawn=UsdFileCfg(
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
             scale=(0.75, 0.75, 0.75),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg() if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
     )
 
-    # 本地仓库背景
-    background = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/Background",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[10.0, 2.0, -1.1818], rot=[0.7071, 0.0, 0.0, 0.7071]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
-        ),
-    )
     # Humanoid robot w/ arms higher
     robot: ArticulationCfg = FIXED_G1_29DOF_CFG
 
@@ -129,6 +125,8 @@ class ActionsCfg:
     remote_upper_body_ik = copy.deepcopy(G1_UPPER_BODY_IK_ACTION_CFG)
     remote_upper_body_ik.asset_name = "remote_robot"
     remote_upper_body_ik.controller.articulation_name = "remote_robot"
+
+    object_sync = ZmqObjectSyncActionCfg(asset_name="object", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.10.46:15555")
 
     # lower_body_joint_pos = AgileBasedLowerBodyActionCfg(
     #     asset_name="robot",
@@ -166,8 +164,8 @@ class ObservationsCfg:
         )
         remote_robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
         remote_robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
-        # object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
-        # object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
+        object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
+        object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
         robot_links_state = ObsTerm(func=manip_mdp.get_all_robot_link_state)
 
         left_eef_pos = ObsTerm(func=manip_mdp.get_eef_pos, params={"link_name": "left_wrist_yaw_link"})
@@ -204,9 +202,9 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=locomanip_mdp.time_out, time_out=True)
 
-    # object_dropping = DoneTerm(
-    #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
-    # )
+    object_dropping = DoneTerm(
+        func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
+    )
 
     success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
 
