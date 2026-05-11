@@ -17,7 +17,30 @@ Usage:
     endpoint = NETWORK_CFG.zmq_game_server_endpoint
 """
 
+import socket
+
 from isaaclab.utils import configclass
+
+
+def _get_local_ip() -> str:
+    """获取本机局域网 IP 地址。
+
+    通过建立 UDP 连接探测本机非回环 IP，如果失败则回退到 hostname 方式。
+
+    Returns:
+        本机 IP 地址字符串，如 "192.168.1.100"。
+    """
+    try:
+        # 通过 UDP 连接外部地址来探测本机 IP（不会真正发送数据）
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        pass
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return "127.0.0.1"
 
 
 @configclass
@@ -29,7 +52,7 @@ class NetworkCfg:
     """
 
     # ---- ZeroMQ Game Server (motion controller data publisher) ----
-    zmq_game_server_ip: str = "192.168.1.149"
+    zmq_game_server_ip: str = "192.168.50.105"
     """IP address of the ZeroMQ game server."""
 
     zmq_game_server_port: int = 14026
@@ -40,8 +63,8 @@ class NetworkCfg:
     """Port for the ZeroMQ game sub device (used by ZeroMqGameSubDeviceCfg)."""
 
     # ---- ZeroMQ Object Sync ----
-    zmq_object_sync_ip: str = "192.168.1.149"
-    """IP address for object synchronization."""
+    zmq_object_sync_ip: str = _get_local_ip()
+    """IP address for object synchronization (auto-detected from local network)."""
 
     zmq_object_sync_port: int = 15555
     """Port for object synchronization (used by ZmqObjectSyncActionCfg)."""
