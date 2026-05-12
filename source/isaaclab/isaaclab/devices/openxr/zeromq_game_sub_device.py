@@ -35,10 +35,18 @@ from typing import Any
 import numpy as np
 from pxr import Gf
 
+import contextlib
+
 try:
     import zmq
 except ModuleNotFoundError:  # Isaac Lab install may not include pyzmq by default.
     zmq = None
+
+import carb
+
+XRCore = None
+with contextlib.suppress(ModuleNotFoundError):
+    from omni.kit.xr.core import XRCore
 
 from isaaclab.devices.device_base import DeviceBase, DeviceCfg
 from isaaclab.devices.openxr.common import HAND_JOINT_NAMES
@@ -169,10 +177,22 @@ class ZeroMqGameSubDevice(DeviceBase):
         self._previous_joint_poses_right = {name: _zero_pose() for name in HAND_JOINT_NAMES}
         self._previous_whole_body = {name: _zero_pose() for name in WHOLE_BODY_JOINT_NAMES}
 
+        # Subscribe to the XRCore message bus so send_teleop_command("start/stop/reset")
+        # can trigger the START/STOP/RESET callbacks registered via add_callback().
+        self._vc_subscription = None
+        xr_core = XRCore.get_singleton() if XRCore is not None else None
+        if xr_core is not None:
+            self._vc_subscription = xr_core.get_message_bus().create_subscription_to_pop_by_type(
+                carb.events.type_from_string(self.TELEOP_COMMAND_EVENT_TYPE),
+                self._on_teleop_command,
+            )
+
         if cfg.auto_start:
             self.start()
 
     def __del__(self):
+        if hasattr(self, "_vc_subscription") and self._vc_subscription is not None:
+            self._vc_subscription = None
         try:
             self.stop()
         except Exception:
@@ -232,6 +252,20 @@ class ZeroMqGameSubDevice(DeviceBase):
     def add_callback(self, key: str, func: Callable):
         """Keep the same callback API as OpenXRDevice for START/STOP/RESET hooks."""
         self._additional_callbacks[key] = func
+
+    def _on_teleop_command(self, event: carb.events.IEvent) -> None:
+        """Handle teleop_command events pushed via XRCore message bus."""
+        msg = event.payload.get("message", "")
+        if "start" in msg:
+            if "START" in self._additional_callbacks:
+                self._additional_callbacks["START"]()
+        elif "stop" in msg:
+            if "STOP" in self._additional_callbacks:
+                self._additional_callbacks["STOP"]()
+        elif "reset" in msg:
+            if "RESET" in self._additional_callbacks:
+                self._additional_callbacks["RESET"]()
+            self.reset()
 
     def _get_raw_data(self) -> Any:
         """Return latest remote tracking data in Isaac Lab device format."""
