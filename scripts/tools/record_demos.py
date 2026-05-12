@@ -492,6 +492,14 @@ def run_simulation_loop(
         while simulation_app.is_running():
             # Get keyboard command
             action = teleop_interface.advance()
+            # Pad or trim action to match the environment's expected action dim.
+            # This handles cases where fewer teleop devices are active than action groups.
+            expected_dim = env.action_manager.total_action_dim
+            if action.shape[-1] < expected_dim:
+                pad = torch.zeros(*action.shape[:-1], expected_dim - action.shape[-1], device=action.device)
+                action = torch.cat([action, pad], dim=-1)
+            elif action.shape[-1] > expected_dim:
+                action = action[..., :expected_dim]
             # Expand to batch dimension
             actions = action.repeat(env.num_envs, 1)
 
