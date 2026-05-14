@@ -15,6 +15,17 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+def _find_named_prim_under_background(stage: Usd.Stage, env_id: int, prim_name: str) -> Usd.Prim | None:
+    """Find the first prim with the given name under /Background for an environment."""
+    bg_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/Background")
+    if not (bg_prim and bg_prim.IsValid()):
+        return None
+    for prim in Usd.PrimRange(bg_prim):
+        if prim.GetName() == prim_name:
+            return prim
+    return None
+
+
 def setup_usd_rigid_object_physics(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
@@ -189,13 +200,18 @@ def drop_two_balls_with_random_colors(
     # 说明：这里不做运行时材质/颜色修改，避免触发某些版本下的图执行不稳定。
 
 
-def align_robots_to_conveyor_center_x(
+def place_robots_from_conveyor_bbox(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
+    conveyor_prim_name: str = "ConveyorBelt_A08_06",
     robot1_name: str = "robot",
-    robot2_name: str = "robot2",
+    robot2_name: str = "remote_robot",
+    reference_conveyor_center_x: float = 0.62,
+    reference_conveyor_min_y: float = 0.98,
+    reference_robot1_xy: tuple[float, float] = (0.0, 0.0),
+    reference_robot2_xy: tuple[float, float] = (1.25, 0.0),
 ):
-    """Align both robots' x position to conveyor bbox center x on reset."""
+    """Place the two robots using change6-relative offsets from the conveyor bbox."""
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
 
@@ -206,31 +222,120 @@ def align_robots_to_conveyor_center_x(
     robot1 = env.scene[robot1_name]
     robot2 = env.scene[robot2_name]
 
-    robot1_pose = robot1.data.root_state_w[env_ids, :7].clone()
-    robot2_pose = robot2.data.root_state_w[env_ids, :7].clone()
+    robot1_state = robot1.data.default_root_state[env_ids].clone()
+    robot2_state = robot2.data.default_root_state[env_ids].clone()
+
+    robot1_center_x_offset = reference_robot1_xy[0] - reference_conveyor_center_x
+    robot2_center_x_offset = reference_robot2_xy[0] - reference_conveyor_center_x
+    robot1_min_y_offset = reference_robot1_xy[1] - reference_conveyor_min_y
+    robot2_min_y_offset = reference_robot2_xy[1] - reference_conveyor_min_y
 
     bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
     for i, env_id in enumerate(env_ids.tolist()):
-        conveyor_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/ConveyorTrack")
-        if not conveyor_prim or not conveyor_prim.IsValid():
+        conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
+        if conveyor_prim is None or not conveyor_prim.IsValid():
+            print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
             continue
-        conveyor_geom = UsdGeom.Imageable(conveyor_prim)
-        world_bound = bbox_cache.ComputeWorldBound(conveyor_geom.GetPrim())
+
+        world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
         aligned_box = world_bound.ComputeAlignedBox()
         min_pt = aligned_box.GetMin()
         max_pt = aligned_box.GetMax()
         center_x = 0.5 * (min_pt[0] + max_pt[0])
+
+        robot1_state[i, 0] = center_x + robot1_center_x_offset
+        robot1_state[i, 1] = min_pt[1] + robot1_min_y_offset
+        robot2_state[i, 0] = center_x + robot2_center_x_offset
+        robot2_state[i, 1] = min_pt[1] + robot2_min_y_offset
+
         if i == 0:
             print(
-                f"[locomanip_event] conveyor x-range=({min_pt[0]:.4f}, {max_pt[0]:.4f}), "
-                f"length={max_pt[0] - min_pt[0]:.4f}, center_x={center_x:.4f}"
+                f"[locomanip_event] aligned robots from {conveyor_prim_name}: "
+                f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
+                f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
+                f"robot0=({robot1_state[i, 0]:.4f}, {robot1_state[i, 1]:.4f}, {robot1_state[i, 2]:.4f}), "
+                f"robot1=({robot2_state[i, 0]:.4f}, {robot2_state[i, 1]:.4f}, {robot2_state[i, 2]:.4f})"
             )
 
-        robot1_pose[i, 0] = center_x
-        robot2_pose[i, 0] = center_x
+    robot1.write_root_pose_to_sim(robot1_state[:, :7], env_ids=env_ids)
+    robot2.write_root_pose_to_sim(robot2_state[:, :7], env_ids=env_ids)
+    robot1.write_root_velocity_to_sim(robot1_state[:, 7:], env_ids=env_ids)
+    robot2.write_root_velocity_to_sim(robot2_state[:, 7:], env_ids=env_ids)
 
-    robot1.write_root_pose_to_sim(robot1_pose, env_ids=env_ids)
-    robot2.write_root_pose_to_sim(robot2_pose, env_ids=env_ids)
+
+def place_test_boxes_from_conveyor_bbox(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    conveyor_prim_name: str = "ConveyorBelt_A08_06",
+    test_box_name: str = "test_box",
+    test_box1_name: str = "test_box1",
+    reference_conveyor_center_x: float = 0.62,
+    reference_conveyor_min_y: float = 0.98,
+    reference_test_box_xy: tuple[float, float] = (0.78886, 1.17033),
+    reference_test_box1_xy: tuple[float, float] = (0.42787, 1.67696),
+    box_half_height: float = 0.1,
+):
+    """Place the two test boxes using change6-relative offsets from the conveyor bbox.
+
+    The old hard-coded box poses were calibrated against change6. This event preserves the
+    same relative placement by anchoring each box to the live conveyor bbox instead of the
+    world frame, so simple7 can reuse the same intent even if the conveyor moved.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    test_box = env.scene[test_box_name]
+    test_box1 = env.scene[test_box1_name]
+    device = test_box.device
+
+    test_box_pose = test_box.data.default_root_state[env_ids, :7].clone()
+    test_box1_pose = test_box1.data.default_root_state[env_ids, :7].clone()
+    zero_vel = torch.zeros((len(env_ids), 6), device=device)
+
+    test_box_center_x_offset = reference_test_box_xy[0] - reference_conveyor_center_x
+    test_box1_center_x_offset = reference_test_box1_xy[0] - reference_conveyor_center_x
+    test_box_min_y_offset = reference_test_box_xy[1] - reference_conveyor_min_y
+    test_box1_min_y_offset = reference_test_box1_xy[1] - reference_conveyor_min_y
+
+    bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
+    for i, env_id in enumerate(env_ids.tolist()):
+        conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
+        if conveyor_prim is None or not conveyor_prim.IsValid():
+            print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
+            continue
+
+        world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
+        aligned_box = world_bound.ComputeAlignedBox()
+        min_pt = aligned_box.GetMin()
+        max_pt = aligned_box.GetMax()
+        center_x = 0.5 * (min_pt[0] + max_pt[0])
+        spawn_z = max_pt[2] + box_half_height
+
+        test_box_pose[i, 0] = center_x + test_box_center_x_offset
+        test_box_pose[i, 1] = min_pt[1] + test_box_min_y_offset
+        test_box_pose[i, 2] = spawn_z
+
+        test_box1_pose[i, 0] = center_x + test_box1_center_x_offset
+        test_box1_pose[i, 1] = min_pt[1] + test_box1_min_y_offset
+        test_box1_pose[i, 2] = spawn_z
+
+        if i == 0:
+            print(
+                f"[locomanip_event] aligned boxes from {conveyor_prim_name}: "
+                f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
+                f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
+                f"box0=({test_box_pose[i, 0]:.4f}, {test_box_pose[i, 1]:.4f}, {test_box_pose[i, 2]:.4f}), "
+                f"box1=({test_box1_pose[i, 0]:.4f}, {test_box1_pose[i, 1]:.4f}, {test_box1_pose[i, 2]:.4f})"
+            )
+
+    test_box.write_root_pose_to_sim(test_box_pose, env_ids=env_ids)
+    test_box1.write_root_pose_to_sim(test_box1_pose, env_ids=env_ids)
+    test_box.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
+    test_box1.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
 
 
 def print_conveyor_world_bbox(
@@ -249,10 +354,9 @@ def print_conveyor_world_bbox(
 
     bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
     for env_id in (env_ids.tolist() if env_ids is not None else [0]):
-        prim_path = f"/World/envs/env_{env_id}/Background/{prim_name}"
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
-            print(f"[conveyor_bbox] prim not found: {prim_path}")
+        prim = _find_named_prim_under_background(stage, env_id, prim_name)
+        if prim is None or not prim.IsValid():
+            print(f"[conveyor_bbox] prim '{prim_name}' not found under Background for env_{env_id}")
             continue
         try:
             world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(prim).GetPrim())
@@ -270,7 +374,7 @@ def print_conveyor_world_bbox(
                 f"  box_spawn_z (0.1m box half-height)={mx[2]+0.1:.4f}"
             )
         except Exception as e:
-            print(f"[conveyor_bbox] Error computing bbox for {prim_path}: {e}")
+            print(f"[conveyor_bbox] Error computing bbox for {prim.GetPath()}: {e}")
         break  # 只打印第一个 env
 
 

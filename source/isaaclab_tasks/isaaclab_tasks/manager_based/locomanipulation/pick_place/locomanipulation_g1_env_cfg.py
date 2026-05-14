@@ -265,6 +265,32 @@ class EventsCfg:
         params={"prim_name": "ConveyorBelt_A08_06"},
     )
 
+    # 用传送带实时 bbox 放置两个机器人，避免 simple7/change6 场景切换后相对传送带错位。
+    align_robots_to_conveyor_startup = EventTerm(
+        func=locomanip_mdp.place_robots_from_conveyor_bbox,
+        mode="startup",
+        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+    )
+
+    align_robots_to_conveyor_reset = EventTerm(
+        func=locomanip_mdp.place_robots_from_conveyor_bbox,
+        mode="reset",
+        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+    )
+
+    # 用传送带实时 bbox 放置两个测试箱子，避免 simple7/change6 场景切换后相对传送带错位。
+    align_test_boxes_to_conveyor_startup = EventTerm(
+        func=locomanip_mdp.place_test_boxes_from_conveyor_bbox,
+        mode="startup",
+        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+    )
+
+    align_test_boxes_to_conveyor_reset = EventTerm(
+        func=locomanip_mdp.place_test_boxes_from_conveyor_bbox,
+        mode="reset",
+        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+    )
+
     # prestartup：对三段拼接的主传送带 Rollers 施加 PhysxSurfaceVelocityAPI（-X方向）。
     # 三组传送带（_06, _07, _08）首尾相接形成物料流，箱子沿此路径输送。
     # 掉出传送带后靠阻尼自然停止，不驱动其他传送带避免落入 bin 后仍被推动。
