@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from isaacsim.core.utils.stage import get_current_stage
-from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -21,7 +21,7 @@ def setup_usd_rigid_object_physics(
     prim_path_template: str = "/World/envs/env_{}/TestBox",
     mass: float = 0.5,
     linear_damping: float = 0.1,
-    angular_damping: float = 1000.0,
+    angular_damping: float = 0.1,
     mesh_approximation: str = "convexHull",
 ):
     """Ensure the target USD prim has rigid-body APIs defined before simulation starts."""
@@ -56,8 +56,16 @@ def setup_usd_rigid_object_physics(
         physx_api = PhysxSchema.PhysxRigidBodyAPI.Get(stage, prim.GetPath())
         if not physx_api:
             physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
-        physx_api.CreateLinearDampingAttr(float(linear_damping))
-        physx_api.CreateAngularDampingAttr(float(angular_damping))
+        # 注意：CreateLinearDampingAttr(value) 在属性已存在时不更新值，
+        # 必须通过 GetXAttr().Set() 确保值写入生效。
+        lin_damping = physx_api.GetLinearDampingAttr()
+        if not lin_damping:
+            lin_damping = physx_api.CreateLinearDampingAttr()
+        lin_damping.Set(float(linear_damping))
+        ang_damping = physx_api.GetAngularDampingAttr()
+        if not ang_damping:
+            ang_damping = physx_api.CreateAngularDampingAttr()
+        ang_damping.Set(float(angular_damping))
 
         # For dynamic rigid bodies, triangle mesh collision is not supported.
         # Force mesh collision approximation on the root prim and all child mesh prims.
@@ -277,6 +285,9 @@ def drive_object_on_conveyor(
 
     Called on an interval; overrides x/y velocity each tick so friction cannot slow
     the object down.  z and angular velocities are left unchanged (z) or zeroed (angular).
+
+    Deprecated: Use setup_conveyor_belt_physics (PhysxSurfaceVelocityAPI) instead,
+    which drives objects through contact forces rather than direct velocity override.
     """
     obj = env.scene[object_name]
     device = obj.device
@@ -289,3 +300,97 @@ def drive_object_on_conveyor(
     vel[:, 1] = velocity_y
     vel[:, 3:] = 0.0          # 清零角速度，防止滚动
     obj.write_root_velocity_to_sim(vel, env_ids=env_ids)
+
+
+def setup_conveyor_belt_physics(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    velocity: tuple[float, float, float] = (0.0, -0.5, 0.0),
+    prim_name_patterns: tuple[str, ...] = ("ConveyorBelt",),
+    rollers_name: str = "Rollers",
+):
+    """对匹配任意 prim_name_patterns 的 ConveyorBelt 的 Rollers 施加 PhysxSurfaceVelocityAPI。
+
+    ConveyorBelt_A08 是 ROLLER 类型——滚轮即承载面。
+    直接在 Rollers（已有 RigidBodyAPI + kinematic）上应用表面速度。
+    不修改根 Xform，避免层级冲突。
+
+    Args:
+        prim_name_patterns: 要匹配的 prim 名称模式列表（substring 匹配，任一匹配即生效）。
+    """
+    import math
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    speed = math.sqrt(velocity[0]**2 + velocity[1]**2 + velocity[2]**2)
+    if speed < 1e-8:
+        print("[locomanip_event] setup_conveyor_belt_physics: zero velocity, skipping")
+        return
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    for env_id in env_ids.tolist():
+        # 收集传送带根 prim
+        conveyor_roots = []
+        base_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}")
+        if base_prim and base_prim.IsValid():
+            for child in base_prim.GetChildren():
+                if any(p in child.GetName() for p in prim_name_patterns):
+                    conveyor_roots.append(child)
+            bg_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/Background")
+            if bg_prim and bg_prim.IsValid():
+                for child in bg_prim.GetChildren():
+                    if any(p in child.GetName() for p in prim_name_patterns):
+                        conveyor_roots.append(child)
+
+        if not conveyor_roots:
+            print(f"[locomanip_event] No conveyor prims (patterns={prim_name_patterns}) found for env_{env_id}")
+            continue
+
+        for root_prim in conveyor_roots:
+            root_path = str(root_prim.GetPath())
+
+            # 找到 Rollers 子 prim
+            rollers_prim = None
+            for child in root_prim.GetChildren():
+                if child.GetName() == rollers_name:
+                    rollers_prim = child
+                    break
+
+            if not rollers_prim or not rollers_prim.IsValid():
+                print(f"[locomanip_event]  Rollers prim not found under {root_path}")
+                continue
+
+            # 确保 Rollers 有 RigidBodyAPI + kinematic（原始 USD 通常已有）
+            if not rollers_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                UsdPhysics.RigidBodyAPI.Apply(rollers_prim)
+            rigid_api = UsdPhysics.RigidBodyAPI(rollers_prim)
+            rigid_api.GetKinematicEnabledAttr().Set(True)
+            rigid_api.CreateRigidBodyEnabledAttr(True)
+
+            # 给 Rollers 下所有 Mesh 施加 CollisionAPI
+            for mesh_child in Usd.PrimRange(rollers_prim):
+                if not mesh_child.IsA(UsdGeom.Mesh):
+                    continue
+                if mesh_child.GetName().startswith("M_"):
+                    continue
+                if not mesh_child.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI.Apply(mesh_child)
+
+            # 施加 PhysxSurfaceVelocityAPI 到 Rollers
+            # 速度在 prim 局部空间。不需要 world→local 变换，
+            # 因为我们只驱动 Rollers，而 Rollers 局部轴与根一致（无中间旋转）。
+            if not rollers_prim.HasAPI(PhysxSchema.PhysxSurfaceVelocityAPI):
+                PhysxSchema.PhysxSurfaceVelocityAPI.Apply(rollers_prim)
+            surf_api = PhysxSchema.PhysxSurfaceVelocityAPI(rollers_prim)
+            surf_api.GetSurfaceVelocityEnabledAttr().Set(True)
+            surf_api.CreateSurfaceVelocityAttr().Set(Gf.Vec3d(*velocity))
+
+            print(
+                f"[locomanip_event]  Rollers SurfaceVelocity "
+                f"vel={velocity} -> {str(rollers_prim.GetPath())}"
+            )
+
+

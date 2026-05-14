@@ -96,9 +96,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # 测试箱子：落在 ConveyorBelt_A08_06 传送带 +y 端（入料端）。
-    # 传送带沿 Y 轴延伸，y∈[-11.42, -8.70]，中心 x=15.30，带面 z=-0.0155。
-    # 箱子沿 -y 方向流向机器人（robot1 y≈-12.50，robot2 y≈-13.07）。
+    # 测试箱子：落在 ConveyorBelt_A08_06 传送带上，由表面速度驱动。
+    # 传送带 y∈[0.98, 3.69]，带面 z≈0.85，中心 x=0.62，沿 -y 方向输送。
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
         init_state=RigidObjectCfg.InitialStateCfg(
@@ -129,6 +128,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
         ),
     )
+
     # Humanoid robot w/ arms higher
     robot: ArticulationCfg = FIXED_G1_29DOF_CFG
 
@@ -242,8 +242,8 @@ class EventsCfg:
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox",
             "mass": 0.5,
-            "linear_damping": 0.1,
-            "angular_damping": 1000.0,
+            "linear_damping": 5.0,
+            "angular_damping": 0.1,
         },
     )
 
@@ -253,8 +253,8 @@ class EventsCfg:
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox1",
             "mass": 0.5,
-            "linear_damping": 0.1,
-            "angular_damping": 1000.0,
+            "linear_damping": 5.0,
+            "angular_damping": 0.1,
         },
     )
 
@@ -265,20 +265,18 @@ class EventsCfg:
         params={"prim_name": "ConveyorBelt_A08_06"},
     )
 
-    # 每 0.05s 强制恢复箱子的 -y 速度，沿传送带流向机器人（y≈-12~-13）。
-    drive_test_box = EventTerm(
-        func=locomanip_mdp.drive_object_on_conveyor,
-        mode="interval",
-        interval_range_s=(0.05, 0.05),
-        params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
+    # prestartup：对三段拼接的主传送带 Rollers 施加 PhysxSurfaceVelocityAPI（-X方向）。
+    # 三组传送带（_06, _07, _08）首尾相接形成物料流，箱子沿此路径输送。
+    # 掉出传送带后靠阻尼自然停止，不驱动其他传送带避免落入 bin 后仍被推动。
+    setup_conveyor_belt_physics = EventTerm(
+        func=locomanip_mdp.setup_conveyor_belt_physics,
+        mode="prestartup",
+        params={
+            "velocity": (-0.5, 0.0, 0.0),
+            "prim_name_patterns": ("ConveyorBelt_A08_06", "ConveyorBelt_A08_07", "ConveyorBelt_A08_08"),
+        },
     )
 
-    drive_test_box1 = EventTerm(
-        func=locomanip_mdp.drive_object_on_conveyor,
-        mode="interval",
-        interval_range_s=(0.05, 0.05),
-        params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
-    )
 
 
 ##
