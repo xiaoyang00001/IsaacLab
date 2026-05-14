@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -27,11 +27,6 @@ from ..device_base import DeviceBase, DeviceCfg
 from .xr_anchor_utils import XrAnchorSynchronizer
 from .xr_cfg import XrCfg
 from .zeromq_game_client import ZeroMqGameClient
-
-try:
-    from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG
-except ImportError:
-    NETWORK_CFG = None
 
 # For testing purposes, we need to mock the XRCore, XRPoseValidityFlags classes
 XRCore = None
@@ -554,6 +549,15 @@ class OpenXRDevice(DeviceBase):
             self.reset()
 
 
+def _try_get_network_cfg():
+    """延迟导入 NETWORK_CFG，避免循环导入。实例化时调用，此时所有模块已加载。"""
+    try:
+        from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG as cfg
+        return cfg
+    except ImportError:
+        return None
+
+
 @dataclass
 class OpenXRDeviceCfg(DeviceCfg):
     """Configuration for OpenXR devices."""
@@ -561,8 +565,20 @@ class OpenXRDeviceCfg(DeviceCfg):
     xr_cfg: XrCfg | None = None
     class_type: type[DeviceBase] = OpenXRDevice
 
-    zmq_game_server_endpoint: str = NETWORK_CFG.zmq_game_server_endpoint if NETWORK_CFG is not None else "tcp://127.0.0.1:14026"
+    zmq_game_server_endpoint: str = field(
+        default_factory=lambda: (
+            _try_get_network_cfg().zmq_game_server_endpoint
+            if _try_get_network_cfg() is not None
+            else "tcp://127.0.0.1:14026"
+        )
+    )
     """ZeroMQ game server endpoint for motion controller data publishing."""
 
-    zmq_player_id: int = NETWORK_CFG.zmq_player_id if NETWORK_CFG is not None else 1
+    zmq_player_id: int = field(
+        default_factory=lambda: (
+            _try_get_network_cfg().zmq_player_id
+            if _try_get_network_cfg() is not None
+            else 1
+        )
+    )
     """Player ID for the ZeroMQ game client."""

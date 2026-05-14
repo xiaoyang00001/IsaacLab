@@ -28,7 +28,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
@@ -51,11 +51,6 @@ with contextlib.suppress(ModuleNotFoundError):
 from isaaclab.devices.device_base import DeviceBase, DeviceCfg
 from isaaclab.devices.openxr.common import HAND_JOINT_NAMES
 from isaaclab.devices.retargeter_base import RetargeterBase
-
-try:
-    from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG
-except ImportError:
-    NETWORK_CFG = None
 
 logger = logging.getLogger(__name__)
 
@@ -546,14 +541,41 @@ class ZeroMqGameSubDevice(DeviceBase):
         return False
 
 
+def _try_get_network_cfg():
+    """延迟导入 NETWORK_CFG，避免循环导入。实例化时调用，此时所有模块已加载。"""
+    try:
+        from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG as cfg
+        return cfg
+    except ImportError:
+        return None
+
+
 @dataclass
 class ZeroMqGameSubDeviceCfg(DeviceCfg):
     """Configuration for the ZeroMQ MGXR Isaac Lab device."""
 
-    endpoint: str = NETWORK_CFG.zmq_game_sub_endpoint if NETWORK_CFG is not None else "tcp://127.0.0.1:5555"
+    endpoint: str = field(
+        default_factory=lambda: (
+            _try_get_network_cfg().zmq_game_sub_endpoint
+            if _try_get_network_cfg() is not None
+            else "tcp://127.0.0.1:5555"
+        )
+    )
     topic: str = "state"
-    local_player_id: int = NETWORK_CFG.local_player_id if NETWORK_CFG is not None else 0
-    target_remote_player_id: int | None = NETWORK_CFG.target_remote_player_id if NETWORK_CFG is not None else None
+    local_player_id: int = field(
+        default_factory=lambda: (
+            _try_get_network_cfg().local_player_id
+            if _try_get_network_cfg() is not None
+            else 0
+        )
+    )
+    target_remote_player_id: int | None = field(
+        default_factory=lambda: (
+            _try_get_network_cfg().target_remote_player_id
+            if _try_get_network_cfg() is not None
+            else None
+        )
+    )
     auto_start: bool = True
     receive_timeout_ms: int = 20
     receive_high_water_mark: int = 10
