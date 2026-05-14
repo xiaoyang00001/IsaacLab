@@ -494,18 +494,25 @@ def setup_conveyor_belt_physics(
         env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
 
     for env_id in env_ids.tolist():
-        # 收集传送带根 prim
+        # 递归遍历 env 和 Background，下兼容不同场景里传送带的层级差异。
         conveyor_roots = []
-        base_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}")
-        if base_prim and base_prim.IsValid():
-            for child in base_prim.GetChildren():
-                if any(p in child.GetName() for p in prim_name_patterns):
-                    conveyor_roots.append(child)
-            bg_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/Background")
-            if bg_prim and bg_prim.IsValid():
-                for child in bg_prim.GetChildren():
-                    if any(p in child.GetName() for p in prim_name_patterns):
-                        conveyor_roots.append(child)
+        seen_paths = set()
+        for search_root_path in (
+            f"/World/envs/env_{env_id}/Background",
+            f"/World/envs/env_{env_id}",
+        ):
+            search_root = stage.GetPrimAtPath(search_root_path)
+            if not (search_root and search_root.IsValid()):
+                continue
+            for prim in Usd.PrimRange(search_root):
+                if prim == search_root:
+                    continue
+                path_str = str(prim.GetPath())
+                if path_str in seen_paths:
+                    continue
+                if any(p in prim.GetName() for p in prim_name_patterns):
+                    conveyor_roots.append(prim)
+                    seen_paths.add(path_str)
 
         if not conveyor_roots:
             print(f"[locomanip_event] No conveyor prims (patterns={prim_name_patterns}) found for env_{env_id}")
@@ -514,11 +521,13 @@ def setup_conveyor_belt_physics(
         for root_prim in conveyor_roots:
             root_path = str(root_prim.GetPath())
 
-            # 找到 Rollers 子 prim
+            # 递归找 Rollers，兼容引用资产内部层级变化。
             rollers_prim = None
-            for child in root_prim.GetChildren():
-                if child.GetName() == rollers_name:
-                    rollers_prim = child
+            for descendant in Usd.PrimRange(root_prim):
+                if descendant == root_prim:
+                    continue
+                if descendant.GetName() == rollers_name:
+                    rollers_prim = descendant
                     break
 
             if not rollers_prim or not rollers_prim.IsValid():

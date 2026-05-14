@@ -265,6 +265,13 @@ class EventsCfg:
         params={"prim_name": "ConveyorBelt_A08_06"},
     )
 
+    # 启动时把第一视角也对齐到 change6，相机位姿同样按传送带 bbox 做参考偏移恢复。
+    align_viewer_to_conveyor_startup = EventTerm(
+        func=locomanip_mdp.align_viewer_to_conveyor_bbox,
+        mode="startup",
+        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+    )
+
     # 用传送带实时 bbox 放置两个机器人，避免 simple7/change6 场景切换后相对传送带错位。
     align_robots_to_conveyor_startup = EventTerm(
         func=locomanip_mdp.place_robots_from_conveyor_bbox,
