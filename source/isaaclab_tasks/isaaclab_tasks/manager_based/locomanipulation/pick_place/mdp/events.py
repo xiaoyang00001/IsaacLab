@@ -338,6 +338,64 @@ def place_test_boxes_from_conveyor_bbox(
     test_box1.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
 
 
+def align_viewer_to_conveyor_bbox(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    conveyor_prim_name: str = "ConveyorBelt_A08_06",
+    reference_conveyor_center_x: float = 0.62,
+    reference_conveyor_min_y: float = 0.98,
+    reference_viewer_eye: tuple[float, float, float] = (7.5, 7.5, 7.5),
+    reference_viewer_lookat: tuple[float, float, float] = (0.0, 0.0, 0.0),
+):
+    """Align the initial viewport camera to preserve the change6 first view."""
+    if not env.sim.has_gui():
+        return
+
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    env_id = int(env_ids[0]) if env_ids is not None and len(env_ids) > 0 else 0
+    conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
+    if conveyor_prim is None or not conveyor_prim.IsValid():
+        print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
+        return
+
+    bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
+    world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
+    aligned_box = world_bound.ComputeAlignedBox()
+    min_pt = aligned_box.GetMin()
+    max_pt = aligned_box.GetMax()
+    center_x = 0.5 * (min_pt[0] + max_pt[0])
+
+    eye = (
+        center_x + (reference_viewer_eye[0] - reference_conveyor_center_x),
+        min_pt[1] + (reference_viewer_eye[1] - reference_conveyor_min_y),
+        float(reference_viewer_eye[2]),
+    )
+    lookat = (
+        center_x + (reference_viewer_lookat[0] - reference_conveyor_center_x),
+        min_pt[1] + (reference_viewer_lookat[1] - reference_conveyor_min_y),
+        float(reference_viewer_lookat[2]),
+    )
+
+    env.cfg.viewer.eye = tuple(float(value) for value in eye)
+    env.cfg.viewer.lookat = tuple(float(value) for value in lookat)
+
+    if env.viewport_camera_controller is not None:
+        env.viewport_camera_controller.update_view_location(eye=env.cfg.viewer.eye, lookat=env.cfg.viewer.lookat)
+    else:
+        env.sim.set_camera_view(eye=env.cfg.viewer.eye, target=env.cfg.viewer.lookat)
+
+    print(
+        f"[locomanip_event] aligned viewer from {conveyor_prim_name}: "
+        f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
+        f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
+        f"eye=({env.cfg.viewer.eye[0]:.4f}, {env.cfg.viewer.eye[1]:.4f}, {env.cfg.viewer.eye[2]:.4f}), "
+        f"lookat=({env.cfg.viewer.lookat[0]:.4f}, {env.cfg.viewer.lookat[1]:.4f}, {env.cfg.viewer.lookat[2]:.4f})"
+    )
+
+
 def print_conveyor_world_bbox(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
