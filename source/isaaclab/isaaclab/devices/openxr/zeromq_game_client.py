@@ -59,6 +59,9 @@ class ZeroMqGameClient:
         self._send_thread = threading.Thread(target=self._thread_send_fun, daemon=True)
         self._send_thread.start()
 
+        # [LOG] 初始化完成
+        print(f"[ZeroMqGameClient] INIT: endpoint={self._endpoint} player_id={self._player_id}", flush=True)
+
     def _thread_send_fun(self):
         self._zmq_dealer_socket = self._zmq_context.socket(zmq.DEALER)
         self._zmq_dealer_socket.setsockopt(zmq.LINGER, 0)
@@ -66,11 +69,15 @@ class ZeroMqGameClient:
         
         try:
             self._zmq_dealer_socket.connect(self._endpoint)
+            print(f"[ZeroMqGameClient] ZMQ DEALER connected to {self._endpoint}", flush=True)
             logger.info(f"ZeroMqGameClient connected to {self._endpoint}")
         except Exception as e:
+            print(f"[ZeroMqGameClient] ZMQ DEALER connect FAILED: {e}", flush=True)
             logger.error(f"ZeroMqGameClient connect failed: {e}")
             return
 
+        _send_error_logged = False
+        _send_success_logged = False
         while not self._stop_requested:
             packet = None
             with self._send_queue_lock:
@@ -83,8 +90,14 @@ class ZeroMqGameClient:
             if packet is not None and self._zmq_dealer_socket:
                 try:
                     self._zmq_dealer_socket.send(packet, zmq.DONTWAIT)
+                    if not _send_success_logged:
+                        _send_success_logged = True
+                        print(f"[ZeroMqGameClient] send OK (游戏服务器已连接)", flush=True)
+                        logger.info("ZeroMqGameClient send OK (游戏服务器已连接)")
                 except zmq.ZMQError as e:
-                    logger.error(f"ZeroMqGameClient send failed: {e}")
+                    if not _send_error_logged:
+                        _send_error_logged = True
+                        logger.warning(f"ZeroMqGameClient send failed: {e} (endpoint={self._endpoint}, 游戏服务器可能未运行，后续错误已静默)")
 
     def enqueue_send_packet(self, packet: bytes):
         with self._send_queue_lock:
