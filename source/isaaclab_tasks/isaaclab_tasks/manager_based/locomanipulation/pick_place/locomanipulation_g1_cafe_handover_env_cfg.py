@@ -112,8 +112,10 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    robot_spawn_a = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/RobotSpawnA",
+    # Debug markers only. Real scene anchors should later use the logical names
+    # RobotSpawnA / RobotSpawnB / CupSpawn / HandoverZone / ServeZone / ViewerAnchor.
+    robot_spawn_a_marker = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/TaskDebug/RobotSpawnA_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=ROBOT_A_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.035,
@@ -121,8 +123,8 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
     )
-    robot_spawn_b = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/RobotSpawnB",
+    robot_spawn_b_marker = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/TaskDebug/RobotSpawnB_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=ROBOT_B_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.035,
@@ -130,8 +132,8 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
     )
-    cup_spawn = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/CupSpawn",
+    cup_spawn_marker = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/TaskDebug/CupSpawn_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=CUP_SPAWN_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.025,
@@ -139,8 +141,8 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
     )
-    handover_zone = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/HandoverZone",
+    handover_zone_marker = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/TaskDebug/HandoverZone_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=HANDOVER_ZONE_FALLBACK_POS),
         spawn=sim_utils.CuboidCfg(
             size=(0.16, 0.16, 0.16),
@@ -148,8 +150,8 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
     )
-    serve_zone = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/ServeZone",
+    serve_zone_marker = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/TaskDebug/ServeZone_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=SERVE_ZONE_FALLBACK_POS),
         spawn=sim_utils.CuboidCfg(
             size=(0.16, 0.16, 0.16),
@@ -157,8 +159,8 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
         ),
     )
-    viewer_anchor = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/ViewerAnchor",
+    viewer_anchor_marker = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/TaskDebug/ViewerAnchor_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=VIEWER_ANCHOR_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.025,
