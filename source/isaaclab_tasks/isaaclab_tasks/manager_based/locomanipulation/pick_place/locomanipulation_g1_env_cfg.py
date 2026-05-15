@@ -326,6 +326,8 @@ class EventsCfg:
             "viewer_origin_type": "asset_body" if NETWORK_CFG.viewer_follow_body_name else "asset_root",
             "viewer_asset_name": LOCAL_ROBOT_ASSET_NAME if NETWORK_CFG.viewer_follow_local_robot else None,
             "viewer_body_name": NETWORK_CFG.viewer_follow_body_name,
+            "reference_viewer_target_xy": (0.0, 0.0),
+            "lock_viewer_to_asset": False,
         },
     )
 
