@@ -39,6 +39,7 @@ from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_md
 
 from .mdp import cafe_handover_events as cafe_events
 from .mdp import cafe_handover_observations as cafe_obs
+from .mdp import cafe_handover_phases as cafe_phases
 from .mdp import cafe_handover_terminations as cafe_terms
 
 from isaaclab_assets.robots.unitree import G1_29DOF_CFG
@@ -56,6 +57,15 @@ CUP_SPAWN_FALLBACK_POS = (0.2, 0.42, 0.95)
 HANDOVER_ZONE_FALLBACK_POS = (0.62, 0.42, 0.98)
 SERVE_ZONE_FALLBACK_POS = (1.0, 0.48, 0.95)
 VIEWER_ANCHOR_FALLBACK_POS = HANDOVER_ZONE_FALLBACK_POS
+
+CAFE_PHASE_OBS_PARAMS = {
+    "cup_spawn_prim_name": "CupSpawn",
+    "fallback_cup_spawn_pos": CUP_SPAWN_FALLBACK_POS,
+    "handover_zone_prim_name": "HandoverZone",
+    "fallback_handover_zone_pos": HANDOVER_ZONE_FALLBACK_POS,
+    "serve_zone_prim_name": "ServeZone",
+    "fallback_serve_zone_pos": SERVE_ZONE_FALLBACK_POS,
+}
 
 FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
@@ -264,6 +274,30 @@ class ObservationsCfg:
         serve_zone_pos = ObsTerm(
             func=cafe_obs.named_prim_pos,
             params={"prim_name": "ServeZone", "fallback_pos": SERVE_ZONE_FALLBACK_POS},
+        )
+        task_phase_index = ObsTerm(
+            func=cafe_phases.task_phase_index,
+            params=CAFE_PHASE_OBS_PARAMS.copy(),
+        )
+        task_phase_one_hot = ObsTerm(
+            func=cafe_phases.task_phase_one_hot,
+            params=CAFE_PHASE_OBS_PARAMS.copy(),
+        )
+        pickup_success = ObsTerm(
+            func=cafe_phases.pickup_success_flag,
+            params=CAFE_PHASE_OBS_PARAMS.copy(),
+        )
+        handover_zone_reached = ObsTerm(
+            func=cafe_phases.handover_zone_reached_flag,
+            params=CAFE_PHASE_OBS_PARAMS.copy(),
+        )
+        handover_success = ObsTerm(
+            func=cafe_phases.handover_success_flag,
+            params=CAFE_PHASE_OBS_PARAMS.copy(),
+        )
+        serve_success = ObsTerm(
+            func=cafe_phases.serve_success_flag,
+            params=CAFE_PHASE_OBS_PARAMS.copy(),
         )
 
         def __post_init__(self):

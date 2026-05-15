@@ -11,6 +11,7 @@ from isaaclab.envs.mdp import *  # noqa: F401, F403
 from .events import *  # noqa: F401, F403
 from .cafe_handover_events import *  # noqa: F401, F403
 from .cafe_handover_observations import *  # noqa: F401, F403
+from .cafe_handover_phases import *  # noqa: F401, F403
 from .cafe_handover_terminations import *  # noqa: F401, F403
 from .actions import *  # noqa: F401, F403
 from .observations import *  # noqa: F401, F403

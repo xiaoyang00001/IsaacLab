@@ -277,8 +277,9 @@
 
 - `locomanipulation_g1_cafe_handover_env_cfg.py`
 - `mdp/cafe_handover_events.py`
+- `mdp/cafe_handover_phases.py`
 - `mdp/cafe_handover_terminations.py`
-- 如有需要：`mdp/cafe_handover_observations.py`
+- `mdp/cafe_handover_observations.py`
 
 ### 不建议复用的旧逻辑
 
@@ -306,7 +307,8 @@
 - `place_robots_from_named_prims`
 - `place_object_from_named_prim`
 - `align_viewer_to_named_prim`
-- `update_task_phase`
+- `task_phase_index`
+- `task_phase_one_hot`
 
 建议新任务里的终止/成功函数：
 
@@ -364,6 +366,32 @@
 3. 是否保留双机 teleop。
 4. 最终目标是“交接成功”还是“交接后放入出餐区”。
 5. 杯子是简化刚体还是已有咖啡杯模型。
+
+
+## 当前实现进度（2026-05-15）
+
+当前仓库里已经落了一套可继续扩展的咖啡厅双机递杯骨架，重点不是美术完成度，
+而是先把任务接口、场景锚点和双机协作链路收口。
+
+- 已注册占位任务：`Isaac-CafeHandover-Locomanipulation-G1-Abs-v0`
+- 已注册模板场景任务：`Isaac-CafeHandover-Locomanipulation-G1-Template-v0`
+- 已新增主环境配置：`locomanipulation_g1_cafe_handover_env_cfg.py`
+- 已新增模板场景接入层：`locomanipulation_g1_cafe_handover_template_env_cfg.py`
+- 已新增模板场景文件：`cafe_handover_scene_template.usda`
+- 已保留双 G1、双 teleop、ZeroMQ 杯子同步链路
+- 已固定逻辑锚点名：`RobotSpawnA`、`RobotSpawnB`、`CupSpawn`、`HandoverZone`、`ServeZone`、`ViewerAnchor`
+- 已在启动时打印锚点存在状态，便于后面接正式咖啡厅 USD
+- 已把 fallback 可视化标记隔离到 `TaskDebug/*_FallbackMarker`，避免和正式场景锚点重名
+- 已补上“任务阶段状态”观测：`task_phase_index`、`task_phase_one_hot`、`pickup_success`、`handover_zone_reached`、`handover_success`、`serve_success`
+
+当前这套阶段状态还是“瞬时启发式”实现，不是带记忆的状态机。也就是说：
+
+- 它根据当前杯子位置、姿态、交接区/出餐区位置、两台机器人末端与杯子的相对距离来推断阶段
+- 它适合先做 teleop 调试、日志观察和后续奖励接口占位
+- 它还没有接入真实抓持、接触或“giver 已释放 / receiver 已接管”的强语义信号
+
+后续如果正式场景和抓持信号稳定下来，建议把阶段状态升级成“可锁存”的任务状态机，
+避免阶段在边界条件下前后抖动。
 
 
 ## 结论
