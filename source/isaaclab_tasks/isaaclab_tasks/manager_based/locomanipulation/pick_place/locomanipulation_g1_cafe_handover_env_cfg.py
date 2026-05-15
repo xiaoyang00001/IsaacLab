@@ -66,6 +66,8 @@ CAFE_PHASE_OBS_PARAMS = {
     "serve_zone_prim_name": "ServeZone",
     "fallback_serve_zone_pos": SERVE_ZONE_FALLBACK_POS,
 }
+CAFE_PHASE_LOG_EVENT_PARAMS = {**CAFE_PHASE_OBS_PARAMS, "log_env_ids": (0,)}
+CAFE_PHASE_LOG_INTERVAL_S = 0.2
 
 FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
@@ -384,6 +386,12 @@ class EventsCfg:
             "prim_name": "ViewerAnchor",
             "fallback_target": VIEWER_ANCHOR_FALLBACK_POS,
         },
+    )
+    log_phase_transitions = EventTerm(
+        func=cafe_phases.log_phase_transitions,
+        mode="interval",
+        interval_range_s=(CAFE_PHASE_LOG_INTERVAL_S, CAFE_PHASE_LOG_INTERVAL_S),
+        params=CAFE_PHASE_LOG_EVENT_PARAMS.copy(),
     )
 
 

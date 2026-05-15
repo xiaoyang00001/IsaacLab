@@ -394,6 +394,28 @@
 避免阶段在边界条件下前后抖动。
 
 
+## 当前实现进度（2026-05-16）
+
+今天这轮继续往运行期调试推进，重点是让“阶段状态”不只是观测里有，
+而是在仿真运行时能直接看到切换。
+
+- 已新增运行期阶段日志事件：`log_phase_transitions`
+- 日志事件走 `interval` 模式，当前默认采样周期是 `0.2s`
+- 事件实现放在 `mdp/cafe_handover_phases.py`
+- 当前日志默认只打印 `env_0`，避免以后多环境时刷屏
+- 日志只在阶段变化时打印，不会每步都输出
+
+当前打印格式类似：
+
+- `initialized(0) -> pickup_success(1)`
+- `pickup_success(1) -> handover_zone_reached(2)`
+- `handover_zone_reached(2) -> handover_success(3)`
+- `handover_success(3) -> serve_success(4)`
+
+这样你后面直接跑 teleop 或场景联调时，就能先判断“阶段判定逻辑是否合理”，
+再决定要不要把它升级成奖励、课程或者真正的状态机。
+
+
 ## 结论
 
 当前最值得推进的路线是：

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 from isaaclab.assets import Articulation, RigidObject
+from isaaclab.managers import ManagerTermBase
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply
 
@@ -21,6 +22,14 @@ if TYPE_CHECKING:
 
 
 NUM_CAFE_HANDOVER_PHASES = 5
+PHASE_ID_TO_NAME = {
+    -1: "uninitialized",
+    0: "initialized",
+    1: "pickup_success",
+    2: "handover_zone_reached",
+    3: "handover_success",
+    4: "serve_success",
+}
 
 
 def _named_prim_pos_in_env_frame(
@@ -235,3 +244,88 @@ def serve_success_flag(
     """Return whether the cup has been stably placed in the serve zone."""
     _, _, _, serve_success = _compute_phase_flags(env=env, **kwargs)
     return _flag_to_obs(serve_success)
+
+
+class log_phase_transitions(ManagerTermBase):
+    """Log cafe handover phase transitions at runtime without spamming every step."""
+
+    def __init__(self, cfg, env):
+        super().__init__(cfg, env)
+        self._previous_phase = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+
+    def reset(self, env_ids=None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._previous_phase[env_ids] = -1
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        env_ids: torch.Tensor | None,
+        cup_spawn_prim_name: str = "CupSpawn",
+        fallback_cup_spawn_pos: tuple[float, float, float] = (0.2, 0.42, 0.95),
+        handover_zone_prim_name: str = "HandoverZone",
+        fallback_handover_zone_pos: tuple[float, float, float] = (0.62, 0.42, 0.98),
+        serve_zone_prim_name: str = "ServeZone",
+        fallback_serve_zone_pos: tuple[float, float, float] = (1.0, 0.48, 0.95),
+        min_pickup_height: float = 0.08,
+        max_handover_xy_error: float = 0.14,
+        max_handover_z_error: float = 0.12,
+        max_upright_tilt_deg: float = 35.0,
+        receiver_advantage_margin: float = 0.04,
+        handover_progress_margin: float = 0.02,
+        cup_asset_cfg: SceneEntityCfg = SceneEntityCfg("cup"),
+        giver_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        receiver_asset_cfg: SceneEntityCfg = SceneEntityCfg("remote_robot"),
+        left_eef_link_name: str = "left_wrist_yaw_link",
+        right_eef_link_name: str = "right_wrist_yaw_link",
+        log_env_ids: tuple[int, ...] = (0,),
+    ) -> None:
+        phase = (
+            task_phase_index(
+                env=env,
+                cup_spawn_prim_name=cup_spawn_prim_name,
+                fallback_cup_spawn_pos=fallback_cup_spawn_pos,
+                handover_zone_prim_name=handover_zone_prim_name,
+                fallback_handover_zone_pos=fallback_handover_zone_pos,
+                serve_zone_prim_name=serve_zone_prim_name,
+                fallback_serve_zone_pos=fallback_serve_zone_pos,
+                min_pickup_height=min_pickup_height,
+                max_handover_xy_error=max_handover_xy_error,
+                max_handover_z_error=max_handover_z_error,
+                max_upright_tilt_deg=max_upright_tilt_deg,
+                receiver_advantage_margin=receiver_advantage_margin,
+                handover_progress_margin=handover_progress_margin,
+                cup_asset_cfg=cup_asset_cfg,
+                giver_asset_cfg=giver_asset_cfg,
+                receiver_asset_cfg=receiver_asset_cfg,
+                left_eef_link_name=left_eef_link_name,
+                right_eef_link_name=right_eef_link_name,
+            )
+            .squeeze(-1)
+            .to(dtype=torch.long)
+        )
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+
+        if len(log_env_ids) > 0:
+            allowed_env_ids = torch.tensor(log_env_ids, device=self.device, dtype=torch.long)
+            mask = (env_ids[:, None] == allowed_env_ids[None, :]).any(dim=1)
+            env_ids = env_ids[mask]
+
+        if len(env_ids) == 0:
+            return
+
+        for env_id_tensor in env_ids:
+            env_id = int(env_id_tensor.item())
+            previous_phase = int(self._previous_phase[env_id].item())
+            current_phase = int(phase[env_id].item())
+            if previous_phase != current_phase:
+                print(
+                    f"[cafe_handover] env_{env_id} phase: "
+                    f"{PHASE_ID_TO_NAME.get(previous_phase, 'unknown')}({previous_phase}) -> "
+                    f"{PHASE_ID_TO_NAME.get(current_phase, 'unknown')}({current_phase})"
+                )
+
+        self._previous_phase[env_ids] = phase[env_ids]
