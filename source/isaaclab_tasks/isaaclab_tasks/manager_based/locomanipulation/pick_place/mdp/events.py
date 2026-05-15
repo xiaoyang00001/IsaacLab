@@ -346,6 +346,9 @@ def align_viewer_to_conveyor_bbox(
     reference_conveyor_min_y: float = 0.98,
     reference_viewer_eye: tuple[float, float, float] = (7.5, 7.5, 7.5),
     reference_viewer_lookat: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    viewer_origin_type: str | None = None,
+    viewer_asset_name: str | None = None,
+    viewer_body_name: str | None = None,
 ):
     """Align the initial viewport camera to preserve the change6 first view."""
     if not env.sim.has_gui():
@@ -379,10 +382,42 @@ def align_viewer_to_conveyor_bbox(
         float(reference_viewer_lookat[2]),
     )
 
-    env.cfg.viewer.eye = tuple(float(value) for value in eye)
-    env.cfg.viewer.lookat = tuple(float(value) for value in lookat)
+    world_eye = tuple(float(value) for value in eye)
+    world_lookat = tuple(float(value) for value in lookat)
 
-    if env.viewport_camera_controller is not None:
+    env.cfg.viewer.origin_type = "world"
+    env.cfg.viewer.asset_name = None
+    env.cfg.viewer.body_name = None
+    env.cfg.viewer.eye = world_eye
+    env.cfg.viewer.lookat = world_lookat
+
+    if (
+        env.viewport_camera_controller is not None
+        and viewer_origin_type in ("asset_root", "asset_body")
+        and viewer_asset_name is not None
+    ):
+        viewer_origin = None
+        if viewer_origin_type == "asset_body":
+            if viewer_body_name is None:
+                raise ValueError("viewer_body_name must be provided when viewer_origin_type='asset_body'.")
+            asset = env.scene[viewer_asset_name]
+            body_id, _ = asset.find_bodies(viewer_body_name)
+            viewer_origin = asset.data.body_pos_w[env_id, body_id].view(3)
+            env.viewport_camera_controller.update_view_to_asset_body(viewer_asset_name, viewer_body_name)
+            env.cfg.viewer.body_name = viewer_body_name
+        else:
+            viewer_origin = env.scene[viewer_asset_name].data.root_pos_w[env_id]
+            env.viewport_camera_controller.update_view_to_asset_root(viewer_asset_name)
+
+        rel_eye = tuple(float(world_eye[i] - viewer_origin[i].item()) for i in range(3))
+        rel_lookat = tuple(float(world_lookat[i] - viewer_origin[i].item()) for i in range(3))
+
+        env.cfg.viewer.origin_type = viewer_origin_type
+        env.cfg.viewer.asset_name = viewer_asset_name
+        env.cfg.viewer.eye = rel_eye
+        env.cfg.viewer.lookat = rel_lookat
+        env.viewport_camera_controller.update_view_location(eye=env.cfg.viewer.eye, lookat=env.cfg.viewer.lookat)
+    elif env.viewport_camera_controller is not None:
         env.viewport_camera_controller.update_view_location(eye=env.cfg.viewer.eye, lookat=env.cfg.viewer.lookat)
     else:
         env.sim.set_camera_view(eye=env.cfg.viewer.eye, target=env.cfg.viewer.lookat)
@@ -391,6 +426,8 @@ def align_viewer_to_conveyor_bbox(
         f"[locomanip_event] aligned viewer from {conveyor_prim_name}: "
         f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
         f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
+        f"origin_type={env.cfg.viewer.origin_type}, "
+        f"asset={env.cfg.viewer.asset_name}, "
         f"eye=({env.cfg.viewer.eye[0]:.4f}, {env.cfg.viewer.eye[1]:.4f}, {env.cfg.viewer.eye[2]:.4f}), "
         f"lookat=({env.cfg.viewer.lookat[0]:.4f}, {env.cfg.viewer.lookat[1]:.4f}, {env.cfg.viewer.lookat[2]:.4f})"
     )

@@ -79,6 +79,40 @@ class NetworkCfg:
     target_remote_player_id: int = 2
     """Target remote player ID for the ZeroMQ game sub device."""
 
+    # ---- Multi-robot role mapping ----
+    primary_player_id: int = 1
+    """Player ID that is mapped to scene robot ``robot`` / prim ``Robot``."""
+
+    secondary_player_id: int = 2
+    """Player ID that is mapped to scene robot ``remote_robot`` / prim ``RemoteRobot``."""
+
+    primary_robot_scene_name: str = "robot"
+    """Scene asset name for the primary robot."""
+
+    secondary_robot_scene_name: str = "remote_robot"
+    """Scene asset name for the secondary robot."""
+
+    primary_robot_prim_name: str = "Robot"
+    """USD prim name for the primary robot."""
+
+    secondary_robot_prim_name: str = "RemoteRobot"
+    """USD prim name for the secondary robot."""
+
+    viewer_follow_local_robot: bool = True
+    """Whether the GUI viewport should track the locally controlled robot."""
+
+    viewer_follow_body_name: str | None = None
+    """Optional body name for viewer tracking. If unset, track the robot root."""
+
+    xr_anchor_follow_local_robot: bool = True
+    """Whether the XR anchor should be attached to the locally controlled robot."""
+
+    xr_anchor_body_name: str = "pelvis"
+    """Body name used to anchor XR to the locally controlled robot."""
+
+    object_sync_authority_player_id: int = 1
+    """Player ID that owns object physics and publishes object synchronization."""
+
     # ---- Convenience properties ----
     @property
     def zmq_game_server_endpoint(self) -> str:
@@ -94,6 +128,68 @@ class NetworkCfg:
     def zmq_object_sync_endpoint(self) -> str:
         """Full endpoint string for object synchronization (e.g. tcp://192.168.1.149:15555)."""
         return f"tcp://{self.zmq_object_sync_ip}:{self.zmq_object_sync_port}"
+
+    @property
+    def local_is_primary_player(self) -> bool:
+        """Whether this machine controls the primary robot."""
+        if self.local_player_id == self.primary_player_id:
+            return True
+        if self.local_player_id == self.secondary_player_id:
+            return False
+        return True
+
+    @property
+    def local_robot_scene_name(self) -> str:
+        """Scene asset name of the robot controlled by this machine."""
+        if self.local_is_primary_player:
+            return self.primary_robot_scene_name
+        return self.secondary_robot_scene_name
+
+    @property
+    def remote_robot_scene_name(self) -> str:
+        """Scene asset name of the robot driven by the subscribed remote player."""
+        if self.local_is_primary_player:
+            return self.secondary_robot_scene_name
+        return self.primary_robot_scene_name
+
+    @property
+    def local_robot_prim_name(self) -> str:
+        """USD prim name of the robot controlled by this machine."""
+        if self.local_is_primary_player:
+            return self.primary_robot_prim_name
+        return self.secondary_robot_prim_name
+
+    @property
+    def remote_robot_prim_name(self) -> str:
+        """USD prim name of the robot driven by the subscribed remote player."""
+        if self.local_is_primary_player:
+            return self.secondary_robot_prim_name
+        return self.primary_robot_prim_name
+
+    @property
+    def zmq_object_sync_role(self) -> str:
+        """Object-sync role for this machine."""
+        if self.local_player_id == self.object_sync_authority_player_id:
+            return "publisher"
+        return "subscriber"
+
+    def get_local_robot_prim_path(self, env_index: int = 0) -> str:
+        """World prim path for the locally controlled robot."""
+        return f"/World/envs/env_{env_index}/{self.local_robot_prim_name}"
+
+    def get_remote_robot_prim_path(self, env_index: int = 0) -> str:
+        """World prim path for the remotely controlled robot."""
+        return f"/World/envs/env_{env_index}/{self.remote_robot_prim_name}"
+
+    def get_local_robot_body_prim_path(self, env_index: int = 0, body_name: str | None = None) -> str:
+        """World prim path for a body on the locally controlled robot."""
+        resolved_body_name = body_name or self.xr_anchor_body_name
+        return f"{self.get_local_robot_prim_path(env_index)}/{resolved_body_name}"
+
+    def get_remote_robot_body_prim_path(self, env_index: int = 0, body_name: str | None = None) -> str:
+        """World prim path for a body on the remotely controlled robot."""
+        resolved_body_name = body_name or self.xr_anchor_body_name
+        return f"{self.get_remote_robot_prim_path(env_index)}/{resolved_body_name}"
 
 
 # Singleton instance for convenient import

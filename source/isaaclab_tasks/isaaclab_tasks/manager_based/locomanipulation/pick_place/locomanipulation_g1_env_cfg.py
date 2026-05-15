@@ -40,8 +40,11 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retri
 import copy
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG
 
-ZMQ_SYNC_ROLE = "publisher"
+LOCAL_ROBOT_ASSET_NAME = NETWORK_CFG.local_robot_scene_name
+REMOTE_ROBOT_ASSET_NAME = NETWORK_CFG.remote_robot_scene_name
+ZMQ_SYNC_ROLE = NETWORK_CFG.zmq_object_sync_role
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
@@ -151,11 +154,13 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
+    upper_body_ik = copy.deepcopy(G1_UPPER_BODY_IK_ACTION_CFG)
+    upper_body_ik.asset_name = LOCAL_ROBOT_ASSET_NAME
+    upper_body_ik.controller.articulation_name = LOCAL_ROBOT_ASSET_NAME
 
     remote_upper_body_ik = copy.deepcopy(G1_UPPER_BODY_IK_ACTION_CFG)
-    remote_upper_body_ik.asset_name = "remote_robot"
-    remote_upper_body_ik.controller.articulation_name = "remote_robot"
+    remote_upper_body_ik.asset_name = REMOTE_ROBOT_ASSET_NAME
+    remote_upper_body_ik.controller.articulation_name = REMOTE_ROBOT_ASSET_NAME
 
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE)
     object_sync1 = ZmqObjectSyncActionCfg(asset_name="test_box1", role=ZMQ_SYNC_ROLE)
@@ -175,30 +180,58 @@ class ObservationsCfg:
         actions = ObsTerm(func=manip_mdp.last_action)
         robot_joint_pos = ObsTerm(
             func=base_mdp.joint_pos,
-            params={"asset_cfg": SceneEntityCfg("robot")},
+            params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME)},
         )
-        robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("robot")})
-        robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("robot")})
+        robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME)})
+        robot_root_rot = ObsTerm(
+            func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME)}
+        )
         remote_robot_joint_pos = ObsTerm(
             func=base_mdp.joint_pos,
-            params={"asset_cfg": SceneEntityCfg("remote_robot")},
+            params={"asset_cfg": SceneEntityCfg(REMOTE_ROBOT_ASSET_NAME)},
         )
-        remote_robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
-        remote_robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("remote_robot")})
+        remote_robot_root_pos = ObsTerm(
+            func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg(REMOTE_ROBOT_ASSET_NAME)}
+        )
+        remote_robot_root_rot = ObsTerm(
+            func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg(REMOTE_ROBOT_ASSET_NAME)}
+        )
         # object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
         # object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
-        robot_links_state = ObsTerm(func=manip_mdp.get_all_robot_link_state)
+        robot_links_state = ObsTerm(
+            func=manip_mdp.get_all_robot_link_state,
+            params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME)},
+        )
 
-        left_eef_pos = ObsTerm(func=manip_mdp.get_eef_pos, params={"link_name": "left_wrist_yaw_link"})
-        left_eef_quat = ObsTerm(func=manip_mdp.get_eef_quat, params={"link_name": "left_wrist_yaw_link"})
-        right_eef_pos = ObsTerm(func=manip_mdp.get_eef_pos, params={"link_name": "right_wrist_yaw_link"})
-        right_eef_quat = ObsTerm(func=manip_mdp.get_eef_quat, params={"link_name": "right_wrist_yaw_link"})
+        left_eef_pos = ObsTerm(
+            func=manip_mdp.get_eef_pos,
+            params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME), "link_name": "left_wrist_yaw_link"},
+        )
+        left_eef_quat = ObsTerm(
+            func=manip_mdp.get_eef_quat,
+            params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME), "link_name": "left_wrist_yaw_link"},
+        )
+        right_eef_pos = ObsTerm(
+            func=manip_mdp.get_eef_pos,
+            params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME), "link_name": "right_wrist_yaw_link"},
+        )
+        right_eef_quat = ObsTerm(
+            func=manip_mdp.get_eef_quat,
+            params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME), "link_name": "right_wrist_yaw_link"},
+        )
 
-        hand_joint_state = ObsTerm(func=manip_mdp.get_robot_joint_state, params={"joint_names": [".*_hand.*"]})
+        hand_joint_state = ObsTerm(
+            func=manip_mdp.get_robot_joint_state,
+            params={"asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME), "joint_names": [".*_hand.*"]},
+        )
 
         object = ObsTerm(
             func=manip_mdp.object_obs,
-            params={"left_eef_link_name": "left_wrist_yaw_link", "right_eef_link_name": "right_wrist_yaw_link"},
+            params={
+                "asset_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME),
+                "left_eef_link_name": "left_wrist_yaw_link",
+                "right_eef_link_name": "right_wrist_yaw_link",
+            },
         )
         # left_wrist_cam = ObsTerm(
         #     func=base_mdp.image,
@@ -227,7 +260,13 @@ class TerminationsCfg:
     #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
     # )
 
-    success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
+    success = DoneTerm(
+        func=manip_mdp.task_done_pick_place,
+        params={
+            "robot_cfg": SceneEntityCfg(LOCAL_ROBOT_ASSET_NAME),
+            "task_link_name": "right_wrist_yaw_link",
+        },
+    )
 
 
 @configclass
@@ -265,13 +304,6 @@ class EventsCfg:
         params={"prim_name": "ConveyorBelt_A08_06"},
     )
 
-    # 启动时把第一视角也对齐到 change6，相机位姿同样按传送带 bbox 做参考偏移恢复。
-    align_viewer_to_conveyor_startup = EventTerm(
-        func=locomanip_mdp.align_viewer_to_conveyor_bbox,
-        mode="startup",
-        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
-    )
-
     # 用传送带实时 bbox 放置两个机器人，避免 simple7/change6 场景切换后相对传送带错位。
     align_robots_to_conveyor_startup = EventTerm(
         func=locomanip_mdp.place_robots_from_conveyor_bbox,
@@ -283,6 +315,18 @@ class EventsCfg:
         func=locomanip_mdp.place_robots_from_conveyor_bbox,
         mode="reset",
         params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+    )
+
+    # 启动时把第一视角对齐到当前本机控制的机器人，避免两台电脑都落到同一个机器人视角。
+    align_viewer_to_conveyor_startup = EventTerm(
+        func=locomanip_mdp.align_viewer_to_conveyor_bbox,
+        mode="startup",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "viewer_origin_type": "asset_body" if NETWORK_CFG.viewer_follow_body_name else "asset_root",
+            "viewer_asset_name": LOCAL_ROBOT_ASSET_NAME if NETWORK_CFG.viewer_follow_local_robot else None,
+            "viewer_body_name": NETWORK_CFG.viewer_follow_body_name,
+        },
     )
 
     # 用传送带实时 bbox 放置两个测试箱子，避免 simple7/change6 场景切换后相对传送带错位。
@@ -353,6 +397,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         """Post initialization."""
+        local_robot_asset_name = NETWORK_CFG.local_robot_scene_name
+        remote_robot_asset_name = NETWORK_CFG.remote_robot_scene_name
+
         # general settings
         self.decimation = 4
         self.episode_length_s = 20.0
@@ -364,18 +411,33 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
 
         # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
+        self.actions.upper_body_ik.asset_name = local_robot_asset_name
+        self.actions.upper_body_ik.controller.articulation_name = local_robot_asset_name
+        self.actions.remote_upper_body_ik.asset_name = remote_robot_asset_name
+        self.actions.remote_upper_body_ik.controller.articulation_name = remote_robot_asset_name
         self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
         self.actions.remote_upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
 
-        # For Large-Space 1:1 Tracking mode, both VR devices share the identical world physical space.
-        # We explicitly DO NOT bind the XRAnchor to any robot pelvis to prevent double-offsetting.
-        # self.xr.anchor_prim_path = "/World/envs/env_0/Robot/pelvis"
         self.xr.fixed_anchor_height = True
-        # self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
-
-        # self.xr2.anchor_prim_path = "/World/envs/env_0/RemoteRobot/pelvis"
         self.xr2.fixed_anchor_height = True
-        # self.xr2.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
+        if NETWORK_CFG.xr_anchor_follow_local_robot:
+            self.xr.anchor_prim_path = NETWORK_CFG.get_local_robot_body_prim_path(
+                env_index=0, body_name=NETWORK_CFG.xr_anchor_body_name
+            )
+            self.xr2.anchor_prim_path = NETWORK_CFG.get_remote_robot_body_prim_path(
+                env_index=0, body_name=NETWORK_CFG.xr_anchor_body_name
+            )
+
+        print(
+            "[locomanip_cfg] "
+            f"local_player_id={NETWORK_CFG.local_player_id}, "
+            f"target_remote_player_id={NETWORK_CFG.target_remote_player_id}, "
+            f"local_robot={local_robot_asset_name}, "
+            f"remote_robot={remote_robot_asset_name}, "
+            f"object_sync_role={ZMQ_SYNC_ROLE}, "
+            f"xr_anchor={self.xr.anchor_prim_path}"
+        )
+
         # # Added Camera attached to left wrist link
         # self.scene.left_hand_cam = CameraCfg(
         #     prim_path="{ENV_REGEX_NS}/Robot/left_wrist_yaw_link/cam",
