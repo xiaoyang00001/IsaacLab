@@ -280,7 +280,7 @@ class EventsCfg:
         mode="prestartup",
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox",
-            "mass": 0.5,
+            "mass": 2.5,
             "linear_damping": 5.0,
             "angular_damping": 0.1,
         },
@@ -291,7 +291,7 @@ class EventsCfg:
         mode="prestartup",
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox1",
-            "mass": 0.5,
+            "mass": 2.5,
             "linear_damping": 5.0,
             "angular_damping": 0.1,
         },
