@@ -110,6 +110,40 @@ def place_robots_from_named_prims(
     robot_b.write_root_velocity_to_sim(robot_b_state[:, 7:], env_ids=env_ids)
 
 
+def report_named_prim_status(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    prim_names: tuple[str, ...] = (
+        "RobotSpawnA",
+        "RobotSpawnB",
+        "CupSpawn",
+        "HandoverZone",
+        "ServeZone",
+        "ViewerAnchor",
+    ),
+):
+    """Print whether the expected task anchor prims exist in the scene."""
+    stage = get_current_stage()
+    if stage is None:
+        print("[cafe_handover] stage unavailable, cannot inspect anchor prims")
+        return
+
+    env_id = int(env_ids[0].item()) if env_ids is not None and len(env_ids) > 0 else 0
+    found = []
+    missing = []
+    for prim_name in prim_names:
+        prim = _find_named_prim_in_env(stage, env_id, prim_name)
+        if prim is not None and prim.IsValid():
+            found.append(prim_name)
+        else:
+            missing.append(prim_name)
+
+    print(
+        f"[cafe_handover] env_{env_id} anchor status: "
+        f"found={found if found else '[]'}, missing={missing if missing else '[]'}"
+    )
+
+
 def place_rigid_asset_from_named_prim(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,

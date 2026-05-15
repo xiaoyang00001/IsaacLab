@@ -291,6 +291,10 @@ class TerminationsCfg:
 class EventsCfg:
     """Runtime events for the cafe handover task."""
 
+    report_anchor_status = EventTerm(
+        func=cafe_events.report_named_prim_status,
+        mode="startup",
+    )
     place_robots_startup = EventTerm(
         func=cafe_events.place_robots_from_named_prims,
         mode="startup",
