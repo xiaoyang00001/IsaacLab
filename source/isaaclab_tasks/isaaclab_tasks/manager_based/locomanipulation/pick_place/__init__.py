@@ -6,10 +6,15 @@
 
 """This sub-module contains the functions that are specific to the locomanipulation environments."""
 
-import gymnasium as gym
 import os
+import gymnasium as gym
 
-from . import agents, fixed_base_upper_body_ik_g1_env_cfg, locomanipulation_g1_env_cfg
+from . import (
+    agents,
+    fixed_base_upper_body_ik_g1_env_cfg,
+    locomanipulation_g1_cafe_handover_env_cfg,
+    locomanipulation_g1_env_cfg,
+)
 
 gym.register(
     id="Isaac-PickPlace-Locomanipulation-G1-Abs-v0",
@@ -26,6 +31,15 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
         "env_cfg_entry_point": fixed_base_upper_body_ik_g1_env_cfg.FixedBaseUpperBodyIKG1EnvCfg,
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-CafeHandover-Locomanipulation-G1-Abs-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": locomanipulation_g1_cafe_handover_env_cfg.CafeHandoverG1EnvCfg,
     },
     disable_env_checker=True,
 )
