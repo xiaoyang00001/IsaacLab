@@ -31,7 +31,12 @@ LIGHTWHEEL_KITCHEN_ROOM_USD_PATH = _resolve_lightwheel_kitchen_room_usd_path()
 
 @configclass
 class CafeHandoverG1KitchenRoomSceneCfg(BaseCafeHandoverG1SceneCfg):
-    """Scene cfg that layers the Lightwheel KitchenRoom USD behind the cafe handover task."""
+    """Scene cfg that swaps the placeholder cafe scene for the Lightwheel KitchenRoom USD."""
+
+    # Remove placeholder cafe geometry so only the downloaded KitchenRoom background remains.
+    counter = None
+    serve_counter = None
+    ground = None
 
     background = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Background",

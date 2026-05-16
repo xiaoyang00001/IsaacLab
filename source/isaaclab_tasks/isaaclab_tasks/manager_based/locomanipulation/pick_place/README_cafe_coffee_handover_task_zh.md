@@ -521,6 +521,7 @@ Unable to find source prim path: '/World/envs/env_.*/TaskDebug'. Please create t
 当前这版接入方式是：
 
 - 把 `KitchenRoom.usd` 作为背景 `background` 挂到 `/World/envs/env_.*/Background`
+- 在 `KitchenRoom` 专用 scene cfg 里去掉旧的占位 `counter`、`serve_counter` 和 `ground`
 - 保留现有 cafe handover 任务逻辑、双 G1、杯子、阶段状态和 teleop 配置
 - 不覆盖现有模板场景版和占位版任务
 
