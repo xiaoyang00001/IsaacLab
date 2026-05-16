@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 import isaaclab.sim as sim_utils
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
@@ -15,6 +15,9 @@ from isaaclab.utils import configclass
 from .locomanipulation_g1_cafe_handover_env_cfg import (
     CafeHandoverG1EnvCfg as BaseCafeHandoverG1EnvCfg,
     CafeHandoverG1SceneCfg as BaseCafeHandoverG1SceneCfg,
+    FIXED_G1_29DOF_CFG,
+    REMOTE_FIXED_G1_29DOF_CFG,
+    ZMQ_SYNC_ROLE,
 )
 
 
@@ -54,16 +57,36 @@ class CafeHandoverG1KitchenRoomSceneCfg(BaseCafeHandoverG1SceneCfg):
     serve_zone_marker = None
     viewer_anchor_marker = None
 
-    robot = BaseCafeHandoverG1SceneCfg.robot.copy()
+    robot = FIXED_G1_29DOF_CFG.copy()
     robot.init_state.pos = KITCHEN_ROOM_ROBOT_A_POS
     robot.init_state.rot = KITCHEN_ROOM_ROBOT_A_QUAT
 
-    remote_robot = BaseCafeHandoverG1SceneCfg.remote_robot.copy()
+    remote_robot = REMOTE_FIXED_G1_29DOF_CFG.copy()
+    remote_robot.prim_path = "{ENV_REGEX_NS}/RemoteRobot"
     remote_robot.init_state.pos = KITCHEN_ROOM_ROBOT_B_POS
     remote_robot.init_state.rot = KITCHEN_ROOM_ROBOT_B_QUAT
 
-    cup = BaseCafeHandoverG1SceneCfg.cup.copy()
-    cup.init_state.pos = KITCHEN_ROOM_CUP_SPAWN_POS
+    cup = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Cup",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=KITCHEN_ROOM_CUP_SPAWN_POS, rot=(1.0, 0.0, 0.0, 0.0)),
+        spawn=sim_utils.CylinderCfg(
+            radius=0.035,
+            height=0.12,
+            axis="Z",
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.53, 0.33, 0.12)),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=(ZMQ_SYNC_ROLE == "subscriber"),
+                disable_gravity=(ZMQ_SYNC_ROLE == "subscriber"),
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=1,
+                max_angular_velocity=1000.0,
+                max_linear_velocity=1000.0,
+                max_depenetration_velocity=5.0,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
+        ),
+    )
 
     robot_spawn_a_anchor = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/RobotSpawnA",
