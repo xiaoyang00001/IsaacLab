@@ -13,6 +13,7 @@ from . import (
     agents,
     fixed_base_upper_body_ik_g1_env_cfg,
     locomanipulation_g1_cafe_handover_env_cfg,
+    locomanipulation_g1_cafe_handover_kitchenroom_env_cfg,
     locomanipulation_g1_cafe_handover_template_env_cfg,
     locomanipulation_g1_env_cfg,
 )
@@ -50,6 +51,15 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
         "env_cfg_entry_point": locomanipulation_g1_cafe_handover_template_env_cfg.CafeHandoverG1TemplateEnvCfg,
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": locomanipulation_g1_cafe_handover_kitchenroom_env_cfg.CafeHandoverG1KitchenRoomEnvCfg,
     },
     disable_env_checker=True,
 )

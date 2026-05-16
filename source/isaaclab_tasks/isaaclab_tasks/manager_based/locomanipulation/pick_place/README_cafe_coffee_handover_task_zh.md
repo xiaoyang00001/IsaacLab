@@ -511,6 +511,55 @@ Unable to find source prim path: '/World/envs/env_.*/TaskDebug'. Please create t
 - `handover_success` 和 `serve_success` 的启发式判定是否稳定
 
 
+## KitchenRoom 场景接入（2026-05-16）
+
+已经新增一个专门的 Lightwheel KitchenRoom 场景接入入口：
+
+- 新 env cfg：`locomanipulation_g1_cafe_handover_kitchenroom_env_cfg.py`
+- 新 task id：`Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0`
+
+当前这版接入方式是：
+
+- 把 `KitchenRoom.usd` 作为背景 `background` 挂到 `/World/envs/env_.*/Background`
+- 保留现有 cafe handover 任务逻辑、双 G1、杯子、阶段状态和 teleop 配置
+- 不覆盖现有模板场景版和占位版任务
+
+也就是说，目前它是“真实厨房背景 + 现有任务骨架”的组合版本，适合先做这些事：
+
+- 在真实厨房场景里验证加载、材质、相机和渲染效果
+- 看当前机器人站位和杯子出生点是否与厨房台面匹配
+- 决定后面是继续用 fallback 锚点，还是在 KitchenRoom 里补正式命名锚点
+
+当前默认读取的场景路径是：
+
+```text
+D:\Downloads\Lightwheel_OpenSource\Lightwheel_OpenSource\Locomotion\KitchenRoom\KitchenRoom.usd
+```
+
+代码里也支持通过环境变量覆盖根目录：
+
+```text
+LIGHTWHEEL_OPEN_SOURCE_ROOT_DIR
+```
+
+如果设置了这个变量，代码会自动拼接：
+
+```text
+<LIGHTWHEEL_OPEN_SOURCE_ROOT_DIR>\Locomotion\KitchenRoom\KitchenRoom.usd
+```
+
+推荐启动命令：
+
+```powershell
+.\isaaclab.bat -p scripts/tools/record_demos.py --task Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0 --teleop_device handtracking,motion_controllers --enable_pinocchio --num_demos 0 --dataset_file .\datasets\cafe_handover_kitchenroom_debug.hdf5
+```
+
+当前要特别注意一点：
+
+- 这版只是把真实场景接进来了，还没有针对 `KitchenRoom` 单独重调 `RobotSpawnA/B`、`CupSpawn`、`HandoverZone`、`ServeZone`
+- 所以后续最重要的不是再换启动脚本，而是根据 KitchenRoom 的实际台面位置去调锚点或补命名 prim
+
+
 ## 结论
 
 当前最值得推进的路线是：
