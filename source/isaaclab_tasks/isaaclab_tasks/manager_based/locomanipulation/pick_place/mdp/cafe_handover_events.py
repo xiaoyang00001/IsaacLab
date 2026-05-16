@@ -15,15 +15,41 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+_DUPLICATE_ANCHOR_WARNINGS: set[tuple[int, str]] = set()
+
+
+def _select_named_prim_candidate(stage: Usd.Stage, env_id: int, prim_name: str, matches: list[Usd.Prim]) -> Usd.Prim | None:
+    """Select the most appropriate prim when multiple prims share the same logical anchor name."""
+    if len(matches) == 0:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    background_matches = [prim for prim in matches if f"/World/envs/env_{env_id}/Background/" in prim.GetPath().pathString]
+    selected = background_matches[0] if len(background_matches) > 0 else matches[0]
+
+    warning_key = (env_id, prim_name)
+    if warning_key not in _DUPLICATE_ANCHOR_WARNINGS:
+        all_paths = [prim.GetPath().pathString for prim in matches]
+        print(
+            f"[cafe_handover] env_{env_id} duplicate anchor prims for {prim_name}: "
+            f"selected={selected.GetPath().pathString}, candidates={all_paths}"
+        )
+        _DUPLICATE_ANCHOR_WARNINGS.add(warning_key)
+
+    return selected
+
+
 def _find_named_prim_in_env(stage: Usd.Stage, env_id: int, prim_name: str) -> Usd.Prim | None:
     """Find the first prim with the provided name under the environment root."""
     env_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}")
     if not (env_prim and env_prim.IsValid()):
         return None
+    matches = []
     for prim in Usd.PrimRange(env_prim):
         if prim.GetName() == prim_name:
-            return prim
-    return None
+            matches.append(prim)
+    return _select_named_prim_candidate(stage, env_id, prim_name, matches)
 
 
 def _resolve_anchor_pose(

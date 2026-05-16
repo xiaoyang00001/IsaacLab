@@ -561,6 +561,47 @@ LIGHTWHEEL_OPEN_SOURCE_ROOT_DIR
 - 所以后续最重要的不是再换启动脚本，而是根据 KitchenRoom 的实际台面位置去调锚点或补命名 prim
 
 
+## KitchenRoom 中岛台适配（2026-05-16）
+
+这一步已经不再只是“把厨房背景挂进来”，而是开始按 `KitchenRoom` 里的真实台面去布任务锚点。
+
+本地检查 `KitchenRoom.usd` 后，当前第一版选择把任务核心区域落在厨房中岛：
+
+- 中岛资产：`Kitchen_InsularShelf_01`
+- 它的包围盒大致在：
+  `x=-0.361..0.788`、`y=-0.155..0.606`、`z=0.0..0.858`
+- 这比咖啡机 `CoffeeMachine006` 更适合当前“固定双 G1 + 上半身 teleop 递杯”任务
+
+当前 `Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0` 已经加了这组场景锚点：
+
+- `RobotSpawnA = (0.18, -0.55, 0.75)`，面向 `+Y`
+- `RobotSpawnB = (0.26, 0.98, 0.75)`，面向 `-Y`
+- `CupSpawn = (0.02, 0.04, 0.94)`
+- `HandoverZone = (0.22, 0.22, 1.00)`
+- `ServeZone = (0.45, 0.46, 0.94)`
+- `ViewerAnchor = (0.22, 0.22, 1.00)`
+
+同时做了两层收口：
+
+- `KitchenRoom` 版里旧的占位 `counter`、`serve_counter`、`ground` 已经去掉
+- 事件、观测、phase、success 的 fallback 坐标也都切到了厨房自己的坐标，不再回退到老模板场景位置
+
+这意味着即使后面某个锚点暂时缺失，任务也会尽量落在厨房中岛附近，而不是跳回旧的占位桌面。
+
+另外，这一版还补了“重名锚点优先级”处理：
+
+- 如果以后你在正式 `KitchenRoom` 场景里补了同名锚点，例如 `Background/.../RobotSpawnA`
+- 运行时会优先选 `Background` 里的真实场景锚点
+- 当前代码里为了先联调放在 env 根下的占位锚点会自动退成次选，不用立刻删
+
+目前已知的 Lightwheel 场景告警有两类：
+
+- `UnitsAdjust-*.metricsAssembler` 子层找不到
+- `/root/Table049` 的 payload 指向 `D:/Downloads/Table049/Table049.usd`
+
+至少在当前本地检查里，这些告警没有阻止 `KitchenRoom.usd` 打开和提取台面信息，但你后面正式联调时如果看到同类 warning，不需要先把它误判成 cafe handover 逻辑错误。
+
+
 ## 结论
 
 当前最值得推进的路线是：
