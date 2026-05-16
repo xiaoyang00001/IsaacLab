@@ -203,46 +203,221 @@ def task_phase_index(
 
 def task_phase_one_hot(
     env: ManagerBasedRLEnv,
-    **kwargs,
+    cup_spawn_prim_name: str = "CupSpawn",
+    fallback_cup_spawn_pos: tuple[float, float, float] = (0.2, 0.42, 0.95),
+    handover_zone_prim_name: str = "HandoverZone",
+    fallback_handover_zone_pos: tuple[float, float, float] = (0.62, 0.42, 0.98),
+    serve_zone_prim_name: str = "ServeZone",
+    fallback_serve_zone_pos: tuple[float, float, float] = (1.0, 0.48, 0.95),
+    min_pickup_height: float = 0.08,
+    max_handover_xy_error: float = 0.14,
+    max_handover_z_error: float = 0.12,
+    max_upright_tilt_deg: float = 35.0,
+    receiver_advantage_margin: float = 0.04,
+    handover_progress_margin: float = 0.02,
+    cup_asset_cfg: SceneEntityCfg = SceneEntityCfg("cup"),
+    giver_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    receiver_asset_cfg: SceneEntityCfg = SceneEntityCfg("remote_robot"),
+    left_eef_link_name: str = "left_wrist_yaw_link",
+    right_eef_link_name: str = "right_wrist_yaw_link",
 ) -> torch.Tensor:
     """Return the current task phase as a one-hot observation vector."""
-    phase_index = task_phase_index(env, **kwargs).squeeze(-1).to(dtype=torch.long)
+    phase_index = task_phase_index(
+        env=env,
+        cup_spawn_prim_name=cup_spawn_prim_name,
+        fallback_cup_spawn_pos=fallback_cup_spawn_pos,
+        handover_zone_prim_name=handover_zone_prim_name,
+        fallback_handover_zone_pos=fallback_handover_zone_pos,
+        serve_zone_prim_name=serve_zone_prim_name,
+        fallback_serve_zone_pos=fallback_serve_zone_pos,
+        min_pickup_height=min_pickup_height,
+        max_handover_xy_error=max_handover_xy_error,
+        max_handover_z_error=max_handover_z_error,
+        max_upright_tilt_deg=max_upright_tilt_deg,
+        receiver_advantage_margin=receiver_advantage_margin,
+        handover_progress_margin=handover_progress_margin,
+        cup_asset_cfg=cup_asset_cfg,
+        giver_asset_cfg=giver_asset_cfg,
+        receiver_asset_cfg=receiver_asset_cfg,
+        left_eef_link_name=left_eef_link_name,
+        right_eef_link_name=right_eef_link_name,
+    ).squeeze(-1).to(dtype=torch.long)
     return F.one_hot(phase_index, num_classes=NUM_CAFE_HANDOVER_PHASES).to(dtype=torch.float32)
 
 
 def pickup_success_flag(
     env: ManagerBasedRLEnv,
-    **kwargs,
+    cup_spawn_prim_name: str = "CupSpawn",
+    fallback_cup_spawn_pos: tuple[float, float, float] = (0.2, 0.42, 0.95),
+    handover_zone_prim_name: str = "HandoverZone",
+    fallback_handover_zone_pos: tuple[float, float, float] = (0.62, 0.42, 0.98),
+    serve_zone_prim_name: str = "ServeZone",
+    fallback_serve_zone_pos: tuple[float, float, float] = (1.0, 0.48, 0.95),
+    min_pickup_height: float = 0.08,
+    max_handover_xy_error: float = 0.14,
+    max_handover_z_error: float = 0.12,
+    max_upright_tilt_deg: float = 35.0,
+    receiver_advantage_margin: float = 0.04,
+    handover_progress_margin: float = 0.02,
+    cup_asset_cfg: SceneEntityCfg = SceneEntityCfg("cup"),
+    giver_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    receiver_asset_cfg: SceneEntityCfg = SceneEntityCfg("remote_robot"),
+    left_eef_link_name: str = "left_wrist_yaw_link",
+    right_eef_link_name: str = "right_wrist_yaw_link",
 ) -> torch.Tensor:
     """Return whether pickup has been achieved under the current heuristic."""
-    pickup_success, _, _, _ = _compute_phase_flags(env=env, **kwargs)
+    pickup_success, _, _, _ = _compute_phase_flags(
+        env=env,
+        cup_spawn_prim_name=cup_spawn_prim_name,
+        fallback_cup_spawn_pos=fallback_cup_spawn_pos,
+        handover_zone_prim_name=handover_zone_prim_name,
+        fallback_handover_zone_pos=fallback_handover_zone_pos,
+        serve_zone_prim_name=serve_zone_prim_name,
+        fallback_serve_zone_pos=fallback_serve_zone_pos,
+        min_pickup_height=min_pickup_height,
+        max_handover_xy_error=max_handover_xy_error,
+        max_handover_z_error=max_handover_z_error,
+        max_upright_tilt_deg=max_upright_tilt_deg,
+        receiver_advantage_margin=receiver_advantage_margin,
+        handover_progress_margin=handover_progress_margin,
+        cup_asset_cfg=cup_asset_cfg,
+        giver_asset_cfg=giver_asset_cfg,
+        receiver_asset_cfg=receiver_asset_cfg,
+        left_eef_link_name=left_eef_link_name,
+        right_eef_link_name=right_eef_link_name,
+    )
     return _flag_to_obs(pickup_success)
 
 
 def handover_zone_reached_flag(
     env: ManagerBasedRLEnv,
-    **kwargs,
+    cup_spawn_prim_name: str = "CupSpawn",
+    fallback_cup_spawn_pos: tuple[float, float, float] = (0.2, 0.42, 0.95),
+    handover_zone_prim_name: str = "HandoverZone",
+    fallback_handover_zone_pos: tuple[float, float, float] = (0.62, 0.42, 0.98),
+    serve_zone_prim_name: str = "ServeZone",
+    fallback_serve_zone_pos: tuple[float, float, float] = (1.0, 0.48, 0.95),
+    min_pickup_height: float = 0.08,
+    max_handover_xy_error: float = 0.14,
+    max_handover_z_error: float = 0.12,
+    max_upright_tilt_deg: float = 35.0,
+    receiver_advantage_margin: float = 0.04,
+    handover_progress_margin: float = 0.02,
+    cup_asset_cfg: SceneEntityCfg = SceneEntityCfg("cup"),
+    giver_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    receiver_asset_cfg: SceneEntityCfg = SceneEntityCfg("remote_robot"),
+    left_eef_link_name: str = "left_wrist_yaw_link",
+    right_eef_link_name: str = "right_wrist_yaw_link",
 ) -> torch.Tensor:
     """Return whether the cup has reached the handover zone under the current heuristic."""
-    _, handover_zone_reached, _, _ = _compute_phase_flags(env=env, **kwargs)
+    _, handover_zone_reached, _, _ = _compute_phase_flags(
+        env=env,
+        cup_spawn_prim_name=cup_spawn_prim_name,
+        fallback_cup_spawn_pos=fallback_cup_spawn_pos,
+        handover_zone_prim_name=handover_zone_prim_name,
+        fallback_handover_zone_pos=fallback_handover_zone_pos,
+        serve_zone_prim_name=serve_zone_prim_name,
+        fallback_serve_zone_pos=fallback_serve_zone_pos,
+        min_pickup_height=min_pickup_height,
+        max_handover_xy_error=max_handover_xy_error,
+        max_handover_z_error=max_handover_z_error,
+        max_upright_tilt_deg=max_upright_tilt_deg,
+        receiver_advantage_margin=receiver_advantage_margin,
+        handover_progress_margin=handover_progress_margin,
+        cup_asset_cfg=cup_asset_cfg,
+        giver_asset_cfg=giver_asset_cfg,
+        receiver_asset_cfg=receiver_asset_cfg,
+        left_eef_link_name=left_eef_link_name,
+        right_eef_link_name=right_eef_link_name,
+    )
     return _flag_to_obs(handover_zone_reached)
 
 
 def handover_success_flag(
     env: ManagerBasedRLEnv,
-    **kwargs,
+    cup_spawn_prim_name: str = "CupSpawn",
+    fallback_cup_spawn_pos: tuple[float, float, float] = (0.2, 0.42, 0.95),
+    handover_zone_prim_name: str = "HandoverZone",
+    fallback_handover_zone_pos: tuple[float, float, float] = (0.62, 0.42, 0.98),
+    serve_zone_prim_name: str = "ServeZone",
+    fallback_serve_zone_pos: tuple[float, float, float] = (1.0, 0.48, 0.95),
+    min_pickup_height: float = 0.08,
+    max_handover_xy_error: float = 0.14,
+    max_handover_z_error: float = 0.12,
+    max_upright_tilt_deg: float = 35.0,
+    receiver_advantage_margin: float = 0.04,
+    handover_progress_margin: float = 0.02,
+    cup_asset_cfg: SceneEntityCfg = SceneEntityCfg("cup"),
+    giver_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    receiver_asset_cfg: SceneEntityCfg = SceneEntityCfg("remote_robot"),
+    left_eef_link_name: str = "left_wrist_yaw_link",
+    right_eef_link_name: str = "right_wrist_yaw_link",
 ) -> torch.Tensor:
     """Return whether receiver-side handover has been achieved under the current heuristic."""
-    _, _, handover_success, _ = _compute_phase_flags(env=env, **kwargs)
+    _, _, handover_success, _ = _compute_phase_flags(
+        env=env,
+        cup_spawn_prim_name=cup_spawn_prim_name,
+        fallback_cup_spawn_pos=fallback_cup_spawn_pos,
+        handover_zone_prim_name=handover_zone_prim_name,
+        fallback_handover_zone_pos=fallback_handover_zone_pos,
+        serve_zone_prim_name=serve_zone_prim_name,
+        fallback_serve_zone_pos=fallback_serve_zone_pos,
+        min_pickup_height=min_pickup_height,
+        max_handover_xy_error=max_handover_xy_error,
+        max_handover_z_error=max_handover_z_error,
+        max_upright_tilt_deg=max_upright_tilt_deg,
+        receiver_advantage_margin=receiver_advantage_margin,
+        handover_progress_margin=handover_progress_margin,
+        cup_asset_cfg=cup_asset_cfg,
+        giver_asset_cfg=giver_asset_cfg,
+        receiver_asset_cfg=receiver_asset_cfg,
+        left_eef_link_name=left_eef_link_name,
+        right_eef_link_name=right_eef_link_name,
+    )
     return _flag_to_obs(handover_success)
 
 
 def serve_success_flag(
     env: ManagerBasedRLEnv,
-    **kwargs,
+    cup_spawn_prim_name: str = "CupSpawn",
+    fallback_cup_spawn_pos: tuple[float, float, float] = (0.2, 0.42, 0.95),
+    handover_zone_prim_name: str = "HandoverZone",
+    fallback_handover_zone_pos: tuple[float, float, float] = (0.62, 0.42, 0.98),
+    serve_zone_prim_name: str = "ServeZone",
+    fallback_serve_zone_pos: tuple[float, float, float] = (1.0, 0.48, 0.95),
+    min_pickup_height: float = 0.08,
+    max_handover_xy_error: float = 0.14,
+    max_handover_z_error: float = 0.12,
+    max_upright_tilt_deg: float = 35.0,
+    receiver_advantage_margin: float = 0.04,
+    handover_progress_margin: float = 0.02,
+    cup_asset_cfg: SceneEntityCfg = SceneEntityCfg("cup"),
+    giver_asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    receiver_asset_cfg: SceneEntityCfg = SceneEntityCfg("remote_robot"),
+    left_eef_link_name: str = "left_wrist_yaw_link",
+    right_eef_link_name: str = "right_wrist_yaw_link",
 ) -> torch.Tensor:
     """Return whether the cup has been stably placed in the serve zone."""
-    _, _, _, serve_success = _compute_phase_flags(env=env, **kwargs)
+    _, _, _, serve_success = _compute_phase_flags(
+        env=env,
+        cup_spawn_prim_name=cup_spawn_prim_name,
+        fallback_cup_spawn_pos=fallback_cup_spawn_pos,
+        handover_zone_prim_name=handover_zone_prim_name,
+        fallback_handover_zone_pos=fallback_handover_zone_pos,
+        serve_zone_prim_name=serve_zone_prim_name,
+        fallback_serve_zone_pos=fallback_serve_zone_pos,
+        min_pickup_height=min_pickup_height,
+        max_handover_xy_error=max_handover_xy_error,
+        max_handover_z_error=max_handover_z_error,
+        max_upright_tilt_deg=max_upright_tilt_deg,
+        receiver_advantage_margin=receiver_advantage_margin,
+        handover_progress_margin=handover_progress_margin,
+        cup_asset_cfg=cup_asset_cfg,
+        giver_asset_cfg=giver_asset_cfg,
+        receiver_asset_cfg=receiver_asset_cfg,
+        left_eef_link_name=left_eef_link_name,
+        right_eef_link_name=right_eef_link_name,
+    )
     return _flag_to_obs(serve_success)
 
 

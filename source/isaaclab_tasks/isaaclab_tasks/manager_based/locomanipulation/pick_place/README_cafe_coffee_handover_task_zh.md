@@ -381,7 +381,7 @@
 - 已保留双 G1、双 teleop、ZeroMQ 杯子同步链路
 - 已固定逻辑锚点名：`RobotSpawnA`、`RobotSpawnB`、`CupSpawn`、`HandoverZone`、`ServeZone`、`ViewerAnchor`
 - 已在启动时打印锚点存在状态，便于后面接正式咖啡厅 USD
-- 已把 fallback 可视化标记隔离到 `TaskDebug/*_FallbackMarker`，避免和正式场景锚点重名
+- 已把 fallback 可视化标记隔离到 `TaskDebug_*_FallbackMarker`，避免和正式场景锚点重名
 - 已补上“任务阶段状态”观测：`task_phase_index`、`task_phase_one_hot`、`pickup_success`、`handover_zone_reached`、`handover_success`、`serve_success`
 
 当前这套阶段状态还是“瞬时启发式”实现，不是带记忆的状态机。也就是说：
@@ -404,6 +404,7 @@
 - 事件实现放在 `mdp/cafe_handover_phases.py`
 - 当前日志默认只打印 `env_0`，避免以后多环境时刷屏
 - 日志只在阶段变化时打印，不会每步都输出
+- 已修正 debug 标记 prim 路径，不再依赖中间 `TaskDebug` 父 prim 预先存在
 
 当前打印格式类似：
 
@@ -414,6 +415,100 @@
 
 这样你后面直接跑 teleop 或场景联调时，就能先判断“阶段判定逻辑是否合理”，
 再决定要不要把它升级成奖励、课程或者真正的状态机。
+
+
+## 启动方式与已修复问题（2026-05-16）
+
+当前推荐先用 `record_demos.py` 启动这套双机递杯任务，因为它支持从环境配置里
+读取 teleop 设备，并且支持一次挂多个设备。
+
+推荐命令：
+
+```powershell
+.\isaaclab.bat -p scripts/tools/record_demos.py --task Isaac-CafeHandover-Locomanipulation-G1-Template-v0 --teleop_device handtracking,motion_controllers --enable_pinocchio --num_demos 0 --dataset_file .\datasets\cafe_handover_debug.hdf5
+```
+
+如果只想跑最基础占位场景，可以把 task 改成：
+
+```text
+Isaac-CafeHandover-Locomanipulation-G1-Abs-v0
+```
+
+这条命令里的几个关键点：
+
+- `Isaac-CafeHandover-Locomanipulation-G1-Template-v0`：使用模板场景接入层
+- `handtracking,motion_controllers`：同时启用本地 OpenXR 和远端 ZeroMQ 控制链路
+- `--enable_pinocchio`：G1 上半身 IK 链路建议保持开启
+- `--num_demos 0`：表示持续运行，不限制 demo 条数
+
+今天联调时实际遇到过一个启动阻塞：
+
+```text
+Unable to find source prim path: '/World/envs/env_.*/TaskDebug'. Please create the prim before spawning.
+```
+
+根因不是 task id，也不是启动脚本，而是 fallback debug 标记之前被挂在：
+
+- `TaskDebug/RobotSpawnA_FallbackMarker`
+- `TaskDebug/ServeZone_FallbackMarker`
+
+这种二级路径下。Isaac Lab 的 clone/spawn 流程在生成这些标记前，会先要求
+`/World/envs/env_*/TaskDebug` 这个父 prim 已经存在；而当前 scene 没有显式创建它，
+所以环境在创建阶段直接失败。
+
+现在已经改成更稳的平铺路径：
+
+- `TaskDebug_RobotSpawnA_FallbackMarker`
+- `TaskDebug_RobotSpawnB_FallbackMarker`
+- `TaskDebug_CupSpawn_FallbackMarker`
+- `TaskDebug_HandoverZone_FallbackMarker`
+- `TaskDebug_ServeZone_FallbackMarker`
+- `TaskDebug_ViewerAnchor_FallbackMarker`
+
+也就是说：
+
+- 不再依赖中间 `/TaskDebug` 父节点
+- 不会和未来正式场景里的逻辑锚点 `RobotSpawnA`、`CupSpawn`、`ServeZone` 重名
+- 启动命令不需要改，只要重跑原命令即可
+
+
+## 当前联调状态（2026-05-16）
+
+截至当前这一轮，`Isaac-CafeHandover-Locomanipulation-G1-Template-v0`
+已经可以成功创建环境并启动运行。
+
+这表示目前至少已经打通了下面这条链路：
+
+- task 注册
+- scene 创建
+- 双 G1 资产加载
+- 杯子与 fallback debug 标记生成
+- observation manager 构建
+- 阶段状态观测注册
+- `record_demos.py` 启动与 teleop 入口接通
+
+这次启动联调里，先后修掉了两个阻塞型问题：
+
+1. debug 标记路径写成 `TaskDebug/...`，导致父 prim 不存在时报：
+   `Unable to find source prim path: '/World/envs/env_.*/TaskDebug'`
+2. phase 观测包装函数使用 `**kwargs`，导致 observation term 参数校验失败：
+   `The term 'policy/task_phase_one_hot' expects mandatory parameters: ['kwargs']`
+
+对应修复已经落实为：
+
+- fallback debug 标记改成平铺命名：
+  `TaskDebug_RobotSpawnA_FallbackMarker` 这一类路径
+- phase 观测和阶段 flag 函数全部改成显式参数签名，不再使用 `**kwargs`
+
+当前可以认为这套 cafe handover 骨架已经从“静态代码骨架”进入“可运行联调骨架”阶段。
+
+下一步更值得关注的已经不是“能不能启动”，而是“运行出来的任务语义是否对”：
+
+- 锚点是否落在预期位置
+- 双机器人初始站位是否合理
+- 杯子初始高度与碰撞是否正常
+- 阶段日志 `initialized -> pickup_success -> ...` 是否符合实际操作过程
+- `handover_success` 和 `serve_success` 的启发式判定是否稳定
 
 
 ## 结论

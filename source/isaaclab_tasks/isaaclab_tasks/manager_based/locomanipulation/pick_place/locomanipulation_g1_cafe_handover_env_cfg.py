@@ -127,7 +127,7 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
     # Debug markers only. Real scene anchors should later use the logical names
     # RobotSpawnA / RobotSpawnB / CupSpawn / HandoverZone / ServeZone / ViewerAnchor.
     robot_spawn_a_marker = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/TaskDebug/RobotSpawnA_FallbackMarker",
+        prim_path="{ENV_REGEX_NS}/TaskDebug_RobotSpawnA_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=ROBOT_A_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.035,
@@ -136,7 +136,7 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     robot_spawn_b_marker = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/TaskDebug/RobotSpawnB_FallbackMarker",
+        prim_path="{ENV_REGEX_NS}/TaskDebug_RobotSpawnB_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=ROBOT_B_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.035,
@@ -145,7 +145,7 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     cup_spawn_marker = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/TaskDebug/CupSpawn_FallbackMarker",
+        prim_path="{ENV_REGEX_NS}/TaskDebug_CupSpawn_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=CUP_SPAWN_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.025,
@@ -154,7 +154,7 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     handover_zone_marker = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/TaskDebug/HandoverZone_FallbackMarker",
+        prim_path="{ENV_REGEX_NS}/TaskDebug_HandoverZone_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=HANDOVER_ZONE_FALLBACK_POS),
         spawn=sim_utils.CuboidCfg(
             size=(0.16, 0.16, 0.16),
@@ -163,7 +163,7 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     serve_zone_marker = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/TaskDebug/ServeZone_FallbackMarker",
+        prim_path="{ENV_REGEX_NS}/TaskDebug_ServeZone_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=SERVE_ZONE_FALLBACK_POS),
         spawn=sim_utils.CuboidCfg(
             size=(0.16, 0.16, 0.16),
@@ -172,7 +172,7 @@ class CafeHandoverG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     viewer_anchor_marker = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/TaskDebug/ViewerAnchor_FallbackMarker",
+        prim_path="{ENV_REGEX_NS}/TaskDebug_ViewerAnchor_FallbackMarker",
         init_state=AssetBaseCfg.InitialStateCfg(pos=VIEWER_ANCHOR_FALLBACK_POS),
         spawn=sim_utils.SphereCfg(
             radius=0.025,
