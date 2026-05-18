@@ -70,13 +70,13 @@ class NetworkCfg:
     """Port for object synchronization (used by ZmqObjectSyncActionCfg)."""
 
     # ---- Player IDs for multi-player teleoperation ----
-    zmq_player_id: int = 2
+    zmq_player_id: int = 1
     """Player ID for the ZeroMQ game client (used by OpenXRDeviceCfg)."""
 
-    local_player_id: int = 2
+    local_player_id: int = 1
     """Local player ID for the ZeroMQ game sub device."""
 
-    target_remote_player_id: int = 1
+    target_remote_player_id: int = 2
     """Target remote player ID for the ZeroMQ game sub device."""
 
     # ---- Multi-robot role mapping ----
