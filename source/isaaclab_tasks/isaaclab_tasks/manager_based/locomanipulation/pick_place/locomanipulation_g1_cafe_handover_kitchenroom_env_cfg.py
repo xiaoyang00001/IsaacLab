@@ -11,6 +11,7 @@ from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 import isaaclab.sim as sim_utils
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 from .locomanipulation_g1_cafe_handover_env_cfg import (
     CafeHandoverG1EnvCfg as BaseCafeHandoverG1EnvCfg,
@@ -32,11 +33,11 @@ def _resolve_lightwheel_kitchen_room_usd_path() -> str:
 
 LIGHTWHEEL_KITCHEN_ROOM_USD_PATH = _resolve_lightwheel_kitchen_room_usd_path()
 
-KITCHEN_ROOM_ROBOT_A_POS = (0.18, -0.42, 0.75)
+KITCHEN_ROOM_ROBOT_A_POS = (0.18, -0.42, 0.80)
 KITCHEN_ROOM_ROBOT_A_QUAT = (0.7071068, 0.0, 0.0, 0.7071068)
-KITCHEN_ROOM_ROBOT_B_POS = (0.26, 0.80, 0.75)
+KITCHEN_ROOM_ROBOT_B_POS = (0.26, 0.80, 0.80)
 KITCHEN_ROOM_ROBOT_B_QUAT = (0.7071068, 0.0, 0.0, -0.7071068)
-KITCHEN_ROOM_CUP_SPAWN_POS = (0.02, 0.04, 0.92)
+KITCHEN_ROOM_CUP_SPAWN_POS = (0.02, 0.04, 0.91)
 KITCHEN_ROOM_HANDOVER_ZONE_POS = (0.22, 0.22, 1.00)
 KITCHEN_ROOM_SERVE_ZONE_POS = (0.45, 0.46, 0.94)
 KITCHEN_ROOM_VIEWER_ANCHOR_POS = (0.22, 0.22, 1.00)
@@ -69,11 +70,8 @@ class CafeHandoverG1KitchenRoomSceneCfg(BaseCafeHandoverG1SceneCfg):
     cup = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=KITCHEN_ROOM_CUP_SPAWN_POS, rot=(1.0, 0.0, 0.0, 0.0)),
-        spawn=sim_utils.CylinderCfg(
-            radius=0.035,
-            height=0.12,
-            axis="Z",
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.53, 0.33, 0.12)),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Objects/Mug/mug.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=(ZMQ_SYNC_ROLE == "subscriber"),
                 disable_gravity=(ZMQ_SYNC_ROLE == "subscriber"),
