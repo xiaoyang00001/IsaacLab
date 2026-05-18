@@ -574,9 +574,9 @@ LIGHTWHEEL_OPEN_SOURCE_ROOT_DIR
 
 当前 `Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0` 已经加了这组场景锚点：
 
-- `RobotSpawnA = (0.18, -0.55, 0.75)`，面向 `+Y`
-- `RobotSpawnB = (0.26, 0.98, 0.75)`，面向 `-Y`
-- `CupSpawn = (0.02, 0.04, 0.94)`
+- `RobotSpawnA = (0.18, -0.42, 0.75)`，面向 `+Y`
+- `RobotSpawnB = (0.26, 0.80, 0.75)`，面向 `-Y`
+- `CupSpawn = (0.02, 0.04, 0.92)`
 - `HandoverZone = (0.22, 0.22, 1.00)`
 - `ServeZone = (0.45, 0.46, 0.94)`
 - `ViewerAnchor = (0.22, 0.22, 1.00)`
@@ -600,6 +600,151 @@ LIGHTWHEEL_OPEN_SOURCE_ROOT_DIR
 - `/root/Table049` 的 payload 指向 `D:/Downloads/Table049/Table049.usd`
 
 至少在当前本地检查里，这些告警没有阻止 `KitchenRoom.usd` 打开和提取台面信息，但你后面正式联调时如果看到同类 warning，不需要先把它误判成 cafe handover 逻辑错误。
+
+
+## 演示说明（KitchenRoom 版）
+
+### 启动命令
+
+**调试模式**（持续运行，不录图像）：
+
+```powershell
+.\isaaclab.bat -p scripts/tools/record_demos.py `
+  --task Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0 `
+  --teleop_device handtracking,motion_controllers `
+  --enable_pinocchio `
+  --num_demos 0 `
+  --dataset_file .\datasets\cafe_handover_kitchenroom_debug.hdf5
+```
+
+**正式采集模式**（录 N 条 demo，含相机图像）：
+
+```powershell
+.\isaaclab.bat -p scripts/tools/record_demos.py `
+  --task Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0 `
+  --teleop_device handtracking,motion_controllers `
+  --enable_pinocchio `
+  --device cpu `
+  --num_demos 5 `
+  --enable_cameras `
+  --dataset_file .\datasets\cafe_handover_kitchenroom_debug.hdf5
+```
+
+参数说明：
+
+| 参数 | 含义 |
+|------|------|
+| `--num_demos 0` | 持续运行，不限 demo 条数（调试用） |
+| `--num_demos N` | 录完 N 条后自动退出（正式采集用） |
+| `--enable_pinocchio` | G1 上半身 IK 必须开启 |
+| `--teleop_device handtracking,motion_controllers` | 同时启用本地 OpenXR 和远端 ZeroMQ |
+| `--dataset_file` | demo 数据存储路径（HDF5） |
+| `--device cpu` | 强制使用 CPU（不指定则默认 GPU） |
+| `--enable_cameras` | 启用相机渲染，录制视觉观测（不指定则不录图像） |
+
+---
+
+### 与旧采集命令的差别
+
+旧命令（PickPlace 任务）：
+
+```powershell
+./isaaclab.bat -p scripts/tools/record_demos.py `
+  --device cpu `
+  --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 `
+  --teleop_device handtracking,motion_controllers `
+  --dataset_file ./datasets/dataset_gr1.hdf5 `
+  --num_demos 5 `
+  --enable_pinocchio `
+  --enable_cameras
+```
+
+与新命令的差别：
+
+| 参数 | 旧命令 | 新命令（调试） | 影响 |
+|------|--------|----------------|------|
+| `--device` | `cpu` | 未指定（默认 GPU） | 若机器只能跑 CPU，需补上 `--device cpu` |
+| `--task` | `Isaac-PickPlace-Locomanipulation-G1-Abs-v0` | `Isaac-CafeHandover-Locomanipulation-G1-KitchenRoom-v0` | 任务、场景、逻辑均不同 |
+| `--num_demos` | `5`（录完自动退出） | `0`（持续运行） | 调试时用 0，正式采集改回具体数字 |
+| `--enable_cameras` | 有（录图像） | 无 | 需要图像数据时补上 |
+
+---
+
+### 双人角色分工
+
+这是一个**双机器人、双玩家**任务，两端必须同时在线：
+
+| 角色 | 控制设备 | 机器人 | 初始位置 | 朝向 |
+|------|----------|--------|----------|------|
+| **Player A（Giver / 店员）** | VR 手部追踪（OpenXR `handtracking`） | `robot` | `(0.18, -0.55, 0.75)` | 朝 +Y |
+| **Player B（Receiver / 接杯方）** | ZeroMQ 动作控制器（`motion_controllers`） | `remote_robot` | `(0.26, 0.98, 0.75)` | 朝 -Y |
+
+两台机器人站在厨房中岛两侧，隔台面对向操作。
+
+---
+
+### 任务阶段流程
+
+```
+Phase 0: initialized
+  └─ 杯子在 CupSpawn (0.02, 0.04, 0.94)，两机器人就位
+
+Phase 1: pickup_success
+  └─ Robot A 将杯子抬起 ≥ 8cm，且杯体倾斜 ≤ 35°
+
+Phase 2: handover_zone_reached
+  └─ 杯子进入 HandoverZone (0.22, 0.22, 1.00)
+     容差：XY ±14cm，Z ±12cm
+
+Phase 3: handover_success
+  └─ Robot B 的手比 Robot A 更靠近杯子（margin 4cm）
+     杯子保持直立，且在交接区内或已向 ServeZone 移动
+
+Phase 4: serve_success  →  任务完成
+  └─ 杯子到达 ServeZone (0.45, 0.46, 0.94)
+```
+
+控制台会实时打印阶段切换，例如：
+
+```
+[cafe_handover] env_0 phase: initialized(0) -> pickup_success(1)
+[cafe_handover] env_0 phase: pickup_success(1) -> handover_zone_reached(2)
+[cafe_handover] env_0 phase: handover_zone_reached(2) -> handover_success(3)
+[cafe_handover] env_0 phase: handover_success(3) -> serve_success(4)
+```
+
+---
+
+### 终止条件
+
+| 条件 | 结果 |
+|------|------|
+| 杯子到达 ServeZone 并持续 10 步（≈0.2s） | 成功，episode 结束 |
+| 杯子掉落地面 | 失败 |
+| 杯体倾斜超过阈值 | 失败 |
+| 超时（20s） | 失败 |
+
+---
+
+### 单人调试模式
+
+如果暂时只有一个人，`motion_controllers`（ZeroMQ）会等待远端连接但不阻塞仿真。
+此时可以只操控 Robot A，把杯子直接推到 ServeZone 触发成功，跳过 handover 接手阶段。
+这样可以先验证场景、杯子物理、阶段日志是否正常，再接入第二个玩家。
+
+---
+
+### 调试检查清单
+
+启动后依次确认：
+
+- [ ] 控制台打印 `initialized(0)` 说明环境和锚点已就绪
+- [ ] 两台机器人站位是否落在厨房中岛两侧台面高度（`z ≈ 0.75`）
+- [ ] 杯子出生点 `(0.02, 0.04, 0.94)` 是否落在中岛台面上，没有悬空或穿模
+- [ ] 操作 Robot A 抬杯后是否触发 `pickup_success(1)`
+- [ ] 将杯子移到绿色半透明方块（HandoverZone）后是否触发阶段 2
+- [ ] Robot B 靠近杯子后是否触发 `handover_success(3)`
+- [ ] 杯子落入红色半透明方块（ServeZone）后是否触发 `serve_success(4)`
 
 
 ## 结论
