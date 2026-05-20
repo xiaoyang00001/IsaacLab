@@ -28,25 +28,17 @@ import struct
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
 import numpy as np
 from pxr import Gf
 
-import contextlib
-
 try:
     import zmq
 except ModuleNotFoundError:  # Isaac Lab install may not include pyzmq by default.
     zmq = None
-
-import carb
-
-XRCore = None
-with contextlib.suppress(ModuleNotFoundError):
-    from omni.kit.xr.core import XRCore
 
 from isaaclab.devices.device_base import DeviceBase, DeviceCfg
 from isaaclab.devices.openxr.common import HAND_JOINT_NAMES
@@ -172,26 +164,10 @@ class ZeroMqGameSubDevice(DeviceBase):
         self._previous_joint_poses_right = {name: _zero_pose() for name in HAND_JOINT_NAMES}
         self._previous_whole_body = {name: _zero_pose() for name in WHOLE_BODY_JOINT_NAMES}
 
-        # Subscribe to the XRCore message bus so send_teleop_command("start/stop/reset")
-        # can trigger the START/STOP/RESET callbacks registered via add_callback().
-        self._vc_subscription = None
-        xr_core = XRCore.get_singleton() if XRCore is not None else None
-        if xr_core is not None:
-            self._vc_subscription = xr_core.get_message_bus().create_subscription_to_pop_by_type(
-                carb.events.type_from_string(self.TELEOP_COMMAND_EVENT_TYPE),
-                self._on_teleop_command,
-            )
-
         if cfg.auto_start:
             self.start()
 
-        # [LOG] 设备初始化完成
-        print(f"[ZeroMqGameSubDevice] INIT: endpoint={cfg.endpoint} topic={cfg.topic!r} "
-              f"local_id={cfg.local_player_id} target_id={cfg.target_remote_player_id}", flush=True)
-
     def __del__(self):
-        if hasattr(self, "_vc_subscription") and self._vc_subscription is not None:
-            self._vc_subscription = None
         try:
             self.stop()
         except Exception:
@@ -252,30 +228,12 @@ class ZeroMqGameSubDevice(DeviceBase):
         """Keep the same callback API as OpenXRDevice for START/STOP/RESET hooks."""
         self._additional_callbacks[key] = func
 
-    def _on_teleop_command(self, event: carb.events.IEvent) -> None:
-        """Handle teleop_command events pushed via XRCore message bus."""
-        msg = event.payload.get("message", "")
-        if "start" in msg:
-            if "START" in self._additional_callbacks:
-                self._additional_callbacks["START"]()
-        elif "stop" in msg:
-            if "STOP" in self._additional_callbacks:
-                self._additional_callbacks["STOP"]()
-        elif "reset" in msg:
-            if "RESET" in self._additional_callbacks:
-                self._additional_callbacks["RESET"]()
-            self.reset()
-
     def _get_raw_data(self) -> Any:
         """Return latest remote tracking data in Isaac Lab device format."""
         with self._lock:
             remote_player_id = self._select_remote_player_id_locked()
             data: dict[Any, Any] = {}
             if remote_player_id is None:
-                # [LOG] 尚无远程数据（仅打印一次）
-                if not hasattr(self, "_no_remote_logged"):
-                    self._no_remote_logged = True
-                    print("[ZeroMqGameSubDevice] _get_raw_data: 尚无远程数据 (remote_player_id=None)", flush=True)
                 return data
 
             data["remote_player_id"] = remote_player_id
@@ -289,20 +247,6 @@ class ZeroMqGameSubDevice(DeviceBase):
                 if controller is not None:
                     self._previous_left_controller = controller["left"].copy()
                     self._previous_right_controller = controller["right"].copy()
-                    # [LOG] 仅数据变化时打印控制器数据
-                    l = self._previous_left_controller
-                    r = self._previous_right_controller
-                    cur_val = (l[1,0], l[1,1], l[1,2], r[1,0], r[1,1], r[1,2])
-                    if not hasattr(self, "_last_logged_ctrl"):
-                        self._last_logged_ctrl = None
-                        self._ctrl_log_n = 0
-                    if self._last_logged_ctrl is None or any(abs(a - b) > 0.01 for a, b in zip(cur_val, self._last_logged_ctrl)):
-                        self._last_logged_ctrl = cur_val
-                        self._ctrl_log_n += 1
-                        print(f"[ZeroMqGameSubDevice|_get_raw_data] ctrl#{self._ctrl_log_n}: "
-                              f"L(stick={l[1,0]:.2f},{l[1,1]:.2f} trig={l[1,2]:.2f}) "
-                              f"R(stick={r[1,0]:.2f},{r[1,1]:.2f} trig={r[1,2]:.2f})",
-                              flush=True)
                 data[DeviceBase.TrackingTarget.CONTROLLER_LEFT] = self._previous_left_controller.copy()
                 data[DeviceBase.TrackingTarget.CONTROLLER_RIGHT] = self._previous_right_controller.copy()
 
@@ -339,15 +283,10 @@ class ZeroMqGameSubDevice(DeviceBase):
 
         try:
             socket.connect(self._cfg.endpoint)
-            # [LOG] 连接成功
-            print(f"[ZeroMqGameSubDevice] ZMQ SUB connected to {self._cfg.endpoint}", flush=True)
         except Exception as exc:
-            # [LOG] 连接失败
-            print(f"[ZeroMqGameSubDevice] ZMQ SUB connect FAILED: {exc}", flush=True)
             logger.error("ZeroMQ subscriber connect failed: %s", exc)
             return
 
-        _first_msg = True
         while not self._stop_event.is_set():
             try:
                 frames = socket.recv_multipart()
@@ -362,10 +301,6 @@ class ZeroMqGameSubDevice(DeviceBase):
                 continue
             payload = frames[-1]
             try:
-                # [LOG] 第一条数据
-                if _first_msg:
-                    _first_msg = False
-                    print(f"[ZeroMqGameSubDevice] 收到第一条 ZMQ 数据 len={len(payload)}", flush=True)
                 self._handle_remote_packet(payload)
             except Exception:
                 logger.exception("Failed to handle MGXR packet")
@@ -378,13 +313,7 @@ class ZeroMqGameSubDevice(DeviceBase):
         player_id, msg_type, payload = header
         if player_id == self._cfg.local_player_id:
             return
-        # [LOG] 每 200 条打印一次消息类型
-        if not hasattr(self, "_msg_count"):
-            self._msg_count = {}
-        self._msg_count[player_id] = self._msg_count.get(player_id, 0) + 1
-        if self._msg_count[player_id] % 200 == 1:
-            msg_name = MgxrMsgType(msg_type).name if msg_type in iter(MgxrMsgType) else f"UNKNOWN({msg_type})"
-            print(f"[ZeroMqGameSubDevice] player={player_id} msg#{self._msg_count[player_id]}: {msg_name}", flush=True)
+        # print(f"[IsaacLab] [ZeroMQ] Received message from player {player_id} of type {msg_type}")
         if msg_type == MgxrMsgType.HEAD_TRACKING_INFO:
             info = self._parse_head_tracking_info(payload)
             self._on_remote_head_tracking(player_id, info)
@@ -541,41 +470,14 @@ class ZeroMqGameSubDevice(DeviceBase):
         return False
 
 
-def _try_get_network_cfg():
-    """延迟导入 NETWORK_CFG，避免循环导入。实例化时调用，此时所有模块已加载。"""
-    try:
-        from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG as cfg
-        return cfg
-    except ImportError:
-        return None
-
-
 @dataclass
 class ZeroMqGameSubDeviceCfg(DeviceCfg):
     """Configuration for the ZeroMQ MGXR Isaac Lab device."""
 
-    endpoint: str = field(
-        default_factory=lambda: (
-            _try_get_network_cfg().zmq_game_sub_endpoint
-            if _try_get_network_cfg() is not None
-            else "tcp://127.0.0.1:5555"
-        )
-    )
+    endpoint: str = "tcp://127.0.0.1:5555"
     topic: str = "state"
-    local_player_id: int = field(
-        default_factory=lambda: (
-            _try_get_network_cfg().local_player_id
-            if _try_get_network_cfg() is not None
-            else 0
-        )
-    )
-    target_remote_player_id: int | None = field(
-        default_factory=lambda: (
-            _try_get_network_cfg().target_remote_player_id
-            if _try_get_network_cfg() is not None
-            else None
-        )
-    )
+    local_player_id: int = 0
+    target_remote_player_id: int | None = None
     auto_start: bool = True
     receive_timeout_ms: int = 20
     receive_high_water_mark: int = 10
