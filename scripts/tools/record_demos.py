@@ -80,6 +80,11 @@ if args_cli.enable_pinocchio:
     # installed by IsaacLab and not the one installed by Isaac Sim.
     # pinocchio is required by the Pink IK controllers and the GR1T2 retargeter
     import pinocchio  # noqa: F401
+
+# Import h5py before AppLauncher so it binds against the conda environment DLLs
+# before Isaac Sim plugins load overlapping native libraries.
+import h5py  # noqa: F401
+
 if any(keyword in args_cli.teleop_device.lower() for keyword in ["handtracking", "motion_controllers", "openxr"]):
     app_launcher_args["xr"] = True
 
@@ -263,12 +268,34 @@ def create_environment(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg) -> gym.En
 
 class MultiTeleopDevice:
     """Wrapper to combine multiple teleoperation devices into a single interface."""
-    def __init__(self, devices: list):
+    def __init__(self, devices: list, device_names: list[str] | None = None):
         self.devices = devices
+        self.device_names = device_names or [f"device_{idx}" for idx in range(len(devices))]
 
     def advance(self) -> torch.Tensor:
         actions = [dev.advance() for dev in self.devices]
         return torch.cat(actions, dim=-1)
+
+    def advance_primary_robot_only(self) -> torch.Tensor:
+        """Return a single action tensor routed to the controllable robot only.
+
+        When both handtracking and motion controllers are present, prefer the
+        handtracking stream for the controllable robot and treat motion
+        controllers as auxiliary input (buttons / non-primary control).
+        """
+        named_actions: dict[str, torch.Tensor] = {}
+        for name, dev in zip(self.device_names, self.devices, strict=False):
+            action = dev.advance()
+            if isinstance(action, torch.Tensor):
+                named_actions[name] = action
+
+        if "handtracking" in named_actions:
+            return named_actions["handtracking"]
+        if "motion_controllers" in named_actions:
+            return named_actions["motion_controllers"]
+        if named_actions:
+            return next(iter(named_actions.values()))
+        raise RuntimeError("No tensor-producing teleop devices are active.")
 
     def reset(self):
         for dev in self.devices:
@@ -310,7 +337,7 @@ def setup_teleop_device(callbacks: dict[str, Callable]) -> object:
                 if len(interfaces) == 1:
                     teleop_interface = interfaces[0]
                 else:
-                    teleop_interface = MultiTeleopDevice(interfaces)
+                    teleop_interface = MultiTeleopDevice(interfaces, valid_devices)
 
         if teleop_interface is None:
             logger.warning(
@@ -491,7 +518,18 @@ def run_simulation_loop(
     with contextlib.suppress(KeyboardInterrupt) and torch.inference_mode():
         while simulation_app.is_running():
             # Get keyboard command
-            action = teleop_interface.advance()
+            if isinstance(teleop_interface, MultiTeleopDevice):
+                primary_action = teleop_interface.advance_primary_robot_only()
+                total_action_dim = int(env.action_space.shape[-1])
+                primary_action_dim = int(primary_action.shape[-1])
+                if total_action_dim == primary_action_dim * 2:
+                    zero_remote_action = torch.zeros_like(primary_action)
+                    action = torch.cat((primary_action, zero_remote_action), dim=-1)
+                else:
+                    action = primary_action
+            else:
+                action = teleop_interface.advance()
+
             # 填充或裁剪动作以匹配环境期望的动作维度。
             # 当激活的遥操作设备少于动作组时，需要填充剩余的动作维度。
             expected_dim = env.action_manager.total_action_dim
@@ -509,6 +547,7 @@ def run_simulation_loop(
                 action = torch.cat([action, pad], dim=-1)
             elif action.shape[-1] > expected_dim:
                 action = action[..., :expected_dim]
+
             # Expand to batch dimension
             actions = action.repeat(env.num_envs, 1)
 

@@ -208,9 +208,9 @@ class OpenXRDevice(DeviceBase):
         stop_avail = "STOP" in self._additional_callbacks
         reset_avail = "RESET" in self._additional_callbacks
 
-        msg += f"\t\tStart Teleoperation: {'✓' if start_avail else '✗'}\n"
-        msg += f"\t\tStop Teleoperation: {'✓' if stop_avail else '✗'}\n"
-        msg += f"\t\tReset Environment: {'✓' if reset_avail else '✗'}\n"
+        msg += f"\t\tStart Teleoperation: {'?' if start_avail else '?'}\n"
+        msg += f"\t\tStop Teleoperation: {'?' if stop_avail else '?'}\n"
+        msg += f"\t\tReset Environment: {'?' if reset_avail else '?'}\n"
 
         # Add joint tracking information
         msg += "\t----------------------------------------------\n"
