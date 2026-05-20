@@ -80,7 +80,12 @@ if args_cli.enable_pinocchio:
     # installed by IsaacLab and not the one installed by Isaac Sim.
     # pinocchio is required by the Pink IK controllers and the GR1T2 retargeter
     import pinocchio  # noqa: F401
-if "handtracking" in args_cli.teleop_device.lower():
+
+# Import h5py before AppLauncher so it binds against the conda environment DLLs
+# before Isaac Sim plugins load overlapping native libraries.
+import h5py  # noqa: F401
+
+if any(keyword in args_cli.teleop_device.lower() for keyword in ["handtracking", "motion_controllers", "openxr"]):
     app_launcher_args["xr"] = True
 
 # launch the simulator
@@ -235,7 +240,8 @@ def create_environment_config(
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
     env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
-
+    env_cfg.recorders.export_in_record_pre_reset = False
+    env_cfg.recorders.record_initial_state = None
     return env_cfg, success_term
 
 
@@ -256,8 +262,50 @@ def create_environment(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg) -> gym.En
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
         return env
     except Exception as e:
-        logger.error(f"Failed to create environment: {e}")
+        logger.exception(f"Failed to create environment: {e}")
         exit(1)
+
+
+class MultiTeleopDevice:
+    """Wrapper to combine multiple teleoperation devices into a single interface."""
+    def __init__(self, devices: list, device_names: list[str] | None = None):
+        self.devices = devices
+        self.device_names = device_names or [f"device_{idx}" for idx in range(len(devices))]
+
+    def advance(self) -> torch.Tensor:
+        actions = [dev.advance() for dev in self.devices]
+        return torch.cat(actions, dim=-1)
+
+    def advance_primary_robot_only(self) -> torch.Tensor:
+        """Return a single action tensor routed to the controllable robot only.
+
+        When both handtracking and motion controllers are present, prefer the
+        handtracking stream for the controllable robot and treat motion
+        controllers as auxiliary input (buttons / non-primary control).
+        """
+        named_actions: dict[str, torch.Tensor] = {}
+        for name, dev in zip(self.device_names, self.devices, strict=False):
+            action = dev.advance()
+            if isinstance(action, torch.Tensor):
+                named_actions[name] = action
+
+        if "handtracking" in named_actions:
+            return named_actions["handtracking"]
+        if "motion_controllers" in named_actions:
+            return named_actions["motion_controllers"]
+        if named_actions:
+            return next(iter(named_actions.values()))
+        raise RuntimeError("No tensor-producing teleop devices are active.")
+
+    def reset(self):
+        for dev in self.devices:
+            if hasattr(dev, "reset"):
+                dev.reset()
+
+    def add_callback(self, key: str, func):
+        for dev in self.devices:
+            if hasattr(dev, "add_callback"):
+                dev.add_callback(key, func)
 
 
 def setup_teleop_device(callbacks: dict[str, Callable]) -> object:
@@ -278,11 +326,22 @@ def setup_teleop_device(callbacks: dict[str, Callable]) -> object:
     """
     teleop_interface = None
     try:
-        if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:
-            teleop_interface = create_teleop_device(args_cli.teleop_device, env_cfg.teleop_devices.devices, callbacks)
-        else:
+        if hasattr(env_cfg, "teleop_devices"):
+            device_names = [d.strip() for d in args_cli.teleop_device.split(",")]
+            valid_devices = [d for d in device_names if d in env_cfg.teleop_devices.devices]
+            
+            if len(valid_devices) > 0:
+                interfaces = []
+                for name in valid_devices:
+                    interfaces.append(create_teleop_device(name, env_cfg.teleop_devices.devices, callbacks))
+                if len(interfaces) == 1:
+                    teleop_interface = interfaces[0]
+                else:
+                    teleop_interface = MultiTeleopDevice(interfaces, valid_devices)
+
+        if teleop_interface is None:
             logger.warning(
-                f"No teleop device '{args_cli.teleop_device}' found in environment config. Creating default."
+                f"No valid teleop device(s) '{args_cli.teleop_device}' found in environment config. Creating default."
             )
             # Create fallback teleop device
             if args_cli.teleop_device.lower() == "keyboard":
@@ -459,7 +518,18 @@ def run_simulation_loop(
     with contextlib.suppress(KeyboardInterrupt) and torch.inference_mode():
         while simulation_app.is_running():
             # Get keyboard command
-            action = teleop_interface.advance()
+            if isinstance(teleop_interface, MultiTeleopDevice):
+                primary_action = teleop_interface.advance_primary_robot_only()
+                total_action_dim = int(env.action_space.shape[-1])
+                primary_action_dim = int(primary_action.shape[-1])
+                if total_action_dim == primary_action_dim * 2:
+                    zero_remote_action = torch.zeros_like(primary_action)
+                    action = torch.cat((primary_action, zero_remote_action), dim=-1)
+                else:
+                    action = primary_action
+            else:
+                action = teleop_interface.advance()
+
             # Expand to batch dimension
             actions = action.repeat(env.num_envs, 1)
 

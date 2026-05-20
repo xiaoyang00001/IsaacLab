@@ -26,6 +26,7 @@ from isaaclab.devices.retargeter_base import RetargeterBase
 from ..device_base import DeviceBase, DeviceCfg
 from .xr_anchor_utils import XrAnchorSynchronizer
 from .xr_cfg import XrCfg
+from .zeromq_game_client import ZeroMqGameClient
 
 # For testing purposes, we need to mock the XRCore, XRPoseValidityFlags classes
 XRCore = None
@@ -148,7 +149,13 @@ class OpenXRDevice(DeviceBase):
                 "isaaclab_right_a",
                 lambda ev: self._toggle_anchor_rotation(),
             )
-
+        
+        # Initialize ZeroMQ Game Client
+        try:
+            ZeroMqGameClient.get_instance().init("tcp://192.168.40.30:14026",1)
+        except Exception as e:
+            logger.warning(f"Failed to initialize ZeroMqGameClient: {e}")
+            
     def __del__(self):
         """Clean up resources when the object is destroyed.
 
@@ -200,9 +207,9 @@ class OpenXRDevice(DeviceBase):
         stop_avail = "STOP" in self._additional_callbacks
         reset_avail = "RESET" in self._additional_callbacks
 
-        msg += f"\t\tStart Teleoperation: {'✓' if start_avail else '✗'}\n"
-        msg += f"\t\tStop Teleoperation: {'✓' if stop_avail else '✗'}\n"
-        msg += f"\t\tReset Environment: {'✓' if reset_avail else '✗'}\n"
+        msg += f"\t\tStart Teleoperation: {'?' if start_avail else '?'}\n"
+        msg += f"\t\tStop Teleoperation: {'?' if stop_avail else '?'}\n"
+        msg += f"\t\tReset Environment: {'?' if reset_avail else '?'}\n"
 
         # Add joint tracking information
         msg += "\t----------------------------------------------\n"
@@ -273,6 +280,19 @@ class OpenXRDevice(DeviceBase):
                     data[DeviceBase.TrackingTarget.CONTROLLER_LEFT] = left_ctrl
                 if right_ctrl.size:
                     data[DeviceBase.TrackingTarget.CONTROLLER_RIGHT] = right_ctrl
+
+                left_pose = left_ctrl[0].tolist() if left_ctrl.size else None
+                left_inputs = left_ctrl[1].tolist() if left_ctrl.size else None
+                right_pose = right_ctrl[0].tolist() if right_ctrl.size else None
+                right_inputs = right_ctrl[1].tolist() if right_ctrl.size else None
+
+                try:
+                    ZeroMqGameClient.get_instance().send_motion_controller_tracking(
+                        left_pose, left_inputs, right_pose, right_inputs
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send motion controller tracking via ZMQ: {e}")
+
             except Exception:
                 # Ignore controller data if XRCore/controller APIs are unavailable
                 pass
@@ -465,6 +485,31 @@ class OpenXRDevice(DeviceBase):
                 button_0 = float(input_device.get_input_gesture_value("a", "click"))
             if input_device.has_input_gesture("b", "click"):
                 button_1 = float(input_device.get_input_gesture_value("b", "click"))
+
+        # Button callbacks for A, X, Y
+        if not hasattr(self, "_prev_btn_states"):
+            self._prev_btn_states = {}
+        dev_id = id(input_device)
+        if dev_id not in self._prev_btn_states:
+            self._prev_btn_states[dev_id] = {"a": 0.0, "x": 0.0, "y": 0.0}
+
+        btn_a = float(input_device.get_input_gesture_value("a", "click")) if input_device.has_input_gesture("a", "click") else 0.0
+        btn_x = float(input_device.get_input_gesture_value("x", "click")) if input_device.has_input_gesture("x", "click") else 0.0
+        btn_y = float(input_device.get_input_gesture_value("y", "click")) if input_device.has_input_gesture("y", "click") else 0.0
+
+        if btn_a > 0.5 and self._prev_btn_states[dev_id]["a"] <= 0.5:
+            if "RESET" in self._additional_callbacks:
+                self._additional_callbacks["RESET"]()
+        if btn_x > 0.5 and self._prev_btn_states[dev_id]["x"] <= 0.5:
+            if "START" in self._additional_callbacks:
+                self._additional_callbacks["START"]()
+        if btn_y > 0.5 and self._prev_btn_states[dev_id]["y"] <= 0.5:
+            if "STOP" in self._additional_callbacks:
+                self._additional_callbacks["STOP"]()
+
+        self._prev_btn_states[dev_id]["a"] = btn_a
+        self._prev_btn_states[dev_id]["x"] = btn_x
+        self._prev_btn_states[dev_id]["y"] = btn_y
 
         pose_row = [
             position[0],
