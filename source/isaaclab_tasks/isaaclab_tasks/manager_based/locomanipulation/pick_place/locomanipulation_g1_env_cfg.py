@@ -157,6 +157,7 @@ class ActionsCfg:
     remote_upper_body_ik = copy.deepcopy(G1_UPPER_BODY_IK_ACTION_CFG)
     remote_upper_body_ik.asset_name = "remote_robot"
     remote_upper_body_ik.controller.articulation_name = "remote_robot"
+    remote_upper_body_ik.enable_waist_yaw_assist = False
 
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.40.30:15555")
     object_sync1 = ZmqObjectSyncActionCfg(asset_name="test_box1", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.40.30:15555")
@@ -312,20 +313,20 @@ class EventsCfg:
         },
     )
 
-    # 每 0.05s 强制恢复箱子的 -y 速度，沿传送带流向机器人（y≈-12~-13）。
-    drive_test_box = EventTerm(
-        func=locomanip_mdp.drive_object_on_conveyor,
-        mode="interval",
-        interval_range_s=(0.05, 0.05),
-        params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
-    )
+    # 箱子改为主要依靠传送带表面速度/接触摩擦带动前进，不再定时强制写线速度。
+    # drive_test_box = EventTerm(
+    #     func=locomanip_mdp.drive_object_on_conveyor,
+    #     mode="interval",
+    #     interval_range_s=(0.05, 0.05),
+    #     params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
+    # )
 
-    drive_test_box1 = EventTerm(
-        func=locomanip_mdp.drive_object_on_conveyor,
-        mode="interval",
-        interval_range_s=(0.05, 0.05),
-        params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
-    )
+    # drive_test_box1 = EventTerm(
+    #     func=locomanip_mdp.drive_object_on_conveyor,
+    #     mode="interval",
+    #     interval_range_s=(0.05, 0.05),
+    #     params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
+    # )
 
 
 ##
@@ -358,12 +359,12 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
 
     # Position of the XR anchor in the world frame
     xr: XrCfg = XrCfg(
-        anchor_pos=(0.0, 0.0, -0.75),
+            anchor_pos=(0.0, 0.0, -0.82),
         anchor_rot=(1.0, 0.0, 0.0, 0.0),
     )
 
     xr2: XrCfg = XrCfg(
-        anchor_pos=(0.0, 0.0, -0.75),
+            anchor_pos=(0.0, 0.0, -0.82),
         anchor_rot=(1.0, 0.0, 0.0, 0.0),
     )
 
@@ -424,6 +425,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                             enable_visualization=True,
                             sim_device=self.sim.device,
                             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
+                            wrist_position_offset=(-0.16, 0.0, 0.0),
                         ),
                     ],
                     sim_device=self.sim.device,
@@ -440,6 +442,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                             enable_visualization=True,
                             sim_device=self.sim.device,
                             hand_joint_names=self.actions.remote_upper_body_ik.hand_joint_names,
+                            wrist_position_offset=(-0.16, 0.0, 0.0),
                         ),
                     ],
                     sim_device=self.sim.device,

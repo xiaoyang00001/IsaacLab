@@ -17,6 +17,14 @@ from isaaclab.controllers.pink_ik import PinkIKController
 from isaaclab.controllers.pink_ik.local_frame_task import LocalFrameTask
 from isaaclab.managers.action_manager import ActionTerm
 
+XRCore = None
+try:
+    from omni.kit.xr.core import XRCore as _XRCore
+
+    XRCore = _XRCore
+except Exception:
+    XRCore = None
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
     from isaaclab.envs.utils.io_descriptors import GenericActionIODescriptor
@@ -58,12 +66,14 @@ class PinkInverseKinematicsAction(ActionTerm):
         # Initialize action tensors
         self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._target_hand_joint_positions = torch.zeros(self.num_envs, self.hand_joint_dim, device=self.device)
 
         # PhysX Articulation Floating joint indices offset from IsaacLab Articulation joint indices
         self._physx_floating_joint_indices_offset = 6
 
         # Pre-allocate tensors for runtime use
         self._initialize_helper_tensors()
+        self._initialize_waist_yaw_assist()
 
     def _initialize_joint_info(self) -> None:
         """Initialize joint IDs and names based on configuration."""
@@ -116,6 +126,62 @@ class PinkInverseKinematicsAction(ActionTerm):
 
         # Pre-allocate tensor for base frame computations
         self._base_link_frame_buffer = torch.zeros(self.num_envs, 4, 4, device=self.device)
+
+        # Pre-allocate frame positions buffer for helper logic.
+        self._frame_positions_in_base = torch.zeros(self._num_frame_tasks, self.num_envs, 3, device=self.device)
+
+    def _initialize_waist_yaw_assist(self) -> None:
+        """Initialize state for the separate waist-yaw helper."""
+        self._waist_yaw_assist_enabled = bool(self.cfg.enable_waist_yaw_assist)
+        self._waist_yaw_joint_id: int | None = None
+        self._waist_yaw_default_position = None
+        self._waist_yaw_target = None
+        self._waist_yaw_filtered_lateral = None
+        self._waist_yaw_is_active = None
+        self._waist_yaw_active_task_slot = None
+        self._waist_yaw_source = "hand"
+        self._waist_yaw_head_gain = 1.0
+        self._waist_yaw_reference_head_yaw = None
+        self._waist_yaw_head_initialized = None
+
+        if not self._waist_yaw_assist_enabled:
+            return
+
+        joint_ids, joint_names = self._asset.find_joints([f"^{self.cfg.waist_yaw_joint_name}$"])
+        if len(joint_ids) != 1:
+            raise ValueError(
+                "Expected exactly one waist-yaw joint match for "
+                f"'{self.cfg.waist_yaw_joint_name}', got {len(joint_ids)}: {joint_names}"
+            )
+
+        self._waist_yaw_joint_id = int(joint_ids[0])
+        self._waist_yaw_default_position = self._asset.data.default_joint_pos[:, self._waist_yaw_joint_id].clone()
+        self._waist_yaw_target = self._waist_yaw_default_position.clone()
+        self._waist_yaw_source = str(self.cfg.waist_yaw_source).lower()
+        self._waist_yaw_task_indices = tuple(int(index) for index in self.cfg.waist_yaw_task_indices)
+        self._waist_yaw_lateral_axis = int(self.cfg.waist_yaw_lateral_axis)
+        self._waist_yaw_direction = float(self.cfg.waist_yaw_direction)
+        self._waist_yaw_head_gain = float(self.cfg.waist_yaw_head_gain)
+        self._waist_yaw_deadzone = float(self.cfg.waist_yaw_deadzone)
+        self._waist_yaw_scale = float(self.cfg.waist_yaw_scale)
+        self._waist_yaw_max_angle = float(self.cfg.waist_yaw_max_angle)
+        self._waist_yaw_signal_smoothing = float(self.cfg.waist_yaw_signal_smoothing)
+        self._waist_yaw_turn_smoothing = float(self.cfg.waist_yaw_turn_smoothing)
+        self._waist_yaw_return_smoothing = float(self.cfg.waist_yaw_return_smoothing)
+        self._waist_yaw_release_deadzone = float(self.cfg.waist_yaw_release_deadzone)
+        self._waist_yaw_max_step = float(self.cfg.waist_yaw_max_step)
+        primary_task_index = self.cfg.waist_yaw_primary_task_index
+        self._waist_yaw_primary_task_index = None if primary_task_index is None else int(primary_task_index)
+        self._waist_yaw_filtered_lateral = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        self._waist_yaw_is_active = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._waist_yaw_active_task_slot = torch.full(
+            (self.num_envs,),
+            -1,
+            device=self.device,
+            dtype=torch.long,
+        )
+        self._waist_yaw_reference_head_yaw = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        self._waist_yaw_head_initialized = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
     # ==================== Properties ====================
 
@@ -208,6 +274,7 @@ class PinkInverseKinematicsAction(ActionTerm):
 
         # Set targets for all tasks
         self._set_task_targets(transformed_poses)
+        self._update_waist_yaw_target(transformed_poses[0])
 
     def _get_base_link_frame_transform(self) -> torch.Tensor:
         """Get the base link frame transformation matrix.
@@ -276,8 +343,156 @@ class PinkInverseKinematicsAction(ActionTerm):
 
         # Extract position and rotation
         positions, rotation_matrices = math_utils.unmake_pose(transformed_poses)
+        self._frame_positions_in_base.copy_(positions)
 
         return positions, rotation_matrices
+
+    def _update_waist_yaw_target(self, positions: torch.Tensor) -> None:
+        """Update the separate waist-yaw helper from transformed hand target positions."""
+        if not self._waist_yaw_assist_enabled or self._waist_yaw_target is None or positions.shape[0] == 0:
+            return
+
+        if self._waist_yaw_source == "head":
+            self._update_waist_yaw_target_from_head()
+            return
+
+        task_indices = [index for index in self._waist_yaw_task_indices if 0 <= index < positions.shape[0]]
+        if not task_indices:
+            return
+
+        dominant_task_ids = None
+        if self._waist_yaw_primary_task_index is not None and self._waist_yaw_primary_task_index in task_indices:
+            lateral = positions[self._waist_yaw_primary_task_index, :, self._waist_yaw_lateral_axis]
+        else:
+            task_lateral = positions[task_indices, :, self._waist_yaw_lateral_axis]
+            dominant_task_ids = torch.argmax(task_lateral.abs(), dim=0)
+
+            inactive_mask = ~self._waist_yaw_is_active
+            if torch.any(inactive_mask):
+                self._waist_yaw_active_task_slot[inactive_mask] = dominant_task_ids[inactive_mask]
+
+            active_task_slot = torch.clamp(self._waist_yaw_active_task_slot, min=0)
+            lateral = task_lateral[active_task_slot, torch.arange(self.num_envs, device=self.device)]
+        self._waist_yaw_filtered_lateral = torch.lerp(
+            self._waist_yaw_filtered_lateral,
+            lateral,
+            self._waist_yaw_signal_smoothing,
+        )
+        lateral = self._waist_yaw_filtered_lateral
+        lateral_abs = lateral.abs()
+
+        activate_mask = lateral_abs > self._waist_yaw_deadzone
+        keep_active_mask = lateral_abs > self._waist_yaw_release_deadzone
+        active_mask = torch.where(self._waist_yaw_is_active, keep_active_mask, activate_mask)
+
+        if dominant_task_ids is not None:
+            newly_activated_mask = active_mask & ~self._waist_yaw_is_active
+            if torch.any(newly_activated_mask):
+                self._waist_yaw_active_task_slot[newly_activated_mask] = dominant_task_ids[newly_activated_mask]
+
+            deactivated_mask = ~active_mask
+            if torch.any(deactivated_mask):
+                self._waist_yaw_active_task_slot[deactivated_mask] = -1
+
+        self._waist_yaw_is_active = active_mask
+
+        desired_offset = torch.zeros_like(lateral)
+        if torch.any(active_mask):
+            effective_lateral = lateral[active_mask] - torch.sign(lateral[active_mask]) * self._waist_yaw_deadzone
+            desired_offset[active_mask] = effective_lateral * self._waist_yaw_scale * self._waist_yaw_direction
+
+        desired_offset = torch.clamp(desired_offset, -self._waist_yaw_max_angle, self._waist_yaw_max_angle)
+        desired_waist = self._waist_yaw_default_position + desired_offset
+
+        blend = torch.full_like(desired_waist, self._waist_yaw_return_smoothing)
+        blend[active_mask] = self._waist_yaw_turn_smoothing
+        smoothed_target = torch.lerp(self._waist_yaw_target, desired_waist, blend)
+        delta = torch.clamp(
+            smoothed_target - self._waist_yaw_target,
+            -self._waist_yaw_max_step,
+            self._waist_yaw_max_step,
+        )
+        self._waist_yaw_target = self._waist_yaw_target + delta
+
+    def _update_waist_yaw_target_from_head(self) -> None:
+        """Drive the waist helper directly from the current headset yaw."""
+        head_yaw = self._get_openxr_head_yaw()
+        if head_yaw is None:
+            return
+
+        head_yaw_tensor = torch.full((self.num_envs,), head_yaw, device=self.device, dtype=torch.float32)
+        uninitialized_mask = ~self._waist_yaw_head_initialized
+        if torch.any(uninitialized_mask):
+            self._waist_yaw_reference_head_yaw[uninitialized_mask] = head_yaw_tensor[uninitialized_mask]
+            self._waist_yaw_head_initialized[uninitialized_mask] = True
+
+        yaw_delta = torch.atan2(
+            torch.sin(head_yaw_tensor - self._waist_yaw_reference_head_yaw),
+            torch.cos(head_yaw_tensor - self._waist_yaw_reference_head_yaw),
+        )
+        self._waist_yaw_filtered_lateral = torch.lerp(
+            self._waist_yaw_filtered_lateral,
+            yaw_delta,
+            self._waist_yaw_signal_smoothing,
+        )
+
+        yaw_delta = self._waist_yaw_filtered_lateral
+        yaw_abs = yaw_delta.abs()
+        activate_mask = yaw_abs > self._waist_yaw_deadzone
+        keep_active_mask = yaw_abs > self._waist_yaw_release_deadzone
+        active_mask = torch.where(self._waist_yaw_is_active, keep_active_mask, activate_mask)
+        self._waist_yaw_is_active = active_mask
+
+        desired_offset = torch.zeros_like(yaw_delta)
+        if torch.any(active_mask):
+            effective_delta = yaw_delta[active_mask] - torch.sign(yaw_delta[active_mask]) * self._waist_yaw_deadzone
+            desired_offset[active_mask] = effective_delta * self._waist_yaw_head_gain * self._waist_yaw_direction
+
+        desired_offset = torch.clamp(desired_offset, -self._waist_yaw_max_angle, self._waist_yaw_max_angle)
+        desired_waist = self._waist_yaw_default_position + desired_offset
+        blend = torch.full_like(desired_waist, self._waist_yaw_return_smoothing)
+        blend[active_mask] = self._waist_yaw_turn_smoothing
+        smoothed_target = torch.lerp(self._waist_yaw_target, desired_waist, blend)
+        delta = torch.clamp(
+            smoothed_target - self._waist_yaw_target,
+            -self._waist_yaw_max_step,
+            self._waist_yaw_max_step,
+        )
+        self._waist_yaw_target = self._waist_yaw_target + delta
+
+    def _get_openxr_head_yaw(self) -> float | None:
+        """Query the current OpenXR headset yaw in world coordinates."""
+        if XRCore is None:
+            return None
+
+        xr_core = XRCore.get_singleton()
+        if xr_core is None:
+            return None
+
+        head_device = xr_core.get_input_device("/user/head")
+        if head_device is None:
+            return None
+
+        try:
+            hmd = head_device.get_virtual_world_pose("")
+            quat = hmd.ExtractRotationQuat()
+            imag = quat.GetImaginary()
+            quat_wxyz = torch.tensor(
+                [quat.GetReal(), imag[0], imag[1], imag[2]],
+                device=self.device,
+                dtype=torch.float32,
+            )
+        except Exception:
+            return None
+
+        if not torch.isfinite(quat_wxyz).all():
+            return None
+
+        quat_wxyz = quat_wxyz / torch.clamp(torch.linalg.norm(quat_wxyz), min=1e-6)
+        w, x, y, z = quat_wxyz
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        return float(torch.atan2(siny_cosp, cosy_cosp).item())
 
     def _set_task_targets(self, transformed_poses: tuple[torch.Tensor, torch.Tensor]) -> None:
         """Set targets for all tasks across all environments.
@@ -319,6 +534,11 @@ class PinkInverseKinematicsAction(ActionTerm):
 
         # Apply joint position targets
         self._asset.set_joint_position_target(self._processed_actions, self._controlled_joint_ids)
+        if self._waist_yaw_assist_enabled and self._waist_yaw_joint_id is not None and self._waist_yaw_target is not None:
+            self._asset.set_joint_position_target(
+                self._waist_yaw_target.unsqueeze(-1),
+                [self._waist_yaw_joint_id],
+            )
 
     def _apply_gravity_compensation(self) -> None:
         """Apply gravity compensation to arm joints if not disabled in props."""
@@ -363,4 +583,24 @@ class PinkInverseKinematicsAction(ActionTerm):
         Args:
             env_ids: A list of environment IDs to reset. If None, all environments are reset.
         """
-        self._raw_actions[env_ids] = torch.zeros(self.action_dim, device=self.device)
+        if env_ids is None:
+            self._raw_actions.zero_()
+            self._target_hand_joint_positions.zero_()
+        else:
+            self._raw_actions[env_ids] = 0.0
+            self._target_hand_joint_positions[env_ids] = 0.0
+        if self._waist_yaw_assist_enabled and self._waist_yaw_target is not None and self._waist_yaw_default_position is not None:
+            if env_ids is None:
+                self._waist_yaw_target.copy_(self._waist_yaw_default_position)
+                self._waist_yaw_filtered_lateral.zero_()
+                self._waist_yaw_is_active.zero_()
+                self._waist_yaw_active_task_slot.fill_(-1)
+                self._waist_yaw_reference_head_yaw.zero_()
+                self._waist_yaw_head_initialized.zero_()
+            else:
+                self._waist_yaw_target[env_ids] = self._waist_yaw_default_position[env_ids]
+                self._waist_yaw_filtered_lateral[env_ids] = 0.0
+                self._waist_yaw_is_active[env_ids] = False
+                self._waist_yaw_active_task_slot[env_ids] = -1
+                self._waist_yaw_reference_head_yaw[env_ids] = 0.0
+                self._waist_yaw_head_initialized[env_ids] = False

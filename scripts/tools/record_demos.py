@@ -530,6 +530,24 @@ def run_simulation_loop(
             else:
                 action = teleop_interface.advance()
 
+            # 填充或裁剪动作以匹配环境期望的动作维度。
+            # 当激活的遥操作设备少于动作组时，需要填充剩余的动作维度。
+            expected_dim = env.action_manager.total_action_dim
+            if action.shape[-1] < expected_dim:
+                # 对未使用的IK动作组使用中性手臂姿态（略微向前/向上）而不是零值，
+                # 防止IK将手臂驱动到骨盆原点，从而避免PhysX退化的AABB错误。
+                gap = expected_dim - action.shape[-1]
+                neutral_wrist = [0.0, 0.0, 0.15, 1.0, 0.0, 0.0, 0.0]
+                neutral_hand = [0.0] * 14
+                neutral_group = neutral_wrist + neutral_wrist + neutral_hand  # 28
+                num_groups = (gap + 27) // 28
+                pad = torch.tensor(
+                    neutral_group * num_groups, dtype=torch.float32, device=action.device
+                )[:gap]
+                action = torch.cat([action, pad], dim=-1)
+            elif action.shape[-1] > expected_dim:
+                action = action[..., :expected_dim]
+
             # Expand to batch dimension
             actions = action.repeat(env.num_envs, 1)
 

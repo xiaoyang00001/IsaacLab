@@ -32,6 +32,7 @@ class G1TriHandUpperBodyMotionControllerRetargeter(RetargeterBase):
         self._sim_device = cfg.sim_device
         self._hand_joint_names = cfg.hand_joint_names
         self._enable_visualization = cfg.enable_visualization
+        self._wrist_position_offset = torch.tensor(cfg.wrist_position_offset, dtype=torch.float32)
 
         if cfg.hand_joint_names is None:
             raise ValueError("hand_joint_names must be provided")
@@ -207,8 +208,9 @@ class G1TriHandUpperBodyMotionControllerRetargeter(RetargeterBase):
         wrist_pos = torch.tensor(wrist[:3], dtype=torch.float32)
         wrist_quat = torch.tensor(wrist[3:], dtype=torch.float32)
 
-        # Combined -75° (rather than -90° for wrist comfort) Y rotation + 90° Z rotation
-        # This is equivalent to (0, -75, 90) in euler angles
+        # Combined -75° (rather than -90° for wrist comfort) Y rotation + 90° Z rotation.
+        # The configured wrist position offset is applied after the frame rotation so it
+        # consistently pulls/pushes the robot wrist in the robot control frame.
         combined_quat = torch.tensor([0.5358, -0.4619, 0.5358, 0.4619], dtype=torch.float32)
 
         openxr_pose = PoseUtils.make_pose(wrist_pos, PoseUtils.matrix_from_quat(wrist_quat))
@@ -216,6 +218,7 @@ class G1TriHandUpperBodyMotionControllerRetargeter(RetargeterBase):
 
         result_pose = PoseUtils.pose_in_A_to_pose_in_B(transform_pose, openxr_pose)
         pos, rot_mat = PoseUtils.unmake_pose(result_pose)
+        pos = pos + self._wrist_position_offset
         quat = PoseUtils.quat_from_matrix(rot_mat)
 
         return np.concatenate([pos.numpy(), quat.numpy()])
@@ -227,4 +230,5 @@ class G1TriHandUpperBodyMotionControllerRetargeterCfg(RetargeterCfg):
 
     enable_visualization: bool = False
     hand_joint_names: list[str] | None = None  # List of robot hand joint names
+    wrist_position_offset: tuple[float, float, float] = (-0.16, 0.0, 0.0)
     retargeter_type: type[RetargeterBase] = G1TriHandUpperBodyMotionControllerRetargeter
