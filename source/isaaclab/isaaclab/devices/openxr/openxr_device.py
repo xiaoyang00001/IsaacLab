@@ -26,6 +26,7 @@ from isaaclab.devices.retargeter_base import RetargeterBase
 from ..device_base import DeviceBase, DeviceCfg
 from .xr_anchor_utils import XrAnchorSynchronizer
 from .xr_cfg import XrCfg
+from .network_runtime_cfg import build_dual_machine_runtime_cfg
 from .zeromq_game_client import ZeroMqGameClient
 
 # For testing purposes, we need to mock the XRCore, XRPoseValidityFlags classes
@@ -149,11 +150,16 @@ class OpenXRDevice(DeviceBase):
                 "isaaclab_right_a",
                 lambda ev: self._toggle_anchor_rotation(),
             )
-        
-        # Initialize ZeroMQ Game Client
+
+        # Initialize the optional MGXR relay client from the machine-role config.
         try:
-            ZeroMqGameClient.get_instance().init("tcp://192.168.40.30:14026",1)
+            self._network_runtime_cfg = build_dual_machine_runtime_cfg()
+            ZeroMqGameClient.get_instance().init(
+                self._network_runtime_cfg.tracking_send_endpoint,
+                self._network_runtime_cfg.local_player_id,
+            )
         except Exception as e:
+            self._network_runtime_cfg = None
             logger.warning(f"Failed to initialize ZeroMqGameClient: {e}")
             
     def __del__(self):
@@ -268,6 +274,10 @@ class OpenXRDevice(DeviceBase):
 
         if RetargeterBase.Requirement.HEAD_TRACKING in self._required_features:
             data[DeviceBase.TrackingTarget.HEAD] = self._calculate_headpose()
+            try:
+                ZeroMqGameClient.get_instance().send_head_tracking(data[DeviceBase.TrackingTarget.HEAD].tolist())
+            except Exception as e:
+                logger.warning(f"Failed to send head tracking via ZMQ: {e}")
 
         if RetargeterBase.Requirement.MOTION_CONTROLLER in self._required_features:
             # Optionally include motion controller pose+inputs if devices are available

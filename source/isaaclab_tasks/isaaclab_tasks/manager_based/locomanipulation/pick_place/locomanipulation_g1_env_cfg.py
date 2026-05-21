@@ -3,12 +3,16 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 import os
+import re
+import xml.etree.ElementTree as ET
 from copy import deepcopy
+from pathlib import Path
 import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
+from isaaclab.devices.openxr.network_runtime_cfg import build_dual_machine_runtime_cfg
 from isaaclab.devices.openxr.retargeters.humanoid.unitree.g1_lower_body_standing import G1LowerBodyStandingRetargeterCfg
 from isaaclab.devices.openxr.retargeters.humanoid.unitree.g1_motion_controller_locomotion import (
     G1LowerBodyStandingMotionControllerRetargeterCfg,
@@ -40,8 +44,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retri
 import copy
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
-
-ZMQ_SYNC_ROLE = "subscriber"
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_robot_sync import ZmqRobotSyncActionCfg
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
@@ -60,10 +63,76 @@ FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
 
-FIXED_G1_29DOF_CFG.init_state.pos = (0.0, 0.0, 0.75)
-FIXED_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
-REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = (1.25, 0.0, 0.75)
-REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = (0.0, 0.0, 0.0, 1.0)
+RUNTIME_NET_CFG = build_dual_machine_runtime_cfg()
+
+
+def _ensure_valid_urdf_file(local_urdf_path: str) -> str:
+    """Validate and repair a URDF file if the cached content was corrupted.
+
+    We observed that ``retrieve_file_path`` may occasionally leave a partially
+    duplicated temp file (two ``<?xml ...?>`` headers in one file). Pinocchio
+    then crashes during startup. To keep both 40.36 / 40.30 portable, we repair
+    that cache locally and always return a valid URDF path.
+    """
+
+    path = Path(local_urdf_path)
+    raw_text = path.read_text(encoding="utf-8", errors="ignore")
+
+    def _is_valid_xml(text: str) -> bool:
+        try:
+            ET.fromstring(text)
+            return True
+        except ET.ParseError:
+            return False
+
+    if _is_valid_xml(raw_text):
+        return str(path)
+
+    candidate_texts: list[str] = []
+
+    # If the file was duplicated, the last XML document is usually complete.
+    xml_split_parts = [part.strip() for part in re.split(r"(?=<\?xml)", raw_text) if part.strip()]
+    if len(xml_split_parts) > 1:
+        candidate_texts.extend(reversed(xml_split_parts))
+
+    # Fallback: keep only the content through the first </robot>.
+    first_robot_close = raw_text.find("</robot>")
+    if first_robot_close != -1:
+        candidate_texts.append(raw_text[: first_robot_close + len("</robot>")].strip())
+
+    for index, candidate in enumerate(candidate_texts):
+        if not candidate:
+            continue
+        if not _is_valid_xml(candidate):
+            continue
+        repaired_path = path.with_name(f"{path.stem}.repaired_{index}{path.suffix}")
+        repaired_path.write_text(candidate + "\n", encoding="utf-8")
+        return str(repaired_path)
+
+    raise ValueError(f"Unable to recover a valid URDF from cached file: {local_urdf_path}")
+
+ROBOT_A_INIT_POS = (0.0, 0.0, 0.75)
+ROBOT_A_INIT_ROT = (1.0, 0.0, 0.0, 0.0)
+ROBOT_B_INIT_POS = (1.25, 0.0, 0.75)
+ROBOT_B_INIT_ROT = (0.0, 0.0, 0.0, 1.0)
+
+ROBOT_A_REFERENCE_XY = (0.0, 0.0)
+ROBOT_B_REFERENCE_XY = (1.25, 0.0)
+
+if RUNTIME_NET_CFG.local_player_id == 1:
+    FIXED_G1_29DOF_CFG.init_state.pos = ROBOT_A_INIT_POS
+    FIXED_G1_29DOF_CFG.init_state.rot = ROBOT_A_INIT_ROT
+    REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = ROBOT_B_INIT_POS
+    REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = ROBOT_B_INIT_ROT
+    LOCAL_ROBOT_REFERENCE_XY = ROBOT_A_REFERENCE_XY
+    REMOTE_ROBOT_REFERENCE_XY = ROBOT_B_REFERENCE_XY
+else:
+    FIXED_G1_29DOF_CFG.init_state.pos = ROBOT_B_INIT_POS
+    FIXED_G1_29DOF_CFG.init_state.rot = ROBOT_B_INIT_ROT
+    REMOTE_FIXED_G1_29DOF_CFG.init_state.pos = ROBOT_A_INIT_POS
+    REMOTE_FIXED_G1_29DOF_CFG.init_state.rot = ROBOT_A_INIT_ROT
+    LOCAL_ROBOT_REFERENCE_XY = ROBOT_B_REFERENCE_XY
+    REMOTE_ROBOT_REFERENCE_XY = ROBOT_A_REFERENCE_XY
 
 ##
 # Scene definition
@@ -108,7 +177,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg() if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg()
+            if RUNTIME_NET_CFG.object_sync_role != "subscriber"
+            else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
     )
     test_box1 = RigidObjectCfg(
@@ -119,7 +190,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg() if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg()
+            if RUNTIME_NET_CFG.object_sync_role != "subscriber"
+            else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
     )
     # 本地仓库背景
@@ -154,13 +227,26 @@ class ActionsCfg:
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
-    remote_upper_body_ik = copy.deepcopy(G1_UPPER_BODY_IK_ACTION_CFG)
-    remote_upper_body_ik.asset_name = "remote_robot"
-    remote_upper_body_ik.controller.articulation_name = "remote_robot"
-    remote_upper_body_ik.enable_waist_yaw_assist = False
+    publish_robot_state = ZmqRobotSyncActionCfg(
+        asset_name="robot",
+        role="publisher",
+        endpoint=RUNTIME_NET_CFG.local_robot_sync_endpoint,
+        topic="robot_state",
+    )
 
-    object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.40.30:15555")
-    object_sync1 = ZmqObjectSyncActionCfg(asset_name="test_box1", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.40.30:15555")
+    sync_remote_robot_state = ZmqRobotSyncActionCfg(
+        asset_name="remote_robot",
+        role="subscriber",
+        endpoint=RUNTIME_NET_CFG.remote_robot_sync_endpoint,
+        topic="robot_state",
+    )
+
+    object_sync = ZmqObjectSyncActionCfg(
+        asset_name="test_box", role=RUNTIME_NET_CFG.object_sync_role, endpoint=RUNTIME_NET_CFG.object_sync_endpoint
+    )
+    object_sync1 = ZmqObjectSyncActionCfg(
+        asset_name="test_box1", role=RUNTIME_NET_CFG.object_sync_role, endpoint=RUNTIME_NET_CFG.object_sync_endpoint
+    )
 
 
 
@@ -243,9 +329,11 @@ class EventsCfg:
         mode="prestartup",
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox",
-            "mass": 2.5,
+            "mass": 1.5,
             "linear_damping": 5.0,
             "angular_damping": 0.1,
+            "kinematic_enabled": RUNTIME_NET_CFG.object_sync_role == "subscriber",
+            "disable_gravity": RUNTIME_NET_CFG.object_sync_role == "subscriber",
         },
     )
 
@@ -254,9 +342,11 @@ class EventsCfg:
         mode="prestartup",
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox1",
-            "mass": 2.5,
+            "mass": 1.5,
             "linear_damping": 5.0,
             "angular_damping": 0.1,
+            "kinematic_enabled": RUNTIME_NET_CFG.object_sync_role == "subscriber",
+            "disable_gravity": RUNTIME_NET_CFG.object_sync_role == "subscriber",
         },
     )
 
@@ -270,13 +360,21 @@ class EventsCfg:
     align_robots_to_conveyor_startup = EventTerm(
         func=locomanip_mdp.place_robots_from_conveyor_bbox,
         mode="startup",
-        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "reference_robot2_xy": REMOTE_ROBOT_REFERENCE_XY,
+        },
     )
 
     align_robots_to_conveyor_reset = EventTerm(
         func=locomanip_mdp.place_robots_from_conveyor_bbox,
         mode="reset",
-        params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "reference_robot2_xy": REMOTE_ROBOT_REFERENCE_XY,
+        },
     )
 
     align_viewer_to_conveyor_startup = EventTerm(
@@ -375,14 +473,14 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 20.0
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
-        self.sim.render_interval = 2
+        self.sim.render_interval = 4
 
         # Set the URDF and mesh paths for the IK controller
         urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
 
         # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
-        self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
-        self.actions.remote_upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
+        retrieved_urdf_path = retrieve_file_path(urdf_omniverse_path)
+        self.actions.upper_body_ik.controller.urdf_path = _ensure_valid_urdf_file(retrieved_urdf_path)
 
         # Bind XR anchors to the aligned robot pelvis frames so AR/XR starts in
         # the same reference frame as the conveyor-aligned scene.
@@ -432,16 +530,16 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                     xr_cfg=self.xr,
                 ),
                 "motion_controllers": ZeroMqGameSubDeviceCfg(
-                    endpoint="tcp://192.168.40.30:14025",
+                    endpoint=RUNTIME_NET_CFG.tracking_subscribe_endpoint,
                     topic="state",
-                    local_player_id=2,
-                    target_remote_player_id=1,
+                    local_player_id=RUNTIME_NET_CFG.local_player_id,
+                    target_remote_player_id=RUNTIME_NET_CFG.remote_player_id,
                     auto_start=True,
                     retargeters=[
                         G1TriHandUpperBodyZeroMqRetargeterCfg(
                             enable_visualization=True,
                             sim_device=self.sim.device,
-                            hand_joint_names=self.actions.remote_upper_body_ik.hand_joint_names,
+                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
                             wrist_position_offset=(-0.16, 0.0, 0.0),
                         ),
                     ],

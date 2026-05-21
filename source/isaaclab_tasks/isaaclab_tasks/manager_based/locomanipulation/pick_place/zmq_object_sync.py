@@ -44,7 +44,7 @@ class ZmqObjectSyncActionCfg(ActionTermCfg):
     role: str = "none"
     """The role of this synchronization: 'publisher', 'subscriber', or 'none'."""
 
-    endpoint: str = "tcp://192.168.40.30:15555"
+    endpoint: str = "tcp://192.168.1.142:15555"
     """The ZMQ endpoint to bind/connect to."""
 
     def __post_init__(self):

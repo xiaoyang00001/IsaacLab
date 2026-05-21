@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -13,6 +14,22 @@ from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
+
+_DIAG_LOG_PATH = os.environ.get("ISAACLAB_DIAG_LOG", r"D:\reboot\diagnostics\isaaclab_diagnostics.log")
+
+
+def _diag_print(message: str):
+    print(message)
+    try:
+        log_dir = os.path.dirname(_DIAG_LOG_PATH)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(_DIAG_LOG_PATH, "a", encoding="utf-8") as log_file:
+            log_file.write(message)
+            log_file.write("\n")
+    except OSError:
+        pass
 
 
 def _find_named_prim_under_background(stage: Usd.Stage, env_id: int, prim_name: str) -> Usd.Prim | None:
@@ -34,6 +51,8 @@ def setup_usd_rigid_object_physics(
     linear_damping: float = 0.1,
     angular_damping: float = 0.1,
     mesh_approximation: str = "convexHull",
+    kinematic_enabled: bool = False,
+    disable_gravity: bool = False,
 ):
     """Ensure the target USD prim has rigid-body APIs defined before simulation starts."""
     stage = get_current_stage()
@@ -47,13 +66,20 @@ def setup_usd_rigid_object_physics(
         prim_path = prim_path_template.format(env_id)
         prim = stage.GetPrimAtPath(prim_path)
         if not prim or not prim.IsValid():
-            print(f"[locomanip_event] setup_usd_rigid_object_physics: prim not found: {prim_path}")
+            _diag_print(f"[locomanip_event] setup_usd_rigid_object_physics: prim not found: {prim_path}")
             continue
 
         rigid_api = UsdPhysics.RigidBodyAPI.Get(stage, prim.GetPath())
         if not rigid_api:
             rigid_api = UsdPhysics.RigidBodyAPI.Apply(prim)
-        rigid_api.CreateRigidBodyEnabledAttr(True)
+        rigid_enabled_attr = rigid_api.GetRigidBodyEnabledAttr()
+        if not rigid_enabled_attr:
+            rigid_enabled_attr = rigid_api.CreateRigidBodyEnabledAttr()
+        rigid_enabled_attr.Set(True)
+        kinematic_attr = rigid_api.GetKinematicEnabledAttr()
+        if not kinematic_attr:
+            kinematic_attr = rigid_api.CreateKinematicEnabledAttr()
+        kinematic_attr.Set(bool(kinematic_enabled))
 
         collision_api = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath())
         if not collision_api:
@@ -67,6 +93,10 @@ def setup_usd_rigid_object_physics(
         physx_api = PhysxSchema.PhysxRigidBodyAPI.Get(stage, prim.GetPath())
         if not physx_api:
             physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+        disable_gravity_attr = physx_api.GetDisableGravityAttr()
+        if not disable_gravity_attr:
+            disable_gravity_attr = physx_api.CreateDisableGravityAttr()
+        disable_gravity_attr.Set(bool(disable_gravity))
         # 注意：CreateLinearDampingAttr(value) 在属性已存在时不更新值，
         # 必须通过 GetXAttr().Set() 确保值写入生效。
         lin_damping = physx_api.GetLinearDampingAttr()
@@ -95,9 +125,10 @@ def setup_usd_rigid_object_physics(
                 child_mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(child_prim)
             child_mesh_collision_api.GetApproximationAttr().Set(mesh_approximation)
 
-        print(
+        _diag_print(
             f"[locomanip_event] setup_usd_rigid_object_physics applied on {prim_path} "
-            f"(mass={mass}, lin_damp={linear_damping}, ang_damp={angular_damping}, mesh={mesh_approximation})"
+            f"(mass={mass}, lin_damp={linear_damping}, ang_damp={angular_damping}, "
+            f"mesh={mesh_approximation}, kinematic={kinematic_enabled}, disable_gravity={disable_gravity})"
         )
 
 
@@ -121,7 +152,7 @@ def drop_two_balls_with_random_colors(
     # 该事件用于在 reset / interval 时重新投放红蓝球。
     # 投放点基于 ConveyorTrack 的世界包围盒自动计算，避免硬编码高度。
     # 球体初速度清零，后续由传送带接触运动驱动。
-    print("[locomanip_event] drop_two_balls_with_random_colors triggered")
+    _diag_print("[locomanip_event] drop_two_balls_with_random_colors triggered")
 
     red_ball = env.scene["red_ball"]
     blue_ball = env.scene["blue_ball"]
@@ -193,7 +224,7 @@ def drop_two_balls_with_random_colors(
     red_ball.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
     blue_ball.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
 
-    print(
+    _diag_print(
         f"[locomanip_event] placed red at {red_pose[0, :3].tolist()} blue at {blue_pose[0, :3].tolist()}"
     )
 
@@ -234,7 +265,7 @@ def place_robots_from_conveyor_bbox(
     for i, env_id in enumerate(env_ids.tolist()):
         conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
         if conveyor_prim is None or not conveyor_prim.IsValid():
-            print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
+            _diag_print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
             continue
 
         world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
@@ -249,7 +280,7 @@ def place_robots_from_conveyor_bbox(
         robot2_state[i, 1] = min_pt[1] + robot2_min_y_offset
 
         if i == 0:
-            print(
+            _diag_print(
                 f"[locomanip_event] aligned robots from {conveyor_prim_name}: "
                 f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
                 f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
@@ -305,7 +336,7 @@ def place_test_boxes_from_conveyor_bbox(
     for i, env_id in enumerate(env_ids.tolist()):
         conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
         if conveyor_prim is None or not conveyor_prim.IsValid():
-            print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
+            _diag_print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
             continue
 
         world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
@@ -324,7 +355,7 @@ def place_test_boxes_from_conveyor_bbox(
         test_box1_pose[i, 2] = spawn_z
 
         if i == 0:
-            print(
+            _diag_print(
                 f"[locomanip_event] aligned boxes from {conveyor_prim_name}: "
                 f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
                 f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
@@ -363,7 +394,7 @@ def align_viewer_to_conveyor_bbox(
     env_id = int(env_ids[0]) if env_ids is not None and len(env_ids) > 0 else 0
     conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
     if conveyor_prim is None or not conveyor_prim.IsValid():
-        print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
+        _diag_print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
         return
 
     bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
@@ -455,7 +486,7 @@ def align_viewer_to_conveyor_bbox(
     else:
         env.sim.set_camera_view(eye=env.cfg.viewer.eye, target=env.cfg.viewer.lookat)
 
-    print(
+    _diag_print(
         f"[locomanip_event] aligned viewer from {conveyor_prim_name}: "
         f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
         f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
@@ -485,7 +516,7 @@ def print_conveyor_world_bbox(
     for env_id in (env_ids.tolist() if env_ids is not None else [0]):
         prim = _find_named_prim_under_background(stage, env_id, prim_name)
         if prim is None or not prim.IsValid():
-            print(f"[conveyor_bbox] prim '{prim_name}' not found under Background for env_{env_id}")
+            _diag_print(f"[conveyor_bbox] prim '{prim_name}' not found under Background for env_{env_id}")
             continue
         try:
             world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(prim).GetPrim())
@@ -494,7 +525,7 @@ def print_conveyor_world_bbox(
             cx = 0.5 * (mn[0] + mx[0])
             cy = 0.5 * (mn[1] + mx[1])
             cz = 0.5 * (mn[2] + mx[2])
-            print(
+            _diag_print(
                 f"[conveyor_bbox] {prim_name} world bbox:\n"
                 f"  min=({mn[0]:.4f}, {mn[1]:.4f}, {mn[2]:.4f})\n"
                 f"  max=({mx[0]:.4f}, {mx[1]:.4f}, {mx[2]:.4f})\n"
@@ -503,7 +534,7 @@ def print_conveyor_world_bbox(
                 f"  box_spawn_z (0.1m box half-height)={mx[2]+0.1:.4f}"
             )
         except Exception as e:
-            print(f"[conveyor_bbox] Error computing bbox for {prim.GetPath()}: {e}")
+            _diag_print(f"[conveyor_bbox] Error computing bbox for {prim.GetPath()}: {e}")
         break  # 只打印第一个 env
 
 
@@ -534,7 +565,6 @@ def drive_object_on_conveyor(
     vel[:, 3:] = 0.0          # 清零角速度，防止滚动
     obj.write_root_velocity_to_sim(vel, env_ids=env_ids)
 
-
 def setup_conveyor_belt_physics(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
@@ -558,7 +588,7 @@ def setup_conveyor_belt_physics(
 
     speed = math.sqrt(velocity[0]**2 + velocity[1]**2 + velocity[2]**2)
     if speed < 1e-8:
-        print("[locomanip_event] setup_conveyor_belt_physics: zero velocity, skipping")
+        _diag_print("[locomanip_event] setup_conveyor_belt_physics: zero velocity, skipping")
         return
 
     if env_ids is None:
@@ -586,7 +616,7 @@ def setup_conveyor_belt_physics(
                     seen_paths.add(path_str)
 
         if not conveyor_roots:
-            print(f"[locomanip_event] No conveyor prims (patterns={prim_name_patterns}) found for env_{env_id}")
+            _diag_print(f"[locomanip_event] No conveyor prims (patterns={prim_name_patterns}) found for env_{env_id}")
             continue
 
         for root_prim in conveyor_roots:
@@ -602,7 +632,7 @@ def setup_conveyor_belt_physics(
                     break
 
             if not rollers_prim or not rollers_prim.IsValid():
-                print(f"[locomanip_event]  Rollers prim not found under {root_path}")
+                _diag_print(f"[locomanip_event]  Rollers prim not found under {root_path}")
                 continue
 
             # 确保 Rollers 有 RigidBodyAPI + kinematic（原始 USD 通常已有）
@@ -612,14 +642,27 @@ def setup_conveyor_belt_physics(
             rigid_api.GetKinematicEnabledAttr().Set(True)
             rigid_api.CreateRigidBodyEnabledAttr(True)
 
-            # 给 Rollers 下所有 Mesh 施加 CollisionAPI
+            # The conveyor asset stores the visible/top belt contact meshes under
+            # children that may be prefixed with "M_". If we skip those meshes,
+            # boxes can fall through once this machine becomes the physics source.
+            if not rollers_prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI.Apply(rollers_prim)
+            if not rollers_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+                mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(rollers_prim)
+            else:
+                mesh_collision_api = UsdPhysics.MeshCollisionAPI(rollers_prim)
+            mesh_collision_api.GetApproximationAttr().Set("convexHull")
+
             for mesh_child in Usd.PrimRange(rollers_prim):
                 if not mesh_child.IsA(UsdGeom.Mesh):
                     continue
-                if mesh_child.GetName().startswith("M_"):
-                    continue
                 if not mesh_child.HasAPI(UsdPhysics.CollisionAPI):
                     UsdPhysics.CollisionAPI.Apply(mesh_child)
+                if not mesh_child.HasAPI(UsdPhysics.MeshCollisionAPI):
+                    child_mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(mesh_child)
+                else:
+                    child_mesh_collision_api = UsdPhysics.MeshCollisionAPI(mesh_child)
+                child_mesh_collision_api.GetApproximationAttr().Set("convexHull")
 
             # 施加 PhysxSurfaceVelocityAPI 到 Rollers
             # 速度在 prim 局部空间。不需要 world→local 变换，
@@ -630,9 +673,7 @@ def setup_conveyor_belt_physics(
             surf_api.GetSurfaceVelocityEnabledAttr().Set(True)
             surf_api.CreateSurfaceVelocityAttr().Set(Gf.Vec3d(*velocity))
 
-            print(
+            _diag_print(
                 f"[locomanip_event]  Rollers SurfaceVelocity "
                 f"vel={velocity} -> {str(rollers_prim.GetPath())}"
             )
-
-

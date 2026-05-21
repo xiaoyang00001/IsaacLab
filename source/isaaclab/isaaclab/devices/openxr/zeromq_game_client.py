@@ -132,6 +132,30 @@ class ZeroMqGameClient:
 
         self.enqueue_send_packet(header + payload)
 
+    def send_head_tracking(self, head_pose):
+        """Send headset tracking pose.
+
+        Args:
+            head_pose: ``[px, py, pz, qw, qx, qy, qz]``.
+        """
+        if head_pose is None or len(head_pose) == 0:
+            return
+
+        px, py, pz, qw, qx, qy, qz = head_pose
+        pose_bytes = _POSE_STRUCT.pack(px, py, pz, qx, qy, qz, qw)
+        payload_type_bytes = struct.pack("<I", MGXR_MSG_TYPE_HEAD_TRACKING_INFO)
+        payload = payload_type_bytes + pose_bytes
+
+        header = _HEADER_STRUCT.pack(
+            MGXR_MAGIC,
+            MGXR_VERSION,
+            self._player_id,
+            MGXR_MSG_TYPE_HEAD_TRACKING_INFO,
+            len(payload),
+        )
+
+        self.enqueue_send_packet(header + payload)
+
     def shutdown(self):
         self._stop_requested = True
         with self._send_queue_lock:
