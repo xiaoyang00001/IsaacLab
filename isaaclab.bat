@@ -8,8 +8,6 @@ rem SPDX-License-Identifier: BSD-3-Clause
 
 rem Configurations
 set "ISAACLAB_PATH=%~dp0"
-set "DEFAULT_CONDA_PREFIX=C:\Users\nolovr\miniconda3\envs\isaaclab-pin"
-set "DEFAULT_USD_EXT=D:\reboot\isaac-sim\extscache\omni.usd.libs-1.0.1+69cbf6ad.wx64.r.cp311"
 goto main
 
 rem Helper functions
@@ -94,29 +92,12 @@ rem -----------------------------------------------------------------------
     )
     goto :eof
 
-:bootstrap_local_runtime
-if "%CONDA_PREFIX%"=="" (
-    if exist "%DEFAULT_CONDA_PREFIX%\python.exe" (
-        set "CONDA_PREFIX=%DEFAULT_CONDA_PREFIX%"
-    )
-)
-set "ISAAC_PATH=%ISAACLAB_PATH%\_isaac_sim"
-set "EXP_PATH=%ISAACLAB_PATH%\_isaac_sim\apps"
-set "CARB_APP_PATH=%ISAACLAB_PATH%\_isaac_sim\kit"
-set "RESOURCE_NAME=IsaacSim"
-if exist "%DEFAULT_USD_EXT%" (
-    set "PYTHONPATH=%DEFAULT_USD_EXT%;%ISAACLAB_PATH%\_isaac_sim\site;%PYTHONPATH%"
-    set "PATH=%DEFAULT_USD_EXT%\bin;%DEFAULT_USD_EXT%\bin\usd;%PATH%"
-)
-goto :eof
-
 rem extract the python from isaacsim
 :extract_python_exe
-call :bootstrap_local_runtime
 rem check if using conda
 if not "%CONDA_PREFIX%"=="" (
     rem use conda python
-    set python_exe=%ISAACLAB_PATH%\\_conda_python.bat
+    set python_exe=%CONDA_PREFIX%\python.exe
 ) else (
     rem use kit python
     set python_exe=%ISAACLAB_PATH%\_isaac_sim\python.bat
@@ -205,9 +186,9 @@ if %errorlevel% equ 0 (
 ) else (
     echo [INFO] Creating conda environment named '%env_name%'...
     echo [INFO] Installing dependencies from %ISAACLAB_PATH%\environment.yml
-    rem ????????????????????????????????????????????????????????????????
+    rem ————————————————————————————————
     rem patch Python version if needed, but back up first
-    rem ????????????????????????????????????????????????????????????????
+    rem ————————————————————————————————
     copy "%ISAACLAB_PATH%environment.yml" "%ISAACLAB_PATH%environment.yml.bak" >nul
     call :is_isaacsim_version_4_5
     if !ERRORLEVEL! EQU 0 (
