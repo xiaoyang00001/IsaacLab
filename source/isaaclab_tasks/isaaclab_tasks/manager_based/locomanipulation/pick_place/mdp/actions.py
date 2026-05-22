@@ -277,7 +277,7 @@ class AgileBasedLowerBodyAction(ActionTerm):
 
 
 class AutoWalkAction(ActionTerm):
-    """模拟骨骼捕捉数据驱动的全身行走（腿+腰+手臂+手），含自然摆臂。
+    """全身骨骼捕捉数据驱动的物理行走（腿+腰+手臂+手），含自然摆臂。
 
     数据流（概念上）::
 
@@ -286,7 +286,7 @@ class AutoWalkAction(ActionTerm):
     内部不接收外部输入，由 `_sample_skeleton_pose` 产生与 walking 阶段同步的
     全身关节角度。这模拟了一个本地 mocap 流：法线交互/重定向部分内嵌实现。
 
-    根节点通过 ``write_root_state_to_sim`` 沿机器人朝向匀速平移。
+    机器人通过物理引擎自然行走，脚与地面产生真实接触力。
     """
 
     cfg: AutoWalkActionCfg
@@ -304,8 +304,6 @@ class AutoWalkAction(ActionTerm):
         self._processed_actions = self._default_joint_pos.clone()
 
         self._phase = torch.zeros(self.num_envs, device=self.device)
-        self._walk_xy: torch.Tensor | None = None
-        self._init_root_z: torch.Tensor | None = None
 
         # 把上下身关节按区分组缓存，避免每步反复查字典
         self._leg_groups = self._collect_side_indices(
@@ -353,14 +351,6 @@ class AutoWalkAction(ActionTerm):
                 if key in self._idx:
                     groups[side][p] = self._idx[key]
         return groups
-
-    @staticmethod
-    def _forward_dir_from_quat(quat_wxyz: torch.Tensor) -> torch.Tensor:
-        """返回 XY 平面上机器人朝向的单位向量（模型正面为 +X 轴）。"""
-        w, x, y, z = quat_wxyz[:, 0], quat_wxyz[:, 1], quat_wxyz[:, 2], quat_wxyz[:, 3]
-        fx = 1.0 - 2.0 * (y * y + z * z)
-        fy = 2.0 * (x * y + w * z)
-        return torch.stack([fx, fy], dim=-1)
 
     @property
     def action_dim(self) -> int:
@@ -458,32 +448,10 @@ class AutoWalkAction(ActionTerm):
     def process_actions(self, actions: torch.Tensor):
         dt = self._env.step_dt
 
-        # 首次调用记录初始位置
-        if self._walk_xy is None:
-            self._walk_xy = self._asset.data.root_pos_w[:, :2].clone()
-            self._init_root_z = self._asset.data.root_pos_w[:, 2:3].clone()
-
         # ── 1. 更新相位 ──────────────────────────────────────
         self._phase += 2.0 * math.pi * self.cfg.walk_frequency * dt
 
-        # ── 2. 移动根节点（沿当前朝向） ───────────────────────
-        fwd = self._forward_dir_from_quat(self._asset.data.root_quat_w)  # [N, 2]
-        self._walk_xy += fwd * (self.cfg.forward_speed * dt)
-
-        # ── 3. 添加躯干竖向起伏（body bob）───────────────────
-        # 双腿支撑时身体最低，单腿支撑时最高（频率是步态的 2 倍）
-        A_bob = self.cfg.body_bob_amplitude
-        body_z = self._init_root_z + A_bob * torch.abs(torch.sin(self._phase))
-
-        target_pos = torch.cat([self._walk_xy, body_z], dim=-1)
-        root_state = torch.cat([
-            target_pos,
-            self._asset.data.root_quat_w,
-            torch.zeros(self.num_envs, 6, device=self.device),
-        ], dim=-1)
-        self._asset.write_root_state_to_sim(root_state)
-
-        # ── 3. 从"骨骼数据"生成全身关节目标 ───────────────────
+        # ── 2. 从"骨骼数据"生成全身关节目标 ───────────────────
         self._processed_actions = self._sample_skeleton_pose(self._phase)
 
     def apply_actions(self):
@@ -493,10 +461,6 @@ class AutoWalkAction(ActionTerm):
         if env_ids is None:
             self._phase.zero_()
             self._processed_actions.copy_(self._default_joint_pos)
-            self._walk_xy = None
-            self._init_root_z = None
         else:
             self._phase[env_ids] = 0.0
             self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
-            if self._walk_xy is not None:
-                self._walk_xy[env_ids] = self._asset.data.root_pos_w[env_ids, :2]

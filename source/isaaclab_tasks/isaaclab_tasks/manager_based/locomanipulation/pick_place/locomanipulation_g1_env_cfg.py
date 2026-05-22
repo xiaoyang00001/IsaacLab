@@ -66,8 +66,10 @@ FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
 
-# 第三个机器人（自动行走）：固定根节点，通过 write_root_state_to_sim 运动学平移
-WALKER_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
+# 第三个机器人（自动行走）：解除根节点固定，启用物理行走
+WALKER_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+WALKER_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
+WALKER_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
 WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
 WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 

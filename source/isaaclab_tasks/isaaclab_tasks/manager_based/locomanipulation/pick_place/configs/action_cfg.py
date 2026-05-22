@@ -36,10 +36,10 @@ class AgileBasedLowerBodyActionCfg(ActionTermCfg):
 
 @configclass
 class AutoWalkActionCfg(ActionTermCfg):
-    """模拟全身骨骼捕捉数据驱动的行走配置。
+    """全身骨骼捕捉数据驱动的物理行走配置。
 
     点击 Play 后无需外部输入。内部用解析公式合成与 walking phase 同步的
-    全身关节角度（腿+腰+手臂+手），模拟一个本地 mocap 流。
+    全身关节角度（腿+腰+手臂+手），通过物理引擎实现真实行走。
     """
 
     class_type: type[ActionTerm] = AutoWalkAction
@@ -47,14 +47,8 @@ class AutoWalkActionCfg(ActionTermCfg):
     joint_names: list[str] = MISSING
     """需要驱动的关节名列表（建议包含全身：腿+腰+手臂+手）。不存在的关节会被跳过。"""
 
-    forward_speed: float = 0.3
-    """行走线速度（m/s）。"""
-
     walk_frequency: float = 0.8
     """步态频率（Hz），即每秒完成的完整步态周期数。"""
-
-    body_bob_amplitude: float = 0.015
-    """躯干竖向起伏幅度（m），模拟双腿支撑/单腿支撑时的重心高度变化。"""
 
     # ── 腿部 ────────────────────────────────────────────────
     hip_pitch_amplitude: float = 0.25
