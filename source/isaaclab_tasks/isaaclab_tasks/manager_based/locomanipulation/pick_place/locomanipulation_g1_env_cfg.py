@@ -71,20 +71,29 @@ WALKER_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
 WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
 WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 
-# 自动行走使用的下半身关节列表（顺序须与 AutoWalkAction 内索引对应）
-WALKER_LOWER_BODY_JOINTS = [
-    "left_hip_yaw_joint",
-    "left_hip_roll_joint",
-    "left_hip_pitch_joint",
-    "left_knee_joint",
-    "left_ankle_pitch_joint",
-    "left_ankle_roll_joint",
-    "right_hip_yaw_joint",
-    "right_hip_roll_joint",
-    "right_hip_pitch_joint",
-    "right_knee_joint",
-    "right_ankle_pitch_joint",
-    "right_ankle_roll_joint",
+# 模拟骨骼数据驱动的全身关节列表（缺失关节会被 AutoWalkAction 自动跳过）
+WALKER_WHOLE_BODY_JOINTS = [
+    # ── 腿部（12） ───────────────────────────────────────
+    "left_hip_yaw_joint", "left_hip_roll_joint", "left_hip_pitch_joint",
+    "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    "right_hip_yaw_joint", "right_hip_roll_joint", "right_hip_pitch_joint",
+    "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+    # ── 腰部（3） ────────────────────────────────────────
+    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+    # ── 手臂（14） ───────────────────────────────────────
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+    # ── 手部（最多 14，若 USD 中缺失会被自动跳过） ─────────
+    "left_hand_index_0_joint", "left_hand_index_1_joint",
+    "left_hand_middle_0_joint", "left_hand_middle_1_joint",
+    "left_hand_thumb_0_joint", "left_hand_thumb_1_joint", "left_hand_thumb_2_joint",
+    "right_hand_index_0_joint", "right_hand_index_1_joint",
+    "right_hand_middle_0_joint", "right_hand_middle_1_joint",
+    "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
 ]
 
 RUNTIME_NET_CFG = build_dual_machine_runtime_cfg()
@@ -254,15 +263,23 @@ class ActionsCfg:
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
-    # 第三个机器人自动行走
-    walker_lower_body = AutoWalkActionCfg(
+    # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
+    walker_skeletal_walk = AutoWalkActionCfg(
         asset_name="walker_robot",
-        joint_names=WALKER_LOWER_BODY_JOINTS,
+        joint_names=WALKER_WHOLE_BODY_JOINTS,
         forward_speed=0.3,
         walk_frequency=0.8,
+        # 腿部
         hip_pitch_amplitude=0.25,
         knee_amplitude=0.30,
         ankle_pitch_amplitude=0.12,
+        # 手臂摆动
+        arm_swing_amplitude=0.35,
+        elbow_bend_amplitude=0.15,
+        # 腰部
+        waist_yaw_amplitude=0.06,
+        # 手部
+        hand_curl_amount=0.10,
     )
 
     publish_robot_state = ZmqRobotSyncActionCfg(

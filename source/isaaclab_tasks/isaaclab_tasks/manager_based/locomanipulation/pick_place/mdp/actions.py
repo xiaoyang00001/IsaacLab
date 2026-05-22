@@ -277,10 +277,16 @@ class AgileBasedLowerBodyAction(ActionTerm):
 
 
 class AutoWalkAction(ActionTerm):
-    """点击 Play 后自动向前行走的动作项（CPG 步态 + 根节点运动学平移）。
+    """模拟骨骼捕捉数据驱动的全身行走（腿+腰+手臂+手），含自然摆臂。
 
-    无需外部设备或策略模型。使用中心模式发生器（CPG）驱动腿部关节，同时
-    通过 write_root_state_to_sim 在世界坐标系中沿机器人朝向平移根节点。
+    数据流（概念上）::
+
+        time → SkeletonPoseSimulator.sample(phase) → 各关节目标角度 → robot
+
+    内部不接收外部输入，由 `_sample_skeleton_pose` 产生与 walking 阶段同步的
+    全身关节角度。这模拟了一个本地 mocap 流：法线交互/重定向部分内嵌实现。
+
+    根节点通过 ``write_root_state_to_sim`` 沿机器人朝向匀速平移。
     """
 
     cfg: AutoWalkActionCfg
@@ -291,43 +297,62 @@ class AutoWalkAction(ActionTerm):
         self._asset = env.scene[cfg.asset_name]
         self._env = env
 
+        # 关节解析（缺失关节直接跳过，不抛错）
         self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        self._idx = {n: i for i, n in enumerate(self._joint_names)}
         self._default_joint_pos = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
         self._processed_actions = self._default_joint_pos.clone()
 
-        # Phase accumulator per env (rad)
         self._phase = torch.zeros(self.num_envs, device=self.device)
-        # World-frame walk position (set on first process_actions call)
         self._walk_xy: torch.Tensor | None = None
         self._init_root_z: torch.Tensor | None = None
 
-        # Index of each animated joint within self._joint_names
-        name_to_idx = {n: i for i, n in enumerate(self._joint_names)}
-        self._lhp = name_to_idx["left_hip_pitch_joint"]
-        self._lk  = name_to_idx["left_knee_joint"]
-        self._lap = name_to_idx["left_ankle_pitch_joint"]
-        self._rhp = name_to_idx["right_hip_pitch_joint"]
-        self._rk  = name_to_idx["right_knee_joint"]
-        self._rap = name_to_idx["right_ankle_pitch_joint"]
+        # 把上下身关节按区分组缓存，避免每步反复查字典
+        self._leg_groups = self._collect_side_indices(
+            patterns=("hip_pitch_joint", "knee_joint", "ankle_pitch_joint")
+        )
+        self._arm_groups = self._collect_side_indices(
+            patterns=("shoulder_pitch_joint", "elbow_joint")
+        )
+        self._waist_yaw_idx = self._idx.get("waist_yaw_joint")
+        self._waist_pitch_idx = self._idx.get("waist_pitch_joint")
+        # 收集手部关节索引
+        self._hand_indices = [i for n, i in self._idx.items() if "_hand_" in n]
 
         print(
             f"[IsaacLab] [AutoWalkAction] asset={cfg.asset_name} "
-            f"speed={cfg.forward_speed:.2f}m/s freq={cfg.walk_frequency:.2f}Hz"
+            f"speed={cfg.forward_speed:.2f}m/s freq={cfg.walk_frequency:.2f}Hz "
+            f"resolved_joints={len(self._joint_ids)}/{len(cfg.joint_names)} "
+            f"(legs={sum(len(v) for v in self._leg_groups.values())} "
+            f"arms={sum(len(v) for v in self._arm_groups.values())} "
+            f"hands={len(self._hand_indices)})"
         )
 
     def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
+        """逐个解析关节。缺失关节会被跳过并打印警告（保持代码对 G1 变体兼容）。"""
         ids, names = [], []
         for name in joint_names:
             jids, jnames = self._asset.find_joints([f"^{name}$"])
-            if len(jids) != 1:
-                raise ValueError(f"AutoWalkAction: expected 1 joint for '{name}', got {len(jids)}")
-            ids.append(int(jids[0]))
-            names.append(jnames[0])
+            if len(jids) == 1:
+                ids.append(int(jids[0]))
+                names.append(jnames[0])
+            else:
+                print(f"[IsaacLab] [AutoWalkAction] skip joint '{name}' (matches={len(jids)})")
         return ids, names
+
+    def _collect_side_indices(self, patterns: tuple[str, ...]) -> dict[str, dict[str, int]]:
+        """返回形如 {'left': {'hip_pitch_joint': idx, ...}, 'right': {...}} 的索引表。"""
+        groups: dict[str, dict[str, int]] = {"left": {}, "right": {}}
+        for side in ("left", "right"):
+            for p in patterns:
+                key = f"{side}_{p}"
+                if key in self._idx:
+                    groups[side][p] = self._idx[key]
+        return groups
 
     @staticmethod
     def _forward_dir_from_quat(quat_wxyz: torch.Tensor) -> torch.Tensor:
-        """返回 XY 平面上机器人朝向的单位向量（假设模型正面为 +X 轴）。"""
+        """返回 XY 平面上机器人朝向的单位向量（模型正面为 +X 轴）。"""
         w, x, y, z = quat_wxyz[:, 0], quat_wxyz[:, 1], quat_wxyz[:, 2], quat_wxyz[:, 3]
         fx = 1.0 - 2.0 * (y * y + z * z)
         fy = 2.0 * (x * y + w * z)
@@ -345,10 +370,69 @@ class AutoWalkAction(ActionTerm):
     def processed_actions(self) -> torch.Tensor:
         return self._processed_actions
 
+    def _sample_skeleton_pose(self, phase: torch.Tensor) -> torch.Tensor:
+        """模拟骨骼捕捉数据流，输出全身关节目标角度。
+
+        这一函数等价于 ``retarget(mocap_data_at_time(t), robot_skeleton)``，
+        但 mocap_data 用解析公式合成而非从外部读取。
+        """
+        targets = self._default_joint_pos.clone()
+
+        phase_l = phase           # 左腿相位
+        phase_r = phase + math.pi  # 右腿相位（180° 偏移）
+
+        # ── LEGS：行走步态 ────────────────────────────────────
+        A_hip = self.cfg.hip_pitch_amplitude
+        A_knee = self.cfg.knee_amplitude
+        A_ankle = self.cfg.ankle_pitch_amplitude
+
+        for side, ph in (("left", phase_l), ("right", phase_r)):
+            leg = self._leg_groups[side]
+            if "hip_pitch_joint" in leg:
+                i = leg["hip_pitch_joint"]
+                targets[:, i] = self._default_joint_pos[:, i] + A_hip * torch.sin(ph)
+            if "knee_joint" in leg:
+                i = leg["knee_joint"]
+                targets[:, i] = self._default_joint_pos[:, i] + A_knee * torch.clamp(torch.sin(ph + 0.5), min=0.0)
+            if "ankle_pitch_joint" in leg:
+                i = leg["ankle_pitch_joint"]
+                targets[:, i] = self._default_joint_pos[:, i] - A_ankle * torch.sin(ph)
+
+        # ── ARMS：反向摆动（与同侧腿 180° 相位） ─────────────
+        A_arm = self.cfg.arm_swing_amplitude
+        A_elbow = self.cfg.elbow_bend_amplitude
+
+        for side, ph_arm in (("left", phase_l), ("right", phase_r)):
+            arm = self._arm_groups[side]
+            if "shoulder_pitch_joint" in arm:
+                i = arm["shoulder_pitch_joint"]
+                # 手臂与同侧腿"前后位置"反相：腿后摆 → 同侧臂前摆
+                targets[:, i] = self._default_joint_pos[:, i] + A_arm * torch.sin(ph_arm)
+            if "elbow_joint" in arm:
+                i = arm["elbow_joint"]
+                # 前摆时肘部轻微弯曲
+                targets[:, i] = self._default_joint_pos[:, i] + A_elbow * torch.clamp(torch.sin(ph_arm + 0.5), min=0.0)
+
+        # ── WAIST：小幅反向扭转，增加自然感 ────────────────
+        A_waist_yaw = self.cfg.waist_yaw_amplitude
+        if self._waist_yaw_idx is not None:
+            # 与腿运动反相（腿前摆，腰反扭）
+            targets[:, self._waist_yaw_idx] = (
+                self._default_joint_pos[:, self._waist_yaw_idx] - A_waist_yaw * torch.sin(phase_l)
+            )
+
+        # ── HANDS：保持微弱放松卷曲（恒定，不随相位变化） ──
+        if self._hand_indices and self.cfg.hand_curl_amount != 0.0:
+            curl = self.cfg.hand_curl_amount
+            for hi in self._hand_indices:
+                targets[:, hi] = self._default_joint_pos[:, hi] + curl
+
+        return targets
+
     def process_actions(self, actions: torch.Tensor):
         dt = self._env.step_dt
 
-        # 首次调用时记录初始位置
+        # 首次调用记录初始位置
         if self._walk_xy is None:
             self._walk_xy = self._asset.data.root_pos_w[:, :2].clone()
             self._init_root_z = self._asset.data.root_pos_w[:, 2:3].clone()
@@ -368,26 +452,8 @@ class AutoWalkAction(ActionTerm):
         ], dim=-1)
         self._asset.write_root_state_to_sim(root_state)
 
-        # ── 3. CPG 关节目标 ───────────────────────────────────
-        A_h = self.cfg.hip_pitch_amplitude
-        A_k = self.cfg.knee_amplitude
-        A_a = self.cfg.ankle_pitch_amplitude
-
-        phase_l = self._phase           # 左腿相位
-        phase_r = self._phase + math.pi  # 右腿相位（半周期偏移）
-
-        targets = self._default_joint_pos.clone()
-        # 髋关节俯仰 — 前后摆腿
-        targets[:, self._lhp] = self._default_joint_pos[:, self._lhp] + A_h * torch.sin(phase_l)
-        targets[:, self._rhp] = self._default_joint_pos[:, self._rhp] + A_h * torch.sin(phase_r)
-        # 膝关节 — 摆动相弯曲（只在 sin>0 时弯）
-        targets[:, self._lk] = self._default_joint_pos[:, self._lk] + A_k * torch.clamp(torch.sin(phase_l + 0.5), min=0.0)
-        targets[:, self._rk] = self._default_joint_pos[:, self._rk] + A_k * torch.clamp(torch.sin(phase_r + 0.5), min=0.0)
-        # 踝关节 — 随髋反向补偿
-        targets[:, self._lap] = self._default_joint_pos[:, self._lap] - A_a * torch.sin(phase_l)
-        targets[:, self._rap] = self._default_joint_pos[:, self._rap] - A_a * torch.sin(phase_r)
-
-        self._processed_actions = targets
+        # ── 3. 从"骨骼数据"生成全身关节目标 ───────────────────
+        self._processed_actions = self._sample_skeleton_pose(self._phase)
 
     def apply_actions(self):
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
