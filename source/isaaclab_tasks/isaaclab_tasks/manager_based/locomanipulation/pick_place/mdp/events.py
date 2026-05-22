@@ -294,6 +294,70 @@ def place_robots_from_conveyor_bbox(
     robot2.write_root_velocity_to_sim(robot2_state[:, 7:], env_ids=env_ids)
 
 
+def align_walker_robot_to_conveyor(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    conveyor_prim_name: str = "ConveyorBelt_A08_06",
+    reference_conveyor_center_x: float = 0.62,
+    reference_conveyor_min_y: float = 0.98,
+    reference_robot1_xy: tuple[float, float] = (0.0, 0.0),
+    walker_robot_name: str = "walker_robot",
+    walker_x_offset: float = 0.0,
+    walker_y_behind: float = 3.5,
+):
+    """把行走机器人放在 robot1 的正后方，朝向传送带（+Y 方向）。
+
+    walker_y_behind: walker 在 robot1 之后多少米（正值 = 远离传送带方向）。
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    walker = env.scene[walker_robot_name]
+    walker_state = walker.data.default_root_state[env_ids].clone()
+
+    robot1_cx_offset = reference_robot1_xy[0] - reference_conveyor_center_x
+    robot1_miny_offset = reference_robot1_xy[1] - reference_conveyor_min_y
+
+    bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
+    for i, env_id in enumerate(env_ids.tolist()):
+        conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
+        if conveyor_prim is None or not conveyor_prim.IsValid():
+            _diag_print(f"[locomanip_event] walker align: conveyor '{conveyor_prim_name}' not found for env_{env_id}")
+            continue
+
+        world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
+        aligned_box = world_bound.ComputeAlignedBox()
+        min_pt = aligned_box.GetMin()
+        max_pt = aligned_box.GetMax()
+        center_x = 0.5 * (min_pt[0] + max_pt[0])
+
+        # robot1 的 Y 坐标
+        robot1_y = min_pt[1] + robot1_miny_offset
+
+        walker_state[i, 0] = center_x + robot1_cx_offset + walker_x_offset
+        walker_state[i, 1] = robot1_y - walker_y_behind  # 在 robot1 背后
+        # Z 保持 default_root_state 中的高度（0.75）
+
+        # 朝向 +Y（面向传送带）: 绕 Z 轴旋转 90°, q=(cos45°, 0, 0, sin45°)
+        walker_state[i, 3] = 0.7071  # qw
+        walker_state[i, 4] = 0.0     # qx
+        walker_state[i, 5] = 0.0     # qy
+        walker_state[i, 6] = 0.7071  # qz
+
+        if i == 0:
+            _diag_print(
+                f"[locomanip_event] walker placed at "
+                f"({walker_state[i, 0]:.3f}, {walker_state[i, 1]:.3f}, {walker_state[i, 2]:.3f})"
+            )
+
+    walker.write_root_pose_to_sim(walker_state[:, :7], env_ids=env_ids)
+    walker.write_root_velocity_to_sim(walker_state[:, 7:], env_ids=env_ids)
+
+
 def place_test_boxes_from_conveyor_bbox(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,

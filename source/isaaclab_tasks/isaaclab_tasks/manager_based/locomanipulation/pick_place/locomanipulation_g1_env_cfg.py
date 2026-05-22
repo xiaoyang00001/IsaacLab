@@ -46,7 +46,10 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as loco
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_robot_sync import ZmqRobotSyncActionCfg
 
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+    AgileBasedLowerBodyActionCfg,
+    AutoWalkActionCfg,
+)
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
     AgileTeacherPolicyObservationsCfg,
 )
@@ -62,6 +65,27 @@ FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
+
+# 第三个机器人（自动行走）：固定根节点，通过 write_root_state_to_sim 运动学平移
+WALKER_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
+WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
+WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+
+# 自动行走使用的下半身关节列表（顺序须与 AutoWalkAction 内索引对应）
+WALKER_LOWER_BODY_JOINTS = [
+    "left_hip_yaw_joint",
+    "left_hip_roll_joint",
+    "left_hip_pitch_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_yaw_joint",
+    "right_hip_roll_joint",
+    "right_hip_pitch_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+]
 
 RUNTIME_NET_CFG = build_dual_machine_runtime_cfg()
 
@@ -208,6 +232,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 
     remote_robot: ArticulationCfg = REMOTE_FIXED_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/RemoteRobot")
 
+    # 第三个机器人：点击 Play 后自动行走
+    walker_robot: ArticulationCfg = WALKER_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/WalkerRobot")
+
     # Ground plane
     # ground = AssetBaseCfg(
     #     prim_path="/World/GroundPlane",
@@ -226,6 +253,17 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
+
+    # 第三个机器人自动行走
+    walker_lower_body = AutoWalkActionCfg(
+        asset_name="walker_robot",
+        joint_names=WALKER_LOWER_BODY_JOINTS,
+        forward_speed=0.3,
+        walk_frequency=0.8,
+        hip_pitch_amplitude=0.25,
+        knee_amplitude=0.30,
+        ankle_pitch_amplitude=0.12,
+    )
 
     publish_robot_state = ZmqRobotSyncActionCfg(
         asset_name="robot",
@@ -400,6 +438,29 @@ class EventsCfg:
         func=locomanip_mdp.place_test_boxes_from_conveyor_bbox,
         mode="reset",
         params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
+    )
+
+    # Walker 机器人：放在 robot1 正后方 3.5m，朝向传送带（+Y）
+    align_walker_startup = EventTerm(
+        func=locomanip_mdp.align_walker_robot_to_conveyor,
+        mode="startup",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "walker_robot_name": "walker_robot",
+            "walker_y_behind": 3.5,
+        },
+    )
+
+    align_walker_reset = EventTerm(
+        func=locomanip_mdp.align_walker_robot_to_conveyor,
+        mode="reset",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "walker_robot_name": "walker_robot",
+            "walker_y_behind": 3.5,
+        },
     )
 
     setup_conveyor_belt_physics = EventTerm(

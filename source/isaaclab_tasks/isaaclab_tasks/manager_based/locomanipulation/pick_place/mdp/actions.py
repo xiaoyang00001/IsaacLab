@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,7 +20,7 @@ from isaaclab.utils.io.torchscript import load_torchscript_model
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from ..configs.action_cfg import AgileBasedLowerBodyActionCfg
+    from ..configs.action_cfg import AgileBasedLowerBodyActionCfg, AutoWalkActionCfg
 
 
 class AgileBasedLowerBodyAction(ActionTerm):
@@ -273,3 +274,132 @@ class AgileBasedLowerBodyAction(ActionTerm):
         self._stable_root_yaw[env_ids] = self._yaw_from_quat(self._asset.data.root_quat_w[env_ids])
         self._last_root_target_xy[env_ids] = self._stable_root_pos[env_ids, :2]
         self._last_root_target_yaw[env_ids] = self._stable_root_yaw[env_ids]
+
+
+class AutoWalkAction(ActionTerm):
+    """点击 Play 后自动向前行走的动作项（CPG 步态 + 根节点运动学平移）。
+
+    无需外部设备或策略模型。使用中心模式发生器（CPG）驱动腿部关节，同时
+    通过 write_root_state_to_sim 在世界坐标系中沿机器人朝向平移根节点。
+    """
+
+    cfg: AutoWalkActionCfg
+    _asset: Articulation
+
+    def __init__(self, cfg: AutoWalkActionCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset = env.scene[cfg.asset_name]
+        self._env = env
+
+        self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        self._default_joint_pos = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
+        self._processed_actions = self._default_joint_pos.clone()
+
+        # Phase accumulator per env (rad)
+        self._phase = torch.zeros(self.num_envs, device=self.device)
+        # World-frame walk position (set on first process_actions call)
+        self._walk_xy: torch.Tensor | None = None
+        self._init_root_z: torch.Tensor | None = None
+
+        # Index of each animated joint within self._joint_names
+        name_to_idx = {n: i for i, n in enumerate(self._joint_names)}
+        self._lhp = name_to_idx["left_hip_pitch_joint"]
+        self._lk  = name_to_idx["left_knee_joint"]
+        self._lap = name_to_idx["left_ankle_pitch_joint"]
+        self._rhp = name_to_idx["right_hip_pitch_joint"]
+        self._rk  = name_to_idx["right_knee_joint"]
+        self._rap = name_to_idx["right_ankle_pitch_joint"]
+
+        print(
+            f"[IsaacLab] [AutoWalkAction] asset={cfg.asset_name} "
+            f"speed={cfg.forward_speed:.2f}m/s freq={cfg.walk_frequency:.2f}Hz"
+        )
+
+    def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
+        ids, names = [], []
+        for name in joint_names:
+            jids, jnames = self._asset.find_joints([f"^{name}$"])
+            if len(jids) != 1:
+                raise ValueError(f"AutoWalkAction: expected 1 joint for '{name}', got {len(jids)}")
+            ids.append(int(jids[0]))
+            names.append(jnames[0])
+        return ids, names
+
+    @staticmethod
+    def _forward_dir_from_quat(quat_wxyz: torch.Tensor) -> torch.Tensor:
+        """返回 XY 平面上机器人朝向的单位向量（假设模型正面为 +X 轴）。"""
+        w, x, y, z = quat_wxyz[:, 0], quat_wxyz[:, 1], quat_wxyz[:, 2], quat_wxyz[:, 3]
+        fx = 1.0 - 2.0 * (y * y + z * z)
+        fy = 2.0 * (x * y + w * z)
+        return torch.stack([fx, fy], dim=-1)
+
+    @property
+    def action_dim(self) -> int:
+        return 1  # 占位；外部不发送命令
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return torch.zeros(self.num_envs, 1, device=self.device)
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        dt = self._env.step_dt
+
+        # 首次调用时记录初始位置
+        if self._walk_xy is None:
+            self._walk_xy = self._asset.data.root_pos_w[:, :2].clone()
+            self._init_root_z = self._asset.data.root_pos_w[:, 2:3].clone()
+
+        # ── 1. 更新相位 ──────────────────────────────────────
+        self._phase += 2.0 * math.pi * self.cfg.walk_frequency * dt
+
+        # ── 2. 移动根节点（沿当前朝向） ───────────────────────
+        fwd = self._forward_dir_from_quat(self._asset.data.root_quat_w)  # [N, 2]
+        self._walk_xy += fwd * (self.cfg.forward_speed * dt)
+
+        target_pos = torch.cat([self._walk_xy, self._init_root_z], dim=-1)
+        root_state = torch.cat([
+            target_pos,
+            self._asset.data.root_quat_w,
+            torch.zeros(self.num_envs, 6, device=self.device),
+        ], dim=-1)
+        self._asset.write_root_state_to_sim(root_state)
+
+        # ── 3. CPG 关节目标 ───────────────────────────────────
+        A_h = self.cfg.hip_pitch_amplitude
+        A_k = self.cfg.knee_amplitude
+        A_a = self.cfg.ankle_pitch_amplitude
+
+        phase_l = self._phase           # 左腿相位
+        phase_r = self._phase + math.pi  # 右腿相位（半周期偏移）
+
+        targets = self._default_joint_pos.clone()
+        # 髋关节俯仰 — 前后摆腿
+        targets[:, self._lhp] = self._default_joint_pos[:, self._lhp] + A_h * torch.sin(phase_l)
+        targets[:, self._rhp] = self._default_joint_pos[:, self._rhp] + A_h * torch.sin(phase_r)
+        # 膝关节 — 摆动相弯曲（只在 sin>0 时弯）
+        targets[:, self._lk] = self._default_joint_pos[:, self._lk] + A_k * torch.clamp(torch.sin(phase_l + 0.5), min=0.0)
+        targets[:, self._rk] = self._default_joint_pos[:, self._rk] + A_k * torch.clamp(torch.sin(phase_r + 0.5), min=0.0)
+        # 踝关节 — 随髋反向补偿
+        targets[:, self._lap] = self._default_joint_pos[:, self._lap] - A_a * torch.sin(phase_l)
+        targets[:, self._rap] = self._default_joint_pos[:, self._rap] - A_a * torch.sin(phase_r)
+
+        self._processed_actions = targets
+
+    def apply_actions(self):
+        self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._phase.zero_()
+            self._processed_actions.copy_(self._default_joint_pos)
+            self._walk_xy = None
+            self._init_root_z = None
+        else:
+            self._phase[env_ids] = 0.0
+            self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
+            if self._walk_xy is not None:
+                self._walk_xy[env_ids] = self._asset.data.root_pos_w[env_ids, :2]
