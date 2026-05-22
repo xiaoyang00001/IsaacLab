@@ -74,6 +74,13 @@ class AutoWalkActionCfg(ActionTermCfg):
     waist_yaw_amplitude: float = 0.06
     """腰关节 yaw 反向扭转幅度（rad），增加自然感。"""
 
+    waist_roll_amplitude: float = 0.05
+    """腰关节 roll 侧倾幅度（rad），模拟行走时的重心转移。"""
+
+    # ── 髋部 ────────────────────────────────────────────────
+    hip_yaw_amplitude: float = 0.03
+    """髋关节 yaw 旋转幅度（rad），与腰部协同产生骨盆旋转。"""
+
     # ── 手部 ────────────────────────────────────────────────
     hand_curl_amount: float = 0.10
     """手指关节相对默认位置的轻微卷曲（rad），仿真放松握拳姿态。设为 0 关闭。"""

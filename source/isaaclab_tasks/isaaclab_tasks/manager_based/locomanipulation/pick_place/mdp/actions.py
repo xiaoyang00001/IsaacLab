@@ -315,7 +315,11 @@ class AutoWalkAction(ActionTerm):
             patterns=("shoulder_pitch_joint", "elbow_joint")
         )
         self._waist_yaw_idx = self._idx.get("waist_yaw_joint")
+        self._waist_roll_idx = self._idx.get("waist_roll_joint")
         self._waist_pitch_idx = self._idx.get("waist_pitch_joint")
+        # 髋 yaw（用于骨盆旋转）
+        self._left_hip_yaw_idx = self._idx.get("left_hip_yaw_joint")
+        self._right_hip_yaw_idx = self._idx.get("right_hip_yaw_joint")
         # 收集手部关节索引
         self._hand_indices = [i for n, i in self._idx.items() if "_hand_" in n]
 
@@ -419,6 +423,27 @@ class AutoWalkAction(ActionTerm):
             # 与腿运动反相（腿前摆，腰反扭）
             targets[:, self._waist_yaw_idx] = (
                 self._default_joint_pos[:, self._waist_yaw_idx] - A_waist_yaw * torch.sin(phase_l)
+            )
+
+        # ── WAIST ROLL：行走时的身体侧倾（重心转移） ──────────
+        A_waist_roll = self.cfg.waist_roll_amplitude
+        if self._waist_roll_idx is not None:
+            # 左腿支撑时身体向左倾，右腿支撑时向右倾
+            targets[:, self._waist_roll_idx] = (
+                self._default_joint_pos[:, self._waist_roll_idx] + A_waist_roll * torch.sin(phase_l)
+            )
+
+        # ── HIP YAW：骨盆旋转（与腰部 yaw 协同） ───────────────
+        A_hip_yaw = self.cfg.hip_yaw_amplitude
+        if self._left_hip_yaw_idx is not None:
+            # 左髋与腰部同向旋转
+            targets[:, self._left_hip_yaw_idx] = (
+                self._default_joint_pos[:, self._left_hip_yaw_idx] - A_hip_yaw * torch.sin(phase_l)
+            )
+        if self._right_hip_yaw_idx is not None:
+            # 右髋与腰部同向旋转
+            targets[:, self._right_hip_yaw_idx] = (
+                self._default_joint_pos[:, self._right_hip_yaw_idx] - A_hip_yaw * torch.sin(phase_l)
             )
 
         # ── HANDS：保持微弱放松卷曲（恒定，不随相位变化） ──
