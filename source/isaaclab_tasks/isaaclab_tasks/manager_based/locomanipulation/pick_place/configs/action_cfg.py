@@ -53,6 +53,9 @@ class AutoWalkActionCfg(ActionTermCfg):
     walk_frequency: float = 0.8
     """步态频率（Hz），即每秒完成的完整步态周期数。"""
 
+    body_bob_amplitude: float = 0.015
+    """躯干竖向起伏幅度（m），模拟双腿支撑/单腿支撑时的重心高度变化。"""
+
     # ── 腿部 ────────────────────────────────────────────────
     hip_pitch_amplitude: float = 0.25
     """髋关节俯仰摆动幅度（rad）。"""

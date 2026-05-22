@@ -397,7 +397,8 @@ class AutoWalkAction(ActionTerm):
                 targets[:, i] = self._default_joint_pos[:, i] + A_hip * torch.sin(ph)
             if "knee_joint" in leg:
                 i = leg["knee_joint"]
-                targets[:, i] = self._default_joint_pos[:, i] + A_knee * torch.clamp(torch.sin(ph + 0.5), min=0.0)
+                # 膝关节在腿前摆中段（mid-swing）弯曲最大
+                targets[:, i] = self._default_joint_pos[:, i] + A_knee * torch.clamp(torch.sin(ph), min=0.0)
             if "ankle_pitch_joint" in leg:
                 i = leg["ankle_pitch_joint"]
                 targets[:, i] = self._default_joint_pos[:, i] - A_ankle * torch.sin(ph)
@@ -469,7 +470,12 @@ class AutoWalkAction(ActionTerm):
         fwd = self._forward_dir_from_quat(self._asset.data.root_quat_w)  # [N, 2]
         self._walk_xy += fwd * (self.cfg.forward_speed * dt)
 
-        target_pos = torch.cat([self._walk_xy, self._init_root_z], dim=-1)
+        # ── 3. 添加躯干竖向起伏（body bob）───────────────────
+        # 双腿支撑时身体最低，单腿支撑时最高（频率是步态的 2 倍）
+        A_bob = self.cfg.body_bob_amplitude
+        body_z = self._init_root_z + A_bob * torch.abs(torch.sin(self._phase))
+
+        target_pos = torch.cat([self._walk_xy, body_z], dim=-1)
         root_state = torch.cat([
             target_pos,
             self._asset.data.root_quat_w,
