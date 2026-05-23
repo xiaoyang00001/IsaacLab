@@ -104,13 +104,21 @@
 - 3 个改动文件 AST parse 全通过
 - ONNX dual-pass 已在 env_isaaclab 独立验证：encoder 3.37ms + decoder 2.55ms = 6.45ms，输出 29D 数值合理
 
-### 如何手动 Play 验证（推荐用 zero_agent）
+### 如何手动 Play 验证（用 sonic_verify.py，**不能用 zero_agent.py**）
 
-`zero_agent.py` 每帧用 zero action 调 `process_actions`，会触发 `SONICWholeBodyAction` 的 dual-pass 推理 + 关节写入，最适合验证骨架。
+⚠️ **不要用 `scripts/environments/zero_agent.py`** — `pick_place` 在 `isaaclab_tasks/__init__.py` 的 `_BLACKLIST_PKGS` 里（注释 `TODO: Remove pick_place from the blacklist once pinocchio from Isaac Sim is compatibility`），自动注册会跳过它，导致 `gymnasium.error.NameNotFound`。
+
+为此项目新增了 [scripts/tools/sonic_verify.py](../scripts/tools/sonic_verify.py)，基于 zero_agent + 手动 import pick_place 触发 `gym.register`。每帧用 zero action 驱动 `SONICWholeBodyAction` 的 dual-pass 推理。
 
 ```powershell
 # 项目根目录 d:\src\Isaac\xiaoyangIssacLab\IsaacLab\ 下执行
-.\isaaclab.bat -p scripts/environments/zero_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 --num_envs 1
+.\isaaclab.bat -p scripts/tools/sonic_verify.py --num_envs 1
+
+# 如果首次启动渲染太慢/黑屏，可加 --headless 跳过 GUI，只验证场景能否构建 + SONIC 能否推理
+.\isaaclab.bat -p scripts/tools/sonic_verify.py --num_envs 1 --headless --max_steps 200
+
+# 关闭 crashreporter 旧 dump 上报（节省启动时间）
+$env:CARB_CRASHREPORTER_DISABLED=1
 ```
 
 弹出 Isaac Sim GUI 后点 viewport 左下 Play ▶（不自动开始的话）。
@@ -134,10 +142,12 @@
 
 | 报错 / 现象 | 根因 | 处理 |
 |---|---|---|
+| `gymnasium.error.NameNotFound: Environment Isaac-PickPlace-Locomanipulation-G1-Abs doesn't exist` | 用了 `zero_agent.py` 而非 `sonic_verify.py`；pick_place 在 isaaclab_tasks blacklist 里不会自动注册 | 改用 `scripts/tools/sonic_verify.py`（手动 import 触发注册） |
 | `ImportError: SONIC requires onnxruntime` | env_isaaclab 未激活 | `isaaclab.bat` 通常自动激活 env_isaaclab，确认是否用了正确的入口脚本 |
 | `FileNotFoundError: ...model_encoder.onnx` | `retrieve_file_path` 可能不识别纯本地 Windows 路径（它原本设计来处理 Omniverse Nucleus URL） | 把 [mdp/actions.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py) 里 `retrieve_file_path(self.cfg.encoder_path)` 直接改为 `self.cfg.encoder_path`；decoder 同理 |
 | `find_joints` 报 0 match → `[SONIC] skip joint` | USD 关节命名与 SONIC MJCF 略有差异 | 临时不影响 pipeline 验证；阶段 3 要建立完整 perm 映射 |
-| 仿真黑屏 / 卡住 | GPU/显存问题，与本任务无关 | 改 `--device cpu`（会很慢） |
+| GUI 黑屏几分钟仍未渲染 | 首次启动 shader 编译 + 4 个 G1 USD 加载，慢是常态 | 等 3-5 分钟；不放心可同时另起一个 `--headless` 终端做诊断 |
+| 终端只刷 `[previous crash]` 日志 | Isaac Sim 在上报历史 crash dump，与本次会话无关 | 设 `$env:CARB_CRASHREPORTER_DISABLED=1` 后启动可禁用 |
 
 ### 阶段 3 必做（按优先级）
 1. **真实多帧 buffer**：维护过去 10 帧的 `base_angular_velocity` / `joint_pos` / `joint_vel` / `last_actions` / `gravity_dir`，按 observation_config.yaml 偏移写入 decoder 输入
