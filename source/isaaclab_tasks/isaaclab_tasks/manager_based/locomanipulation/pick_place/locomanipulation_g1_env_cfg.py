@@ -75,12 +75,16 @@ WALKER_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
 WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
 WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 
-# 第四个机器人：GEAR-SONIC ONNX 驱动（最小骨架，zero-fill 观测）
+# 第四个机器人：GEAR-SONIC ONNX 驱动（阶段 3.1：真实 decoder obs + encoder zero-fill）
 # init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
 # X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
+#
+# 【临时调试设置】fix_root_link=True + disable_gravity=True：让 sonic_robot 悬空不摔，
+# 强制把机器人放回 SONIC 训练的"站立"状态分布内，便于判断 ONNX 输出是合理调整还是 garbage。
+# 接 encoder 真实输入（阶段 3.2）后改回 False/False 让物理生效。
 SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
-SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
-SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 

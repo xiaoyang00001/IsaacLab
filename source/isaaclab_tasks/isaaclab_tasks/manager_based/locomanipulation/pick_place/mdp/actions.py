@@ -515,6 +515,7 @@ class SONICWholeBodyAction(ActionTerm):
 
         self._init_history()
         self._load_policies()
+        self._debug_counter = 0
 
         if self.num_envs > 1:
             print(
@@ -645,6 +646,16 @@ class SONICWholeBodyAction(ActionTerm):
         # SONIC 训练用 JointPositionActionCfg(use_default_offset=true)，输出 = 相对 default 的偏移
         self._processed_actions = self._default_joint_pos + self.cfg.action_scale * action_rel[:, :n_resolved]
         self._last_action = action_rel
+
+        self._debug_counter += 1
+        if self._debug_counter % 50 == 0:
+            a = action_rel[0].detach().cpu()
+            jp = self._hist_joint_pos[0, -1].detach().cpu()
+            print(
+                f"[IsaacLab] [SONIC] step={self._debug_counter} "
+                f"action mean={a.mean():+.4f} absmax={a.abs().max():.4f} std={a.std():.4f} "
+                f"| joint_pos mean={jp.mean():+.4f} absmax={jp.abs().max():.4f}"
+            )
 
     def apply_actions(self):
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
