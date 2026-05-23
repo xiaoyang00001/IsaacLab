@@ -291,10 +291,10 @@ class ActionsCfg:
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
+    # forward_speed 已在 v3 物理驱动后废弃（脚地接触自然推进），不再传入
     walker_skeletal_walk = AutoWalkActionCfg(
         asset_name="walker_robot",
         joint_names=WALKER_WHOLE_BODY_JOINTS,
-        forward_speed=0.3,
         walk_frequency=0.8,
         # 腿部
         hip_pitch_amplitude=0.25,

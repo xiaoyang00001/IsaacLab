@@ -138,6 +138,57 @@ $env:CARB_CRASHREPORTER_DISABLED=1
 
 **眼测通过标准**：①日志有 `resolved=29/29` 且无 ImportError ②`sonic_robot` 出现在场景中 ③做出某种姿态（哪怕摔倒）。三项都满足 = 阶段 2 验证通过。
 
+### 阶段 2 验证调试纪要（2026-05-23）
+
+首次 `sonic_verify.py` 启动连续踩到 3 个独立 bug，全部修复后 SONIC 骨架核心验证通过。完整时间线如下，留作未来排错参考。
+
+#### Bug 1：`gymnasium.error.NameNotFound: Environment Isaac-PickPlace-Locomanipulation-G1-Abs doesn't exist`
+
+**症状**：用 `scripts/environments/zero_agent.py` 启动，task 找不到。
+
+**根因**：[isaaclab_tasks/__init__.py:37](../source/isaaclab_tasks/isaaclab_tasks/__init__.py#L37) 的 `_BLACKLIST_PKGS` 包含 `"pick_place"`，注释为 `TODO(@ashwinvk): Remove pick_place from the blacklist once pinocchio from Isaac Sim is compatibility`。这意味着 `import_packages()` 自动注册时跳过 pick_place，必须手动 import 该子包才会触发 `gym.register`。
+
+**为什么以前没遇到**：项目里 `record_demos.py` / `replay_demos.py` / `teleop_se3_agent.py` 等脚本都在文件头部手动 `import isaaclab_tasks.manager_based.locomanipulation.pick_place  # noqa: F401`。`zero_agent.py` 是上游通用脚本，没有这个 import。
+
+**修复**：新建 [scripts/tools/sonic_verify.py](../scripts/tools/sonic_verify.py)，基于 zero_agent 模板 + 加上手动 import + SONIC 进度日志 + `--max_steps` 参数。
+
+#### Bug 2：`TypeError: AutoWalkActionCfg.__init__() got an unexpected keyword argument 'forward_speed'`
+
+**症状**：sonic_verify 在 import pick_place 时报 cfg 字段不存在。
+
+**根因**：v3 物理驱动改造（commit `93b8e66`）废弃了 `forward_speed` 字段（脚地接触自然推进，不再需要根节点强制平移），但 [locomanipulation_g1_env_cfg.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py) 中 `walker_skeletal_walk = AutoWalkActionCfg(..., forward_speed=0.3, ...)` 调用没同步删除。
+
+**为什么以前没遇到**：Bug 1 让 zero_agent 在 `gym.make` 之前就退出，根本到不了 import env_cfg；其他能跑这个 task 的脚本只在 teleop 测试时被偶尔启动，可能也没及时撞到。
+
+**修复**：从 `walker_skeletal_walk = AutoWalkActionCfg(...)` 调用中删除 `forward_speed=0.3` 参数。
+
+#### Bug 3：`AttributeError: 'AutoWalkActionCfg' object has no attribute 'forward_speed'`
+
+**症状**：env 构造到 ActionManager._prepare_terms 时崩，行号 [mdp/actions.py:343](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py#L343)。
+
+**根因**：Bug 2 的同源遗漏 —— `AutoWalkAction.__init__` 的启动日志 print 里也引用了 `cfg.forward_speed:.2f`。废弃字段时只删了 cfg 类定义，没全局清理引用。
+
+**修复**：从 print f-string 删除 `speed={cfg.forward_speed:.2f}m/s` 那一段。
+
+#### 经验
+
+1. **删除 cfg 字段时全文搜索引用**：`grep -rn 'forward_speed' source/.../locomanipulation/` 会一次性暴露所有遗漏点（cfg 调用方 + 实现类的所有读取）。本项目 v3 改造时漏了 2 处。
+2. **blacklist 机制的隐性约束**：`isaaclab_tasks/__init__.py` 的 `_BLACKLIST_PKGS` 是关键文件，任何 task 不在自动注册列表里 = 必须手动 import。新加 task 时记得检查。
+3. **AppLauncher 的崩溃日志噪音**：每次启动 Isaac Sim 可能上报历史 `[previous crash]` dump，与本次会话无关。诊断时按 End 看最新输出，或设 `$env:CARB_CRASHREPORTER_DISABLED=1` 关掉。
+
+#### 验证通过的标志
+
+```
+[IsaacLab] [SONIC] asset=sonic_robot resolved=29/29 joints action_scale=0.25 enc_in=1762D dec_in=994D
+[IsaacLab] [AutoWalkAction] asset=walker_robot freq=0.80Hz resolved_joints=...
+[sonic_verify] env created; action_space=Box(-inf, inf, (1, 30), float32)
+[sonic_verify] reset done; entering step loop
+[sonic_verify] step=100
+...
+```
+
+`action_space=(1, 30)` 拆解：SONIC 1 + walker 1 + IK 28 = 30，符合预期。
+
 ### 常见故障排查
 
 | 报错 / 现象 | 根因 | 处理 |

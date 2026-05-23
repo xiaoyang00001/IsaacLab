@@ -340,7 +340,7 @@ class AutoWalkAction(ActionTerm):
 
         print(
             f"[IsaacLab] [AutoWalkAction] asset={cfg.asset_name} "
-            f"speed={cfg.forward_speed:.2f}m/s freq={cfg.walk_frequency:.2f}Hz "
+            f"freq={cfg.walk_frequency:.2f}Hz "
             f"resolved_joints={len(self._joint_ids)}/{len(cfg.joint_names)} "
             f"(legs={sum(len(v) for v in self._leg_groups.values())} "
             f"arms={sum(len(v) for v in self._arm_groups.values())} "
