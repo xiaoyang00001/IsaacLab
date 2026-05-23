@@ -76,10 +76,12 @@ WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
 WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 
 # 第四个机器人：GEAR-SONIC ONNX 驱动（最小骨架，zero-fill 观测）
+# init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
+# X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
 SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
 SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
-SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 1.5, 0.75)
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 
 # SONIC ONNX 模型路径（由 download_from_hf.py 下载，详见 docs/GR00T_WholeBodyControl_集成计划.md）
