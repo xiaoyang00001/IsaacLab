@@ -508,10 +508,37 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      - [x] `reset()` 重置 history：joint_pos 回 default，gravity 回 (0,0,-1)，其余清零
      - [x] **headless 通过**：`sonic_verify --headless --max_steps 200` 200 帧零错，日志含 `history_len=10`
      - [x] **GUI 暴露 frame-major layout 错误**：sonic_robot 摔倒后乱动；为隔离"训练分布外"问题，临时改 `fix_root_link=True + disable_gravity=True` 让机器人悬空，并加 `[SONIC] step=...` 每 50 步 debug 打印；数据显示 frame-major 时 `action absmax=25~27`（vs zero-fill 基线 1.9），明显 garbage。已切到 **dim-major** 重试。
-     - [ ] *待验证 dim-major*：`action absmax < 3` 且 sonic_robot 关节小幅微动 = layout 正确
-   - **3.2 encoder g1 mode 输入**（待启动）
-     - [ ] encoder 1762D 输入构造（按 observation_config.yaml 的 encoder 段顺序）
-     - [ ] 第一版用 **self-reference**（机器人当前 joint_pos / 当前 root quat 作为 motion 目标）
+     - [x] **dim-major 数值验证通过**（2026-05-23）：`action absmax=1.27~2.62`、`mean≈-0.1~-0.2`、`std=0.55~0.84`、`joint_pos absmax=1.14（远离限位）`。完全落在合理范围，模型在响应观测产生有意义输出。
+     - [ ] *GUI 视觉确认*：sonic_robot 关节应做小幅、连续微动（待用户最终确认）
+     - [ ] *物理解锁验证*：解除 fix_root_link 看 sonic_robot 是否能仅凭真实 decoder 观测在物理下站住（如果能 → 阶段 3.2 可推迟；如果摔 → 必须接 encoder）
+   - **3.2 encoder g1 mode 输入**（难度评估完成 2026-05-23，待选路径）
+
+     **难点**：encoder 1762D 由 14 个字段拼成，但 [observation_config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/observation_config.yaml) 不给每个字段的精确维度。按经验推测：
+
+     | 字段 | 推测维度 | g1 mode 必需 |
+     |---|---|---|
+     | `encoder_mode_4` | 4D（mode one-hot 或 4 floats） | ✓ |
+     | `motion_joint_positions_10frame_step5` | 29×5 = 145D | ✓ |
+     | `motion_joint_velocities_10frame_step5` | 29×5 = 145D | ✓ |
+     | `motion_root_z_position_10frame_step5` | 1×5 = 5D | |
+     | `motion_root_z_position` | 1D | |
+     | `motion_anchor_orientation` | 6D | |
+     | `motion_anchor_orientation_10frame_step5` | 6×5 = 30D | ✓ |
+     | `motion_joint_positions_lowerbody_10frame_step5` | 12×5 = 60D | （teleop mode 用） |
+     | `motion_joint_velocities_lowerbody_10frame_step5` | 12×5 = 60D | （teleop mode 用） |
+     | `vr_3point_local_target` | 9D（head/lhand/rhand × xyz） | （teleop mode 用） |
+     | `vr_3point_local_orn_target` | 18D（3 点 × 6D rotation） | （teleop mode 用） |
+     | `smpl_joints_10frame_step1` | **未知**（22 或 24 关节 × 3 × 10？） | （smpl mode 用） |
+     | `smpl_anchor_orientation_10frame_step1` | 6×10 = 60D | （smpl mode 用） |
+     | `motion_joint_positions_wrists_10frame_step1` | **未知**（wrists 关节数不明） | （smpl mode 用） |
+
+     推测累加约 1200~1500D，离 1762 还差 200~500D。精确逆向需要读 [sonic_release/config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/sonic_release/config.yaml) 中各 obs term 的 func 定义，或读 [gear_sonic_deploy/src/g1/](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/src/g1/) 的 C++ 部署代码。预计 1-2h。
+
+     **三条路径**（按推荐顺序）：
+     - **C → A**（推荐）：先做 3.1 收尾（解 fix_root_link 看物理下能否站住）；如果能站 → 3.2 可推迟到接 mocap 或 planner；如果摔 → 投入 1-2h 做 A
+     - **A. 硬解 1762**：先读 sonic_release/config.yaml 中 obs term 的 func 定义，必要时读 C++；然后构造 self-reference 填 g1 mode 必需 4 字段，其余 zero
+     - **B. 全 encoder zero-fill**：token_state 全 0 跳过 encoder（5min），但 token 没意义可能不稳；作为下界 baseline
+     - [ ] 选定路径后实施
    - **3.3 真正的 motion reference 源**
      - [ ] 选 A：`planner_sonic.onnx`（target_vel → motion 帧）— 速度命令接口
      - [ ] 选 B：从 GR00T 仓库的 sample_data/ 加载 mocap 文件回放（`download_from_hf.py --sample` 下载）
@@ -538,7 +565,7 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 > |---|---|---|---|---|
 > | zero-fill 基线 (阶段 2) | ~1.9 | 0（恒定） | 不撞限位 | 恒定姿态 |
 > | **frame-major** ❌ | **25~27** | **6.5** | **1.97（撞限位）** | 关节抽搐 |
-> | **dim-major** ✅ | 待验证（预期 < 3） | 预期 0.1~0.5 | 预期 < 0.5 | 预期微动 |
+> | **dim-major** ✅ | **1.27~2.62** | **0.55~0.84** | **1.14（远离限位）** | 关节小幅微动（待确认） |
 
 4. **长期目标**：
    - [ ] 集成 VLA 功能（需补 `gear_sonic[inference]`）
