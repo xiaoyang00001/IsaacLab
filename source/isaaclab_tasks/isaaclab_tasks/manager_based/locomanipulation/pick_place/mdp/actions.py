@@ -609,22 +609,25 @@ class SONICWholeBodyAction(ActionTerm):
     def _build_decoder_input(self, tokens: np.ndarray, env_idx: int) -> np.ndarray:
         """按 observation_config.yaml 顺序拼 994D decoder 输入。
 
-        offsets (frame-major flatten — 假设 SONIC 训练时按 frames × dims 展平)::
+        flatten layout: **dim-major** —— 每维的 10 帧时间序列连续存放。
+        即 (10, K) 张量先 transpose 到 (K, 10) 再 flatten；frame-major（初版试过）输出 garbage。
+
+        offsets::
           [0:64]    token_state (64D，来自 encoder 当帧输出)
-          [64:94]   his_base_angular_velocity_10frame_step1 (3*10)
-          [94:384]  his_body_joint_positions_10frame_step1 (29*10)
-          [384:674] his_body_joint_velocities_10frame_step1 (29*10)
-          [674:964] his_last_actions_10frame_step1 (29*10)
-          [964:994] his_gravity_dir_10frame_step1 (3*10)
+          [64:94]   his_base_angular_velocity_10frame_step1 (3*10, dim-major)
+          [94:384]  his_body_joint_positions_10frame_step1 (29*10, dim-major)
+          [384:674] his_body_joint_velocities_10frame_step1 (29*10, dim-major)
+          [674:964] his_last_actions_10frame_step1 (29*10, dim-major)
+          [964:994] his_gravity_dir_10frame_step1 (3*10, dim-major)
         """
         dec = np.zeros((1, self._decoder_input_dim), dtype=np.float32)
         dec[:, :64] = tokens
-        # 单 env 切片后 flatten 成 1D
-        dec[0, 64:94] = self._hist_base_ang_vel[env_idx].flatten().cpu().numpy()
-        dec[0, 94:384] = self._hist_joint_pos[env_idx].flatten().cpu().numpy()
-        dec[0, 384:674] = self._hist_joint_vel[env_idx].flatten().cpu().numpy()
-        dec[0, 674:964] = self._hist_last_actions[env_idx].flatten().cpu().numpy()
-        dec[0, 964:994] = self._hist_gravity_dir[env_idx].flatten().cpu().numpy()
+        # (10, K).T → (K, 10) → flatten → [d0_f0..f9, d1_f0..f9, ...]
+        dec[0, 64:94] = self._hist_base_ang_vel[env_idx].t().flatten().cpu().numpy()
+        dec[0, 94:384] = self._hist_joint_pos[env_idx].t().flatten().cpu().numpy()
+        dec[0, 384:674] = self._hist_joint_vel[env_idx].t().flatten().cpu().numpy()
+        dec[0, 674:964] = self._hist_last_actions[env_idx].t().flatten().cpu().numpy()
+        dec[0, 964:994] = self._hist_gravity_dir[env_idx].t().flatten().cpu().numpy()
         return dec
 
     def _run_sonic(self) -> torch.Tensor:

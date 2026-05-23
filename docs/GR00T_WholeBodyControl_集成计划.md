@@ -501,13 +501,14 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
    - [ ] *待 GUI 眼测*：去掉 `--headless` 看 `sonic_robot` 实际姿态表现
 
 3. **阶段 3：真实观测构造**（按子阶段递进）
-   - **3.1 真实 decoder 观测** ✅ headless 实测通过（2026-05-23）
+   - **3.1 真实 decoder 观测**（2026-05-23）
      - [x] `SONICWholeBodyAction` 新增 5 块 history buffer：`_hist_base_ang_vel(N,10,3)` / `_hist_joint_pos(N,10,29)` / `_hist_joint_vel(N,10,29)` / `_hist_last_actions(N,10,29)` / `_hist_gravity_dir(N,10,3)`，全部按 SONIC 关节顺序
      - [x] `_push_history()` 每步 FIFO 推入：`root_ang_vel_b` / `joint_pos[:, _joint_ids]` / `joint_vel[:, _joint_ids]` / `_last_action` / `projected_gravity_b`
      - [x] `_build_decoder_input()` 按 994D 偏移精确拼装（见下方"decoder 994D 偏移表"）
      - [x] `reset()` 重置 history：joint_pos 回 default，gravity 回 (0,0,-1)，其余清零
      - [x] **headless 通过**：`sonic_verify --headless --max_steps 200` 200 帧零错，日志含 `history_len=10`
-     - [ ] *待 GUI 眼测*：sonic_robot 行为应从"恒定姿态"变为"跟随当前状态闭环调整"（与阶段 2 直接对比）
+     - [x] **GUI 暴露 frame-major layout 错误**：sonic_robot 摔倒后乱动；为隔离"训练分布外"问题，临时改 `fix_root_link=True + disable_gravity=True` 让机器人悬空，并加 `[SONIC] step=...` 每 50 步 debug 打印；数据显示 frame-major 时 `action absmax=25~27`（vs zero-fill 基线 1.9），明显 garbage。已切到 **dim-major** 重试。
+     - [ ] *待验证 dim-major*：`action absmax < 3` 且 sonic_robot 关节小幅微动 = layout 正确
    - **3.2 encoder g1 mode 输入**（待启动）
      - [ ] encoder 1762D 输入构造（按 observation_config.yaml 的 encoder 段顺序）
      - [ ] 第一版用 **self-reference**（机器人当前 joint_pos / 当前 root quat 作为 motion 目标）
@@ -530,7 +531,14 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 | [964:994] | 30 | `his_gravity_dir_10frame_step1` | `projected_gravity_b` × 10 帧 |
 | **总计** | **994** | | |
 
-> ⚠️ flatten layout 假设为 **frame-major**（`[f0_d0..d_K, f1_d0..d_K, ...]`），但 SONIC 训练实际 layout 未文档化。如果模型行为异常（NaN、剧烈晃动），考虑改为 **dim-major**（`[d0_f0..f9, d1_f0..f9, ...]`）。
+> ✅ flatten layout 实测为 **dim-major**（`[d0_f0..f9, d1_f0..f9, ...]`），即每维的 10 帧时间序列连续存放。代码实现：`tensor[env_idx].t().flatten()`（(10, K) → (K, 10) → 1D）。
+>
+> **判别证据**（2026-05-23 GUI 实测，sonic_robot 悬空状态）：
+> | layout | `action absmax` | `action std` | `joint_pos absmax` | viewport |
+> |---|---|---|---|---|
+> | zero-fill 基线 (阶段 2) | ~1.9 | 0（恒定） | 不撞限位 | 恒定姿态 |
+> | **frame-major** ❌ | **25~27** | **6.5** | **1.97（撞限位）** | 关节抽搐 |
+> | **dim-major** ✅ | 待验证（预期 < 3） | 预期 0.1~0.5 | 预期 < 0.5 | 预期微动 |
 
 4. **长期目标**：
    - [ ] 集成 VLA 功能（需补 `gear_sonic[inference]`）
