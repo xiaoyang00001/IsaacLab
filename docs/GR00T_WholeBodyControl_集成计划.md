@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
-> **进度：阶段 1（环境准备）+ 阶段 2（最小骨架）✅ 完成于 2026-05-23**
-> 仓库已克隆、`gear_sonic` core 已装入 `env_isaaclab`、GEAR-SONIC ONNX + PyTorch ckpt 已下载、`SONICWholeBodyAction` 骨架已落地为场景中的第 4 个机器人 `sonic_robot`，并通过 `sonic_verify.py --headless --max_steps 200` 实测：200 帧 dual-pass ONNX 推理 + 关节写入 + 物理 step 零错退出。详见下方"阶段 1 / 阶段 2 完成纪要"。
+> **进度：阶段 1（环境准备）+ 阶段 2（最小骨架）+ 阶段 3.1（真实 decoder 观测）✅ headless 全部通过于 2026-05-23**
+> 仓库已克隆、`gear_sonic` core 已装入 `env_isaaclab`、GEAR-SONIC ONNX + PyTorch ckpt 已下载、`SONICWholeBodyAction` 骨架已落地为场景中的第 4 个机器人 `sonic_robot`、994D decoder 端按真实 10-frame history 拼装（encoder 仍 zero-fill），均以 `sonic_verify.py --headless --max_steps 200` 实测 200 帧零错。GUI 视觉变化眼测尚未做。详见下方"阶段 1 / 阶段 2 完成纪要"。
 
 ## 概述
 
@@ -500,12 +500,37 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
    - [x] **运行时通过**：`sonic_verify.py --headless --max_steps 200` 跑完 0 错（SONIC 加载 / env 构造 / reset / 200 step loop 全过）
    - [ ] *待 GUI 眼测*：去掉 `--headless` 看 `sonic_robot` 实际姿态表现
 
-3. **阶段 3：真实观测构造**（下一步）
-   - [ ] 维护 10-frame history buffer（`base_ang_vel` / `joint_pos` / `joint_vel` / `last_actions` / `gravity_dir`）
-   - [ ] encoder 输入实现 g1 mode（mode_id=0）：`encoder_mode_4` + `motion_joint_positions_10frame_step5` + `motion_joint_velocities_10frame_step5` + `motion_anchor_orientation_10frame_step5`
-   - [ ] 运行时打印 `articulation.joint_names` 核对与 SONIC MJCF 顺序的差异，必要时建立 perm 映射
-   - [ ] motion reference 来源选型：planner_sonic.onnx（target_vel）或固定 mocap 文件
-   - [ ] action_scale 调回 1.0
+3. **阶段 3：真实观测构造**（按子阶段递进）
+   - **3.1 真实 decoder 观测** ✅ headless 实测通过（2026-05-23）
+     - [x] `SONICWholeBodyAction` 新增 5 块 history buffer：`_hist_base_ang_vel(N,10,3)` / `_hist_joint_pos(N,10,29)` / `_hist_joint_vel(N,10,29)` / `_hist_last_actions(N,10,29)` / `_hist_gravity_dir(N,10,3)`，全部按 SONIC 关节顺序
+     - [x] `_push_history()` 每步 FIFO 推入：`root_ang_vel_b` / `joint_pos[:, _joint_ids]` / `joint_vel[:, _joint_ids]` / `_last_action` / `projected_gravity_b`
+     - [x] `_build_decoder_input()` 按 994D 偏移精确拼装（见下方"decoder 994D 偏移表"）
+     - [x] `reset()` 重置 history：joint_pos 回 default，gravity 回 (0,0,-1)，其余清零
+     - [x] **headless 通过**：`sonic_verify --headless --max_steps 200` 200 帧零错，日志含 `history_len=10`
+     - [ ] *待 GUI 眼测*：sonic_robot 行为应从"恒定姿态"变为"跟随当前状态闭环调整"（与阶段 2 直接对比）
+   - **3.2 encoder g1 mode 输入**（待启动）
+     - [ ] encoder 1762D 输入构造（按 observation_config.yaml 的 encoder 段顺序）
+     - [ ] 第一版用 **self-reference**（机器人当前 joint_pos / 当前 root quat 作为 motion 目标）
+   - **3.3 真正的 motion reference 源**
+     - [ ] 选 A：`planner_sonic.onnx`（target_vel → motion 帧）— 速度命令接口
+     - [ ] 选 B：从 GR00T 仓库的 sample_data/ 加载 mocap 文件回放（`download_from_hf.py --sample` 下载）
+   - **3.4 收尾**
+     - [ ] 运行时打印 `articulation.joint_names` 与 `SONIC_G1_29DOF_JOINT_ORDER` 对照，确认无 perm 错位
+     - [ ] action_scale 0.25 → 1.0（接入真实观测后）
+
+#### decoder 994D 输入偏移表（按 observation_config.yaml release 段，frame-major flatten）
+
+| 偏移 | 大小 | 字段 | IsaacLab 来源 |
+|---|---|---|---|
+| [0:64] | 64 | `token_state` | encoder 当帧输出 |
+| [64:94] | 30 | `his_base_angular_velocity_10frame_step1` | `root_ang_vel_b` × 10 帧 |
+| [94:384] | 290 | `his_body_joint_positions_10frame_step1` | `joint_pos[:, _joint_ids]` × 10 帧 |
+| [384:674] | 290 | `his_body_joint_velocities_10frame_step1` | `joint_vel[:, _joint_ids]` × 10 帧 |
+| [674:964] | 290 | `his_last_actions_10frame_step1` | `_last_action` × 10 帧 |
+| [964:994] | 30 | `his_gravity_dir_10frame_step1` | `projected_gravity_b` × 10 帧 |
+| **总计** | **994** | | |
+
+> ⚠️ flatten layout 假设为 **frame-major**（`[f0_d0..d_K, f1_d0..d_K, ...]`），但 SONIC 训练实际 layout 未文档化。如果模型行为异常（NaN、剧烈晃动），考虑改为 **dim-major**（`[d0_f0..f9, d1_f0..f9, ...]`）。
 
 4. **长期目标**：
    - [ ] 集成 VLA 功能（需补 `gear_sonic[inference]`）

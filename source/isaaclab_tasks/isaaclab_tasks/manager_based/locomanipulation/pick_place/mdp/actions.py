@@ -484,11 +484,15 @@ class AutoWalkAction(ActionTerm):
 
 
 class SONICWholeBodyAction(ActionTerm):
-    """GEAR-SONIC encoder-decoder 全身控制 Action Term（最小骨架版）。
+    """GEAR-SONIC encoder-decoder 全身控制 Action Term（阶段 3.1：真实 decoder 观测 + encoder zero-fill）。
 
-    用 zero-fill 观测推理 ONNX，仅验证 IsaacLab → ONNX → 关节写入这条 pipeline。
-    真实 SONIC 部署的 multi-frame history + motion reference + mode 切换留待下阶段。
+    - decoder 端 994D 输入按 [policy/release/observation_config.yaml] 偏移精确构造：
+      token_state(64) + his_base_ang_vel(30) + his_joint_pos(290) + his_joint_vel(290)
+      + his_last_actions(290) + his_gravity_dir(30) = 994
+    - encoder 端 1762D 仍 zero-fill；motion reference / mode 切换留待阶段 3.2/3.3。
     """
+
+    HISTORY_LEN = 10  # decoder 端 _10frame_step1 历史长度
 
     cfg: SONICWholeBodyActionCfg
     _asset: Articulation
@@ -509,6 +513,7 @@ class SONICWholeBodyAction(ActionTerm):
         self._processed_actions = self._default_joint_pos.clone()
         self._last_action = torch.zeros(self.num_envs, cfg.sonic_action_dim, device=self.device)
 
+        self._init_history()
         self._load_policies()
 
         if self.num_envs > 1:
@@ -518,8 +523,21 @@ class SONICWholeBodyAction(ActionTerm):
             )
         print(
             f"[IsaacLab] [SONIC] asset={cfg.asset_name} resolved={len(self._joint_ids)}/{cfg.sonic_action_dim} joints "
-            f"action_scale={cfg.action_scale:.2f} enc_in={self._encoder_input_dim}D dec_in={self._decoder_input_dim}D"
+            f"action_scale={cfg.action_scale:.2f} enc_in={self._encoder_input_dim}D dec_in={self._decoder_input_dim}D "
+            f"history_len={self.HISTORY_LEN}"
         )
+
+    def _init_history(self):
+        N, J = self.num_envs, self.cfg.sonic_action_dim
+        H = self.HISTORY_LEN
+        dev = self.device
+        # joint_pos 用 default 初始化，gravity_dir 用 (0, 0, -1)，其余清零
+        self._hist_base_ang_vel = torch.zeros(N, H, 3, device=dev)
+        self._hist_joint_pos = self._default_joint_pos.unsqueeze(1).expand(N, H, J).clone()
+        self._hist_joint_vel = torch.zeros(N, H, J, device=dev)
+        self._hist_last_actions = torch.zeros(N, H, J, device=dev)
+        self._hist_gravity_dir = torch.zeros(N, H, 3, device=dev)
+        self._hist_gravity_dir[:, :, 2] = -1.0
 
     def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
         ids, names = [], []
@@ -568,24 +586,63 @@ class SONICWholeBodyAction(ActionTerm):
     def processed_actions(self) -> torch.Tensor:
         return self._processed_actions
 
-    def _run_sonic_zero(self) -> torch.Tensor:
-        """Run encoder→decoder with zero-filled obs, per env."""
+    def _push_history(self):
+        """FIFO 推入当前观测，最新帧在 [-1] 位置。所有按 SONIC 关节顺序取。"""
+        ang_vel = self._asset.data.root_ang_vel_b  # (N, 3) body frame IMU
+        jp = self._asset.data.joint_pos[:, self._joint_ids]  # (N, 29)
+        jv = self._asset.data.joint_vel[:, self._joint_ids]  # (N, 29)
+        gravity = self._asset.data.projected_gravity_b  # (N, 3) 重力投影到 body frame
+
+        self._hist_base_ang_vel = torch.roll(self._hist_base_ang_vel, shifts=-1, dims=1)
+        self._hist_joint_pos = torch.roll(self._hist_joint_pos, shifts=-1, dims=1)
+        self._hist_joint_vel = torch.roll(self._hist_joint_vel, shifts=-1, dims=1)
+        self._hist_last_actions = torch.roll(self._hist_last_actions, shifts=-1, dims=1)
+        self._hist_gravity_dir = torch.roll(self._hist_gravity_dir, shifts=-1, dims=1)
+
+        self._hist_base_ang_vel[:, -1, :] = ang_vel
+        self._hist_joint_pos[:, -1, :] = jp
+        self._hist_joint_vel[:, -1, :] = jv
+        self._hist_last_actions[:, -1, :] = self._last_action
+        self._hist_gravity_dir[:, -1, :] = gravity
+
+    def _build_decoder_input(self, tokens: np.ndarray, env_idx: int) -> np.ndarray:
+        """按 observation_config.yaml 顺序拼 994D decoder 输入。
+
+        offsets (frame-major flatten — 假设 SONIC 训练时按 frames × dims 展平)::
+          [0:64]    token_state (64D，来自 encoder 当帧输出)
+          [64:94]   his_base_angular_velocity_10frame_step1 (3*10)
+          [94:384]  his_body_joint_positions_10frame_step1 (29*10)
+          [384:674] his_body_joint_velocities_10frame_step1 (29*10)
+          [674:964] his_last_actions_10frame_step1 (29*10)
+          [964:994] his_gravity_dir_10frame_step1 (3*10)
+        """
+        dec = np.zeros((1, self._decoder_input_dim), dtype=np.float32)
+        dec[:, :64] = tokens
+        # 单 env 切片后 flatten 成 1D
+        dec[0, 64:94] = self._hist_base_ang_vel[env_idx].flatten().cpu().numpy()
+        dec[0, 94:384] = self._hist_joint_pos[env_idx].flatten().cpu().numpy()
+        dec[0, 384:674] = self._hist_joint_vel[env_idx].flatten().cpu().numpy()
+        dec[0, 674:964] = self._hist_last_actions[env_idx].flatten().cpu().numpy()
+        dec[0, 964:994] = self._hist_gravity_dir[env_idx].flatten().cpu().numpy()
+        return dec
+
+    def _run_sonic(self) -> torch.Tensor:
+        """Encoder zero-fill (阶段 3.1)，decoder 用真实 10-frame history。"""
         n_act = self.cfg.sonic_action_dim
         enc_in = np.zeros((1, self._encoder_input_dim), dtype=np.float32)
-        dec_in = np.zeros((1, self._decoder_input_dim), dtype=np.float32)
         out = np.zeros((self.num_envs, n_act), dtype=np.float32)
         for i in range(self.num_envs):
             tokens = self._encoder.run([self._enc_output_name], {self._enc_input_name: enc_in})[0]
-            # 假设 decoder 前 token_dim 维就是 token_state（与 observation_config.yaml 顺序一致）
-            dec_in[:, : self._token_dim] = tokens
+            dec_in = self._build_decoder_input(tokens, env_idx=i)
             action = self._decoder.run([self._dec_output_name], {self._dec_input_name: dec_in})[0][0]
             out[i] = action
         return torch.from_numpy(out).to(device=self.device, dtype=torch.float32)
 
     def process_actions(self, actions: torch.Tensor):
-        action_rel = self._run_sonic_zero()
-        # SONIC 训练用 JointPositionActionCfg(use_default_offset=true)，输出 = 相对 default 的偏移
+        self._push_history()
+        action_rel = self._run_sonic()
         n_resolved = len(self._joint_ids)
+        # SONIC 训练用 JointPositionActionCfg(use_default_offset=true)，输出 = 相对 default 的偏移
         self._processed_actions = self._default_joint_pos + self.cfg.action_scale * action_rel[:, :n_resolved]
         self._last_action = action_rel
 
@@ -596,6 +653,19 @@ class SONICWholeBodyAction(ActionTerm):
         if env_ids is None:
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_action.zero_()
+            # history 重置：joint_pos 回到 default，其余清零，gravity 回 -z
+            self._hist_base_ang_vel.zero_()
+            self._hist_joint_pos[:] = self._default_joint_pos.unsqueeze(1)
+            self._hist_joint_vel.zero_()
+            self._hist_last_actions.zero_()
+            self._hist_gravity_dir.zero_()
+            self._hist_gravity_dir[:, :, 2] = -1.0
         else:
             self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
             self._last_action[env_ids] = 0.0
+            self._hist_base_ang_vel[env_ids] = 0.0
+            self._hist_joint_pos[env_ids] = self._default_joint_pos[env_ids].unsqueeze(1)
+            self._hist_joint_vel[env_ids] = 0.0
+            self._hist_last_actions[env_ids] = 0.0
+            self._hist_gravity_dir[env_ids] = 0.0
+            self._hist_gravity_dir[env_ids, :, 2] = -1.0
