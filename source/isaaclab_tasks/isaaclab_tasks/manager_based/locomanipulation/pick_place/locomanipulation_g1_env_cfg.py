@@ -423,19 +423,32 @@ class EventsCfg:
         },
     )
 
-    # 在 sim.play() 之后创建 RigidBodyView，读取初始 pose
-    # 必须作为 startup 事件运行（physics_sim_view 在 sim.play() 后才可用）
+    # startup 事件：验证滚轮旋转数据就绪（kinematic xformOp 已在 prestartup 添加）
     init_roller_rigid_body_view = EventTerm(
         func=locomanip_mdp.init_roller_rigid_body_view,
         mode="startup",
     )
 
-    # 每物理步旋转所有滚轮（interval 频率与 sim.dt=1/200=0.005s 对齐）
-    # 通过 RigidBodyView Tensor API 直接设置 kinematic target pose
+    # 每物理步旋转所有滚轮（USD xformOp 写入，视觉旋转效果）
     rotate_conveyor_rollers = EventTerm(
         func=locomanip_mdp.rotate_conveyor_rollers,
         mode="interval",
         interval_range_s=(0.005, 0.005),
+    )
+
+    # 直接覆写箱子世界速度，兼容 GPU pipeline（friction-based 滚轮驱动在 GPU 下不可靠）
+    drive_test_box = EventTerm(
+        func=locomanip_mdp.drive_object_on_conveyor,
+        mode="interval",
+        interval_range_s=(0.005, 0.005),
+        params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
+    )
+
+    drive_test_box1 = EventTerm(
+        func=locomanip_mdp.drive_object_on_conveyor,
+        mode="interval",
+        interval_range_s=(0.005, 0.005),
+        params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
     )
 
 
