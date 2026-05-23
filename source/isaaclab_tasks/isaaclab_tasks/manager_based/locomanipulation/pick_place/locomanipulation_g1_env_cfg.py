@@ -79,12 +79,10 @@ WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 # init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
 # X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
 #
-# 【临时调试设置】fix_root_link=True + disable_gravity=True：让 sonic_robot 悬空不摔，
-# 强制把机器人放回 SONIC 训练的"站立"状态分布内，便于判断 ONNX 输出是合理调整还是 garbage。
-# 接 encoder 真实输入（阶段 3.2）后改回 False/False 让物理生效。
+# 物理生效：fix_root_link=False + disable_gravity=False，验证 decoder 真观测能否让机器人站住。
 SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
-SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
-SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
 SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 
@@ -287,13 +285,14 @@ class ActionsCfg:
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
-    # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理（最小骨架，zero-fill 观测）
+    # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理
+    # 阶段 3.1（真实 decoder obs + encoder zero-fill），action_scale=1.0 回归 SONIC 训练默认
     sonic_wholebody = SONICWholeBodyActionCfg(
         asset_name="sonic_robot",
         encoder_path=SONIC_ENCODER_PATH,
         decoder_path=SONIC_DECODER_PATH,
         joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-        action_scale=0.25,
+        action_scale=1.0,
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）

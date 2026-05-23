@@ -509,8 +509,11 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      - [x] **headless 通过**：`sonic_verify --headless --max_steps 200` 200 帧零错，日志含 `history_len=10`
      - [x] **GUI 暴露 frame-major layout 错误**：sonic_robot 摔倒后乱动；为隔离"训练分布外"问题，临时改 `fix_root_link=True + disable_gravity=True` 让机器人悬空，并加 `[SONIC] step=...` 每 50 步 debug 打印；数据显示 frame-major 时 `action absmax=25~27`（vs zero-fill 基线 1.9），明显 garbage。已切到 **dim-major** 重试。
      - [x] **dim-major 数值验证通过**（2026-05-23）：`action absmax=1.27~2.62`、`mean≈-0.1~-0.2`、`std=0.55~0.84`、`joint_pos absmax=1.14（远离限位）`。完全落在合理范围，模型在响应观测产生有意义输出。
-     - [ ] *GUI 视觉确认*：sonic_robot 关节应做小幅、连续微动（待用户最终确认）
-     - [ ] *物理解锁验证*：解除 fix_root_link 看 sonic_robot 是否能仅凭真实 decoder 观测在物理下站住（如果能 → 阶段 3.2 可推迟；如果摔 → 必须接 encoder）
+     - [x] **物理解锁配置已落地**（2026-05-23）：`SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False`、`disable_gravity = False`；`action_scale = 1.0`（从 0.25 回到 SONIC 训练默认）
+     - [ ] *物理验证待跑*：sonic_robot 能否仅凭真实 decoder 观测在物理下站住？
+       - 站住 > 5s → decoder 自洽，3.2 可推迟
+       - 1-3s 内摔 → 接近临界，3.2 接 encoder 提供 motion ref 可补足
+       - 立刻倒 → decoder 远远不够，必须接 encoder
    - **3.2 encoder g1 mode 输入**（难度评估完成 2026-05-23，待选路径）
 
      **难点**：encoder 1762D 由 14 个字段拼成，但 [observation_config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/observation_config.yaml) 不给每个字段的精确维度。按经验推测：
@@ -534,11 +537,13 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 
      推测累加约 1200~1500D，离 1762 还差 200~500D。精确逆向需要读 [sonic_release/config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/sonic_release/config.yaml) 中各 obs term 的 func 定义，或读 [gear_sonic_deploy/src/g1/](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/src/g1/) 的 C++ 部署代码。预计 1-2h。
 
-     **三条路径**（按推荐顺序）：
-     - **C → A**（推荐）：先做 3.1 收尾（解 fix_root_link 看物理下能否站住）；如果能站 → 3.2 可推迟到接 mocap 或 planner；如果摔 → 投入 1-2h 做 A
-     - **A. 硬解 1762**：先读 sonic_release/config.yaml 中 obs term 的 func 定义，必要时读 C++；然后构造 self-reference 填 g1 mode 必需 4 字段，其余 zero
-     - **B. 全 encoder zero-fill**：token_state 全 0 跳过 encoder（5min），但 token 没意义可能不稳；作为下界 baseline
-     - [ ] 选定路径后实施
+     **路径已选 C → A**（2026-05-23）：先做 3.1 物理验证（已配置完成，待跑），看物理下能否站住。
+     - 能站 → 3.2 推迟，直接跳 3.3 接 mocap / planner
+     - 摔倒 → 投入 1-2h 做 A（硬解 1762D）
+
+     备选路径：
+     - **A. 硬解 1762**：读 sonic_release/config.yaml 中 obs term 的 func 定义 / C++ 部署代码；构造 self-reference 填 g1 mode 必需 4 字段，其余 zero
+     - **B. 全 encoder zero-fill**：token_state 全 0（5min），作为下界 baseline
    - **3.3 真正的 motion reference 源**
      - [ ] 选 A：`planner_sonic.onnx`（target_vel → motion 帧）— 速度命令接口
      - [ ] 选 B：从 GR00T 仓库的 sample_data/ 加载 mocap 文件回放（`download_from_hf.py --sample` 下载）
