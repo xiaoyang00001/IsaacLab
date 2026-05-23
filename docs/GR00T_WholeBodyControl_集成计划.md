@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
-> **进度：阶段 1（环境准备）✅ 完成于 2026-05-23**
-> 仓库已克隆、`gear_sonic` core 已装入 `env_isaaclab`、GEAR-SONIC ONNX + PyTorch ckpt 已下载。详见下方"阶段 1 完成纪要"。
+> **进度：阶段 1（环境准备）+ 阶段 2（最小骨架）✅ 完成于 2026-05-23**
+> 仓库已克隆、`gear_sonic` core 已装入 `env_isaaclab`、GEAR-SONIC ONNX + PyTorch ckpt 已下载、`SONICWholeBodyAction` 骨架已落地为场景中的第 4 个机器人 `sonic_robot`。详见下方"阶段 1 / 阶段 2 完成纪要"。
 
 ## 概述
 
@@ -39,13 +39,77 @@
    - `conda run -n env_isaaclab python download_from_hf.py` 在 conda 25.5.1 上会崩 → 改用 `D:/miniconda3/envs/env_isaaclab/python.exe` 直调
    - `check_environment.py` 的 `disk_space()` 用了 `os.statvfs`（POSIX 专有），Windows 上必崩；其余 5 项检查正常
 
-### 阶段 2 前置依赖（**必装**）
-- `onnxruntime`（或 `onnxruntime-gpu`）——推理 ONNX 必需，当前未安装
+### 阶段 2 前置依赖
+- ✅ `onnxruntime-gpu` 1.26.0 已安装（CPU provider 跑 dual-pass 6.45ms，~150 FPS，单 env 足够 50Hz；CUDA provider 缺 cublasLt64_12.dll/cuDNN 9，暂未启用）
 
 ### 已跳过
 - 30 GB Bones-SEED SMPL 数据（仅训练用）
 - `gear_sonic[training]` 的 trl / accelerate / smpl_sim（仅训练用）
 - `gear_sonic[inference]` 的 Isaac-GR00T VLA 客户端（VLA 场景再装）
+
+---
+
+## 阶段 2 完成纪要（2026-05-23）
+
+### 关键调研发现（**与原文档严重不一致**）
+
+**SONIC 部署 release 模型 ≠ observation_config_example.yaml 描述的 154D**：
+
+| ONNX | 输入 | 输出 |
+|---|---|---|
+| `model_encoder.onnx` | **1762D** `obs_dict` | **64D** `encoded_tokens` |
+| `model_decoder.onnx` | **994D** `obs_dict` | **29D** `action` |
+
+实际 [observation_config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/observation_config.yaml) 是 **multi-frame + multi-mode**（g1/teleop/smpl 三种 encoder mode），decoder 端含 `token_state` (64D) + `his_base_angular_velocity_10frame_step1` + `his_body_joint_positions_10frame_step1` + `his_body_joint_velocities_10frame_step1` + `his_last_actions_10frame_step1` + `his_gravity_dir_10frame_step1` 五块 10 帧历史。**复现这套观测构造需要时间窗 buffer + mode 切换逻辑，工作量大**。
+
+**GR00T 仓库未提供 SONIC 的 Python 推理参考代码**：部署只有 C++（`gear_sonic_deploy/src/g1/` + TRTInference）。Python 侧仅有 Decoupled WBC 的 ONNX 加载示例（[g1_gear_wbc_policy.py](D:/src/Isaac/GR00T-WholeBodyControl/decoupled_wbc/control/policy/g1_gear_wbc_policy.py)）。
+
+### 选定的路径：**C - 最小骨架**
+
+不复现真实观测，**用 zero-fill 跑通 dual-pass ONNX 推理 → 写关节目标**，验证 IsaacLab → ONNX → joint write 整条 pipeline。后续阶段再补观测构造。
+
+### 关键工程决策（与原意图的偏离）
+
+原意图："SONIC 应用到 `robot`/`remote_robot`（解除 fix_root_link）"。
+
+实际做法：**新增第 4 个机器人 `sonic_robot`**，与 `walker_robot` 平级，专门给 SONIC 用。
+
+偏离原因：`robot` / `remote_robot` 与 `upper_body_ik` + ZMQ 紧耦合 — 原 `__post_init__` 里直接 `self.actions.upper_body_ik.controller.urdf_path = ...` 和 `hand_joint_names = self.actions.upper_body_ik.hand_joint_names`。强行替换会破坏 XR/teleop 流程。下阶段把 SONIC 真正接管 robot/remote_robot 时需剥离 IK + ZMQ（工作量数倍）。
+
+### 代码改动汇总（3 个文件，< 200 行新增）
+
+**[source/.../pick_place/mdp/actions.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py)**
+- 顶部加 `SONIC_G1_29DOF_JOINT_ORDER` 常量（29 个 G1 关节，与 SONIC 训练 MJCF `g1_29dof_rev_1_0.xml` 树遍历顺序一致）
+- 文件尾加 `SONICWholeBodyAction(ActionTerm)`：
+  - `_load_policies()`：加载 encoder/decoder ONNX，缓存输入/输出 name 和 dim
+  - `_run_sonic_zero()`：zero-fill encoder obs → tokens → 拼到 decoder obs 前 token_dim 维 → 29D action（per env 循环，无 batch dim）
+  - `process_actions()`：`target = default + action_scale × action_rel[:, :n_resolved]`
+  - `apply_actions()` / `reset()`：标准三件套
+
+**[source/.../pick_place/configs/action_cfg.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/configs/action_cfg.py)**
+- 新增 `SONICWholeBodyActionCfg`：
+  - `encoder_path` / `decoder_path` (MISSING)
+  - `joint_names` (MISSING，建议传 `list(SONIC_G1_29DOF_JOINT_ORDER)`)
+  - `sonic_action_dim: int = 29`
+  - `action_scale: float = 0.25`（保守 — zero-fill 推理输出曾到 ±2 rad，避免剧烈晃动；接入真实观测后调回 1.0）
+
+**[source/.../pick_place/locomanipulation_g1_env_cfg.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py)**
+- 新增常量：
+  - `SONIC_G1_29DOF_CFG`（解除 fix_root_link、启用重力，pos=(-2.0, 1.5, 0.75) 与 walker 分开放）
+  - `SONIC_ENCODER_PATH` / `SONIC_DECODER_PATH`（硬编码路径，下阶段可外置为环境变量或 cfg）
+- `LocomanipulationG1SceneCfg` 加 `sonic_robot: ArticulationCfg`（prim `SONICRobot`）
+- `ActionsCfg` 加 `sonic_wholebody = SONICWholeBodyActionCfg(...)`
+
+### 验证
+- 3 个改动文件 AST parse 全通过
+- ONNX dual-pass 已在 env_isaaclab 独立验证：encoder 3.37ms + decoder 2.55ms = 6.45ms，输出 29D 数值合理
+- **未启动 Isaac Sim Play 实测**——需要 GUI/USD nucleus 加载，建议本次直接眼测：`sonic_robot` 是否出现在 (-2.0, 1.5, 0.75) + 是否做出"非零但温和"的姿态偏移
+
+### 阶段 3 必做（按优先级）
+1. **真实多帧 buffer**：维护过去 10 帧的 `base_angular_velocity` / `joint_pos` / `joint_vel` / `last_actions` / `gravity_dir`，按 observation_config.yaml 偏移写入 decoder 输入
+2. **encoder 输入**：先选最简单的 **g1 mode**（mode_id=0，要 `encoder_mode_4` + `motion_joint_positions_10frame_step5` + `motion_joint_velocities_10frame_step5` + `motion_anchor_orientation_10frame_step5`），从固定 motion 文件回放或 `planner_sonic.onnx` 输出取
+3. **关节顺序映射验证**：运行时打印 `articulation.joint_names`，确认与 `SONIC_G1_29DOF_JOINT_ORDER` 一致（USD 顺序可能不同，需建立 perm 索引）
+4. **action_scale 回到 1.0**：观测真实后
 
 ---
 
@@ -304,16 +368,22 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
    - [x] 下载 GEAR-SONIC 部署版 ONNX + 训练版 PyTorch ckpt
    - [x] 确认 IsaacLab 2.3.2 / Python 3.11.15 / PyTorch 2.7.0 兼容
 
-2. **阶段 2：骨架代码（待启动）**
-   - [ ] 安装 `onnxruntime`（或 `onnxruntime-gpu`）到 env_isaaclab
-   - [ ] 核对 SONIC G1 29 DoF 关节顺序 vs `G1_29DOF_CFG`，建立映射表
-   - [ ] 在 `mdp/actions.py` 创建 `SONICWholeBodyAction`，先用**固定姿态**作 motion reference（不动 planner），验证 ONNX 推理跑通 + 关节写入正确
-   - [ ] 在 `configs/action_cfg.py` 创建 `SONICWholeBodyActionCfg`，参考 [GEAR-SONIC observation_config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/observation_config.yaml)
-   - [ ] 解除 `robot` / `remote_robot` 的 `fix_root_link`，在新环境配置里启用 SONIC
+2. **阶段 2：最小骨架** ✅ 已完成（2026-05-23）
+   - [x] 安装 `onnxruntime-gpu` 1.26.0 到 env_isaaclab（CPU provider 推理 OK，6.45ms/dual-pass）
+   - [x] 验证 SONIC dual-pass ONNX：encoder 1762→64 → decoder 994→29，输出数值合理
+   - [x] 提取 SONIC 训练用 G1 29 DoF 关节顺序（`g1_29dof_rev_1_0.xml` MJCF）
+   - [x] 在 `mdp/actions.py` 创建 `SONICWholeBodyAction`（zero-fill 观测，dual-pass 推理）+ `SONIC_G1_29DOF_JOINT_ORDER` 常量
+   - [x] 在 `configs/action_cfg.py` 创建 `SONICWholeBodyActionCfg`
+   - [x] **偏离原意图**：未动 robot/remote_robot（紧耦合 IK+ZMQ），改为新增第 4 个机器人 `sonic_robot`
+   - [x] 三个文件 AST parse 全通过
+   - [ ] *待用户手动 Play 验证*：`sonic_robot` 是否在场景中出现 + 是否做出温和姿态偏移
 
-3. **阶段 3：motion reference 对接**
-   - [ ] 接入 `planner_sonic.onnx`（target_vel → motion 帧），实现"速度命令 → SONIC 行走"
-   - [ ] 替代方案：mocap 文件 / ZMQ pose 流
+3. **阶段 3：真实观测构造**（下一步）
+   - [ ] 维护 10-frame history buffer（`base_ang_vel` / `joint_pos` / `joint_vel` / `last_actions` / `gravity_dir`）
+   - [ ] encoder 输入实现 g1 mode（mode_id=0）：`encoder_mode_4` + `motion_joint_positions_10frame_step5` + `motion_joint_velocities_10frame_step5` + `motion_anchor_orientation_10frame_step5`
+   - [ ] 运行时打印 `articulation.joint_names` 核对与 SONIC MJCF 顺序的差异，必要时建立 perm 映射
+   - [ ] motion reference 来源选型：planner_sonic.onnx（target_vel）或固定 mocap 文件
+   - [ ] action_scale 调回 1.0
 
 4. **长期目标**：
    - [ ] 集成 VLA 功能（需补 `gear_sonic[inference]`）

@@ -8,7 +8,7 @@ from dataclasses import MISSING
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions import AgileBasedLowerBodyAction, AutoWalkAction
+from ..mdp.actions import AgileBasedLowerBodyAction, AutoWalkAction, SONICWholeBodyAction
 
 
 @configclass
@@ -81,3 +81,37 @@ class AutoWalkActionCfg(ActionTermCfg):
     # ── 手部 ────────────────────────────────────────────────
     hand_curl_amount: float = 0.10
     """手指关节相对默认位置的轻微卷曲（rad），仿真放松握拳姿态。设为 0 关闭。"""
+
+
+@configclass
+class SONICWholeBodyActionCfg(ActionTermCfg):
+    """GEAR-SONIC encoder-decoder 全身控制（最小骨架版）配置。
+
+    当前 SONICWholeBodyAction 用 zero-fill 观测推理 ONNX，仅验证 IsaacLab → ONNX → 关节写入
+    这条 pipeline。真实 SONIC 部署的 multi-frame history + motion reference + mode 切换
+    留待下阶段补完。
+    """
+
+    class_type: type[ActionTerm] = SONICWholeBodyAction
+
+    encoder_path: str = MISSING
+    """SONIC encoder ONNX 路径。建议指向 gear_sonic_deploy/policy/release/model_encoder.onnx。"""
+
+    decoder_path: str = MISSING
+    """SONIC decoder ONNX 路径。建议指向 gear_sonic_deploy/policy/release/model_decoder.onnx。"""
+
+    joint_names: list[str] = MISSING
+    """29 个 G1 关节名，必须按 SONIC 训练顺序传入。
+
+    传入 `list(SONIC_G1_29DOF_JOINT_ORDER)`（位于 mdp/actions.py）即可。
+    """
+
+    sonic_action_dim: int = 29
+    """SONIC decoder 输出维度（固定 29）。"""
+
+    action_scale: float = 0.25
+    """SONIC 输出（joint_pos_rel 偏移量）→ 绝对关节目标的缩放因子。
+
+    SONIC 训练时 IsaacLab 默认 scale=1.0，但 zero-fill 观测推理时 decoder 输出可达 ±2 rad，
+    直接 ×1 会让机器人剧烈晃动。最小骨架阶段保守用 0.25；接入真实观测后可调回 1.0。
+    """

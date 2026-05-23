@@ -20,7 +20,24 @@ from isaaclab.utils.io.torchscript import load_torchscript_model
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from ..configs.action_cfg import AgileBasedLowerBodyActionCfg, AutoWalkActionCfg
+    from ..configs.action_cfg import AgileBasedLowerBodyActionCfg, AutoWalkActionCfg, SONICWholeBodyActionCfg
+
+
+# SONIC 训练时使用的 G1 29-DoF 关节顺序（来自 g1_29dof_rev_1_0.xml MJCF 树遍历）。
+# decoder 输出的 29D action 与此顺序一一对应；切勿改变。
+SONIC_G1_29DOF_JOINT_ORDER: tuple[str, ...] = (
+    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+    "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+    "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+)
 
 
 class AgileBasedLowerBodyAction(ActionTerm):
@@ -464,3 +481,121 @@ class AutoWalkAction(ActionTerm):
         else:
             self._phase[env_ids] = 0.0
             self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
+
+
+class SONICWholeBodyAction(ActionTerm):
+    """GEAR-SONIC encoder-decoder 全身控制 Action Term（最小骨架版）。
+
+    用 zero-fill 观测推理 ONNX，仅验证 IsaacLab → ONNX → 关节写入这条 pipeline。
+    真实 SONIC 部署的 multi-frame history + motion reference + mode 切换留待下阶段。
+    """
+
+    cfg: SONICWholeBodyActionCfg
+    _asset: Articulation
+
+    def __init__(self, cfg: SONICWholeBodyActionCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset = env.scene[cfg.asset_name]
+        self._env = env
+
+        self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        if len(self._joint_ids) != cfg.sonic_action_dim:
+            print(
+                f"[IsaacLab] [SONIC] WARNING resolved {len(self._joint_ids)}/{cfg.sonic_action_dim} joints; "
+                "SONIC was trained on 29 DoF — outputs for missing joints will be discarded."
+            )
+
+        self._default_joint_pos = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
+        self._processed_actions = self._default_joint_pos.clone()
+        self._last_action = torch.zeros(self.num_envs, cfg.sonic_action_dim, device=self.device)
+
+        self._load_policies()
+
+        if self.num_envs > 1:
+            print(
+                f"[IsaacLab] [SONIC] WARNING num_envs={self.num_envs}; ONNX runs in a per-env loop "
+                "(no batch dim in encoder/decoder); expect ~6ms × num_envs per step."
+            )
+        print(
+            f"[IsaacLab] [SONIC] asset={cfg.asset_name} resolved={len(self._joint_ids)}/{cfg.sonic_action_dim} joints "
+            f"action_scale={cfg.action_scale:.2f} enc_in={self._encoder_input_dim}D dec_in={self._decoder_input_dim}D"
+        )
+
+    def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
+        ids, names = [], []
+        for name in joint_names:
+            jids, jnames = self._asset.find_joints([f"^{name}$"])
+            if len(jids) == 1:
+                ids.append(int(jids[0]))
+                names.append(jnames[0])
+            else:
+                print(f"[IsaacLab] [SONIC] skip joint '{name}' (matches={len(jids)})")
+        return ids, names
+
+    def _load_policies(self):
+        try:
+            import onnxruntime as ort
+        except ImportError as exc:
+            raise ImportError(
+                "SONIC requires `onnxruntime` in the IsaacLab env. "
+                "Install via `pip install onnxruntime-gpu`."
+            ) from exc
+
+        enc_path = retrieve_file_path(self.cfg.encoder_path)
+        dec_path = retrieve_file_path(self.cfg.decoder_path)
+        self._encoder = ort.InferenceSession(enc_path, providers=["CPUExecutionProvider"])
+        self._decoder = ort.InferenceSession(dec_path, providers=["CPUExecutionProvider"])
+
+        enc_in = self._encoder.get_inputs()[0]
+        dec_in = self._decoder.get_inputs()[0]
+        self._enc_input_name = enc_in.name
+        self._dec_input_name = dec_in.name
+        self._enc_output_name = self._encoder.get_outputs()[0].name
+        self._dec_output_name = self._decoder.get_outputs()[0].name
+        self._encoder_input_dim = int(enc_in.shape[-1])
+        self._decoder_input_dim = int(dec_in.shape[-1])
+        self._token_dim = int(self._encoder.get_outputs()[0].shape[-1])
+
+    @property
+    def action_dim(self) -> int:
+        return 1
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return torch.zeros(self.num_envs, 1, device=self.device)
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def _run_sonic_zero(self) -> torch.Tensor:
+        """Run encoder→decoder with zero-filled obs, per env."""
+        n_act = self.cfg.sonic_action_dim
+        enc_in = np.zeros((1, self._encoder_input_dim), dtype=np.float32)
+        dec_in = np.zeros((1, self._decoder_input_dim), dtype=np.float32)
+        out = np.zeros((self.num_envs, n_act), dtype=np.float32)
+        for i in range(self.num_envs):
+            tokens = self._encoder.run([self._enc_output_name], {self._enc_input_name: enc_in})[0]
+            # 假设 decoder 前 token_dim 维就是 token_state（与 observation_config.yaml 顺序一致）
+            dec_in[:, : self._token_dim] = tokens
+            action = self._decoder.run([self._dec_output_name], {self._dec_input_name: dec_in})[0][0]
+            out[i] = action
+        return torch.from_numpy(out).to(device=self.device, dtype=torch.float32)
+
+    def process_actions(self, actions: torch.Tensor):
+        action_rel = self._run_sonic_zero()
+        # SONIC 训练用 JointPositionActionCfg(use_default_offset=true)，输出 = 相对 default 的偏移
+        n_resolved = len(self._joint_ids)
+        self._processed_actions = self._default_joint_pos + self.cfg.action_scale * action_rel[:, :n_resolved]
+        self._last_action = action_rel
+
+    def apply_actions(self):
+        self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._processed_actions.copy_(self._default_joint_pos)
+            self._last_action.zero_()
+        else:
+            self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
+            self._last_action[env_ids] = 0.0

@@ -49,7 +49,9 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_robot_sync imp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
     AgileBasedLowerBodyActionCfg,
     AutoWalkActionCfg,
+    SONICWholeBodyActionCfg,
 )
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import SONIC_G1_29DOF_JOINT_ORDER
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
     AgileTeacherPolicyObservationsCfg,
 )
@@ -72,6 +74,17 @@ WALKER_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
 WALKER_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
 WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
 WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+
+# 第四个机器人：GEAR-SONIC ONNX 驱动（最小骨架，zero-fill 观测）
+SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 1.5, 0.75)
+SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+
+# SONIC ONNX 模型路径（由 download_from_hf.py 下载，详见 docs/GR00T_WholeBodyControl_集成计划.md）
+SONIC_ENCODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
+SONIC_DECODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 
 # 模拟骨骼数据驱动的全身关节列表（缺失关节会被 AutoWalkAction 自动跳过）
 WALKER_WHOLE_BODY_JOINTS = [
@@ -246,6 +259,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # 第三个机器人：点击 Play 后自动行走
     walker_robot: ArticulationCfg = WALKER_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/WalkerRobot")
 
+    # 第四个机器人：GEAR-SONIC ONNX 驱动（最小骨架，仅验证 pipeline）
+    sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/SONICRobot")
+
     # Ground plane
     # ground = AssetBaseCfg(
     #     prim_path="/World/GroundPlane",
@@ -264,6 +280,15 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
+
+    # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理（最小骨架，zero-fill 观测）
+    sonic_wholebody = SONICWholeBodyActionCfg(
+        asset_name="sonic_robot",
+        encoder_path=SONIC_ENCODER_PATH,
+        decoder_path=SONIC_DECODER_PATH,
+        joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+        action_scale=0.25,
+    )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
     walker_skeletal_walk = AutoWalkActionCfg(
