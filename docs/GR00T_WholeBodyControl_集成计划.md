@@ -510,10 +510,9 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      - [x] **GUI 暴露 frame-major layout 错误**：sonic_robot 摔倒后乱动；为隔离"训练分布外"问题，临时改 `fix_root_link=True + disable_gravity=True` 让机器人悬空，并加 `[SONIC] step=...` 每 50 步 debug 打印；数据显示 frame-major 时 `action absmax=25~27`（vs zero-fill 基线 1.9），明显 garbage。已切到 **dim-major** 重试。
      - [x] **dim-major 数值验证通过**（2026-05-23）：`action absmax=1.27~2.62`、`mean≈-0.1~-0.2`、`std=0.55~0.84`、`joint_pos absmax=1.14（远离限位）`。完全落在合理范围，模型在响应观测产生有意义输出。
      - [x] **物理解锁配置已落地**（2026-05-23）：`SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False`、`disable_gravity = False`；`action_scale = 1.0`（从 0.25 回到 SONIC 训练默认）
-     - [ ] *物理验证待跑*：sonic_robot 能否仅凭真实 decoder 观测在物理下站住？
-       - 站住 > 5s → decoder 自洽，3.2 可推迟
-       - 1-3s 内摔 → 接近临界，3.2 接 encoder 提供 motion ref 可补足
-       - 立刻倒 → decoder 远远不够，必须接 encoder
+     - [x] **物理验证结果**（2026-05-23）：**立刻摔倒**。数据 `action absmax=14~16`（远超悬空 dim-major 时 1.27~2.62）、`mean=-2~-3` 持续负偏置、`joint_pos absmax=3.0+` 撞关节限位。机器人趴地后训练分布外 → 输出 garbage → 撞限位恶性循环。
+     - [x] **结论：decoder 真观测不足以维持平衡，必须接 encoder 提供 motion reference**（进 3.2 A 路径）
+     - [x] **回滚配置**：`fix_root_link = True + disable_gravity = True`，让 3.2 调试在站立姿态进行
    - **3.2 encoder g1 mode 输入**（难度评估完成 2026-05-23，待选路径）
 
      **难点**：encoder 1762D 由 14 个字段拼成，但 [observation_config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/observation_config.yaml) 不给每个字段的精确维度。按经验推测：
@@ -537,9 +536,7 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 
      推测累加约 1200~1500D，离 1762 还差 200~500D。精确逆向需要读 [sonic_release/config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/sonic_release/config.yaml) 中各 obs term 的 func 定义，或读 [gear_sonic_deploy/src/g1/](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/src/g1/) 的 C++ 部署代码。预计 1-2h。
 
-     **路径已选 C → A**（2026-05-23）：先做 3.1 物理验证（已配置完成，待跑），看物理下能否站住。
-     - 能站 → 3.2 推迟，直接跳 3.3 接 mocap / planner
-     - 摔倒 → 投入 1-2h 做 A（硬解 1762D）
+     **路径已选 C → A**（2026-05-23）：3.1 物理验证已跑，机器人立刻摔倒 → **必须接 encoder，进 A 路径**。
 
      备选路径：
      - **A. 硬解 1762**：读 sonic_release/config.yaml 中 obs term 的 func 定义 / C++ 部署代码；构造 self-reference 填 g1 mode 必需 4 字段，其余 zero
