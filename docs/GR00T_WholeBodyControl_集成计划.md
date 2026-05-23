@@ -170,11 +170,35 @@ $env:CARB_CRASHREPORTER_DISABLED=1
 
 **修复**：从 print f-string 删除 `speed={cfg.forward_speed:.2f}m/s` 那一段。
 
+#### Bug 4（GUI 阶段）：`sonic_robot` 在 viewport 默认视角看不到
+
+**症状**：headless 跑通后切 GUI，场景里没看到 sonic_robot。
+
+**根因**：场景对齐事件（`align_robots_from_conveyor` / `align_walker_robot_to_conveyor`）把 robot/remote_robot/walker 运行时移动到 conveyor 周围 (Y≈11~18)，但 **sonic_robot 没有对应的对齐事件**，仍停留在 `SONIC_G1_29DOF_CFG.init_state.pos` 写死的 `(-2.0, 1.5, 0.75)`，距主场景 ~10m，viewport 默认相机看不到。
+
+实际坐标（从 headless 日志摘）：
+| 机器人 | 实际位置 | 来源 |
+|---|---|---|
+| robot | (-4.987, 14.508, 0.75) | align 事件 |
+| remote_robot | (-6.237, 14.508, 0.75) | align 事件 |
+| walker_robot | (-4.987, 11.008, 0.75) | align_walker 事件 |
+| sonic_robot | (-2.0, 1.5, 0.75) | 配置写死，无对齐事件 |
+
+**诊断（无需改代码）**：打开 Isaac Sim 左边 **Stage** 面板（菜单 Window → Stage 或 F4），搜 `SONIC` 找到 `/World/envs/env_0/SONICRobot` → 右键 **Frame Selected** 或选中后按 `F` 键聚焦。
+
+**修复（最小骨架阶段足够）**：把 `SONIC_G1_29DOF_CFG.init_state.pos` 直接改到 walker 旁边，让两个并排出现在主场景视角：
+```python
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)  # walker 同 Y，X 错开约 3m
+```
+后续如果场景对齐事件改了 walker 位置，需要同步更新这个写死值；终极方案是在 [mdp/events.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/events.py) 加一个 `align_sonic_robot_to_conveyor` 事件（仿照 `align_walker_robot_to_conveyor`）。
+
 #### 经验
 
 1. **删除 cfg 字段时全文搜索引用**：`grep -rn 'forward_speed' source/.../locomanipulation/` 会一次性暴露所有遗漏点（cfg 调用方 + 实现类的所有读取）。本项目 v3 改造时漏了 2 处。
 2. **blacklist 机制的隐性约束**：`isaaclab_tasks/__init__.py` 的 `_BLACKLIST_PKGS` 是关键文件，任何 task 不在自动注册列表里 = 必须手动 import。新加 task 时记得检查。
 3. **AppLauncher 的崩溃日志噪音**：每次启动 Isaac Sim 可能上报历史 `[previous crash]` dump，与本次会话无关。诊断时按 End 看最新输出，或设 `$env:CARB_CRASHREPORTER_DISABLED=1` 关掉。
+4. **场景里有运行时对齐事件**：写死的 `init_state.pos` 在场景对齐事件运行后会被覆盖（robot/remote_robot/walker 都是这样）；新增机器人时要么仿照写一个对齐事件，要么调整初始位置到对齐后场景的预期范围内，否则 viewport 看不到。
+5. **BAR1 显存可独立于主显存耗尽**：GUI 模式下 PhysX/render 初始化可能因 BAR1 不足而 access violation 崩溃（headless 反而没事，因为不动渲染）。如果 GUI 起不来而 headless 能跑，多半是其他应用（QQ、浏览器等）占了 BAR1，重启电脑或退出 GPU 密集应用可释放。
 
 #### 验证通过的标志
 
