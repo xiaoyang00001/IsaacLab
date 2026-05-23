@@ -177,7 +177,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg()
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=10.0,
+            )
             if RUNTIME_NET_CFG.object_sync_role != "subscriber"
             else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
@@ -190,7 +193,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg()
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=10.0,
+            )
             if RUNTIME_NET_CFG.object_sync_role != "subscriber"
             else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
@@ -474,6 +480,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
         self.sim.render_interval = 4
+        # GPU pipeline: enable CCD to prevent rigid bodies from tunnelling through
+        # kinematic conveyor rollers between physics steps.
+        self.sim.physx.enable_ccd = True
 
         # Set the URDF and mesh paths for the IK controller
         urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501

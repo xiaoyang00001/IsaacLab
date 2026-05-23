@@ -304,7 +304,7 @@ def place_test_boxes_from_conveyor_bbox(
     reference_conveyor_min_y: float = 0.98,
     reference_test_box_xy: tuple[float, float] = (0.78886, 1.17033),
     reference_test_box1_xy: tuple[float, float] = (0.42787, 1.67696),
-    box_half_height: float = 0.1,
+    box_half_height: float = 0.2,
 ):
     """Place the two test boxes using change6-relative offsets from the conveyor bbox.
 
