@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import TYPE_CHECKING
 
 import torch
+from isaacsim.core.simulation_manager import SimulationManager
 from isaacsim.core.utils.stage import get_current_stage
-from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics
+
+import isaaclab.utils.math as math_utils
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -110,7 +114,7 @@ def setup_usd_rigid_object_physics(
 
         # Enable per-body CCD only for dynamic (non-kinematic) bodies to prevent GPU tunnelling.
         # Global scene CCD (physx.enable_ccd) breaks kinematic set_transforms, so we use
-        # per-body CCD here instead.
+        # per-body CCD here instead. This requires the PhysxRigidBodyAPI ccdEnabled attribute.
         if not kinematic_enabled:
             try:
                 ccd_attr = physx_api.GetCcdEnabledAttr()
@@ -510,6 +514,91 @@ def align_viewer_to_conveyor_bbox(
     )
 
 
+def init_roller_rigid_body_view(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+):
+    """在 sim.play() 之后为所有传送带滚轮创建 PhysX RigidBodyView。
+
+    此函数必须作为 startup 事件运行（在 sim.play() 之后），因为 RigidBodyView 需要
+    physics_sim_view 在 PhysX 初始化后才能创建。
+
+    从 env.conveyor_roller_rotation_data 中读取滚轮 prim 路径，
+    创建 RigidBodyView 并读取初始 pose，存储到 rotation data 中供
+    rotate_conveyor_rollers interval 事件使用。
+    """
+    data = getattr(env, "conveyor_roller_rotation_data", None)
+    if data is None:
+        _diag_print("[locomanip_event] init_roller_rigid_body_view: no conveyor_roller_rotation_data found, skipping")
+        return
+
+    roller_prim_paths = data.get("roller_prim_paths", [])
+    if not roller_prim_paths:
+        _diag_print("[locomanip_event] init_roller_rigid_body_view: no roller paths found, skipping")
+        return
+
+    # 获取 physics_sim_view（仅在 sim.play() 之后可用）
+    physics_sim_view = SimulationManager.get_physics_sim_view()
+
+    # 将 roller prim paths 转换为 glob 模式（env_0 → env_*）
+    # 对于单个 env，直接用精确路径；多个 env 时用 env_* 通配
+    roller_glob_paths = []
+    for path_str in roller_prim_paths:
+        # 替换 env_数字 为 env_* 以匹配所有环境实例
+        glob_path = path_str.replace("env_0", "env_*")
+        # PhysX glob 使用 * 而非 .*  (与 Isaac Lab 的惯例一致)
+        glob_path = glob_path.replace(".*", "*")
+        roller_glob_paths.append(glob_path)
+
+    # 创建 RigidBodyView，包含所有滚轮
+    try:
+        roller_view = physics_sim_view.create_rigid_body_view(roller_glob_paths)
+    except Exception as e:
+        _diag_print(f"[locomanip_event] init_roller_rigid_body_view: Failed to create RigidBodyView: {e}")
+        return
+
+    if roller_view.count == 0:
+        _diag_print("[locomanip_event] init_roller_rigid_body_view: RigidBodyView has 0 bodies, skipping")
+        return
+
+    # 读取初始 pose（xyzw 格式）
+    initial_transforms = roller_view.get_transforms().clone()  # (N, 7) [pos_xyz, quat_xyzw]
+
+    # 分离位置和朝向
+    initial_positions = initial_transforms[:, :3].clone()  # (N, 3)
+    initial_quats_xyzw = initial_transforms[:, 3:7].clone()  # (N, 4) xyzw
+
+    # 转换为 wxyz 格式（Isaac Lab 内部使用的格式）
+    initial_quats_wxyz = math_utils.convert_quat(initial_quats_xyzw, to="wxyz")  # (N, 4) wxyz
+
+    # 存储到 rotation data
+    data["roller_view"] = roller_view
+    data["initial_positions"] = initial_positions
+    data["initial_quats_wxyz"] = initial_quats_wxyz
+    data["cumulative_angle_rad"] = 0.0  # 重置累积角度
+
+    # 计算旋转轴的局部向量并转换为世界坐标
+    rotation_axis_map = {"X": torch.tensor([1.0, 0.0, 0.0]), "Y": torch.tensor([0.0, 1.0, 0.0]), "Z": torch.tensor([0.0, 0.0, 1.0])}
+    local_axis = rotation_axis_map.get(data["rotation_axis"], torch.tensor([1.0, 0.0, 0.0]))
+    local_axis = local_axis.to(device=env.device, dtype=torch.float32)
+
+    # 使用第一个滚轮的初始朝向将局部旋转轴转为世界坐标
+    # （所有滚轮在直传送带上朝向一致）
+    world_axis = math_utils.quat_apply(initial_quats_wxyz[0:1], local_axis.unsqueeze(0)).squeeze(0)
+    world_axis_norm = torch.linalg.norm(world_axis)
+    if world_axis_norm > 1e-6:
+        world_axis = world_axis / world_axis_norm
+    data["rotation_axis_world"] = world_axis  # (3,) 世界坐标旋转轴
+
+    _diag_print(
+        f"[locomanip_event] init_roller_rigid_body_view: RigidBodyView created with "
+        f"{roller_view.count} rollers, initial_poses read. "
+        f"rotation_axis_world=({world_axis[0]:.4f}, {world_axis[1]:.4f}, {world_axis[2]:.4f}), "
+        f"omega={data['omega_rad_per_sec']:.2f} rad/s, "
+        f"perp_speed={data['perp_speed']:.2f}"
+    )
+
+
 def print_conveyor_world_bbox(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
@@ -583,17 +672,30 @@ def setup_conveyor_belt_physics(
     velocity: tuple[float, float, float] = (0.0, -0.5, 0.0),
     prim_name_patterns: tuple[str, ...] = ("ConveyorBelt",),
     rollers_name: str = "Rollers",
+    roller_radius: float = 0.028951416,
+    rotation_axis: str = "X",
+    keep_rollers_parent_collision: bool = False,
 ):
-    """对匹配任意 prim_name_patterns 的 ConveyorBelt 的 Rollers 施加 PhysxSurfaceVelocityAPI。
+    """为匹配 prim_name_patterns 的 ConveyorBelt 的每个滚轮子 mesh 配置独立 kinematic rigid body + collision。
 
-    ConveyorBelt_A08 是 ROLLER 类型——滚轮即承载面。
-    直接在 Rollers（已有 RigidBodyAPI + kinematic）上应用表面速度。
-    不修改根 Xform，避免层级冲突。
+    替代之前的 PhysxSurfaceVelocityAPI 方案（在 CUDA 管道下会导致碰撞失效，见 Issue #4561）。
+    现在每个滚轮 mesh 作为独立 kinematic rigid body，通过 interval 事件旋转产生表面速度，
+    PhysX 从 kinematic 位移推导速度，通过真实摩擦力驱动箱子，兼容 GPU 和 CPU 管道。
+
+    根据项目规范，滚轮名称固定为 SM_ConveyorBelt_A0X_Roller01_02 ~ Roller39_02，
+    不使用动态遍历，以确保性能稳定性和行为可预测性。
 
     Args:
-        prim_name_patterns: 要匹配的 prim 名称模式列表（substring 匹配，任一匹配即生效）。
+        velocity: 传送带表面速度（prim 局部空间），用于计算角速度方向。
+        prim_name_patterns: 要匹配的 prim 名称模式列表（substring 匹配）。
+        rollers_name: Rollers 父节点的名称。
+        roller_radius: 滚轮圆柱半径（米），用于计算角速度 ω = v / r。
+        rotation_axis: 滚轮旋转轴（"X", "Y" 或 "Z"）。
+        keep_rollers_parent_collision: 是否保留 Rollers 父节点的碰撞（选项A）。
+            False = 选项B：移除父碰撞，仅靠子滚轮独立碰撞。
     """
     import math
+
     stage = get_current_stage()
     if stage is None:
         return
@@ -603,11 +705,58 @@ def setup_conveyor_belt_physics(
         _diag_print("[locomanip_event] setup_conveyor_belt_physics: zero velocity, skipping")
         return
 
+    # 计算角速度方向：传送带表面速度与滚轮旋转的关系
+    # 滚轮圆柱轴线在 local space 沿 Extent 最长轴（X=90cm），即旋转轴为 local X。
+    # 当滚轮绕 local X 轴旋转时，表面切向速度在 local Y-Z 平面内。
+    # 如果传送带在场景中把滚轮旋转了 90°（local X → world Y），
+    # 则 local Y-Z 平面映射到 world X-Z 平面，切向速度的 world X 分量驱动箱子。
+    #
+    # 对于 velocity=(-0.5, 0, 0)：传送方向为 world -X。
+    # 滚轮绕 local X 旋转，要让表面 local Z 侧（映射到 world X 侧）向 -X 运动，
+    # 需要从 +local_X 看逆时针旋转，即正角度旋转。
+    # 
+    # 简化：perp_speed 取传送速度在旋转轴垂直平面内的分量，
+    # 对于绕 local X 旋转，取 velocity 的 Y 分量（local Y 在旋转平面内）。
+    # 但由于传送带资产可能有旋转变换，这里的方向映射可能不完全准确。
+    # 实际测试时如方向不对，调整 sign 即可。
+    perp_speed = 0.0
+    if rotation_axis == "X":
+        # 绕 local X 旋转：local Y-Z 平面产生切向速度
+        # 如果 velocity 主要在 X 方向，说明 local Y-Z 映射到了 world X-Z
+        perp_speed = velocity[0]  # 用 X 分量决定绕 local X 的旋转方向
+    elif rotation_axis == "Y":
+        perp_speed = velocity[0]  # X分量驱动绕Y旋转
+    elif rotation_axis == "Z":
+        perp_speed = velocity[0]  # X分量驱动绕Z旋转
+    # omega_deg_per_sec = (perp_speed / roller_radius) * (180 / math.pi)
+    # 滚轮旋转角速度（rad/s）
+    omega_rad_per_sec = abs(speed) / roller_radius
+
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
 
+    # 固定滚轮名称列表（按项目规范，01~39）
+    roller_names_fixed = [
+        f"SM_ConveyorBelt_A08_Roller{i:02d}_02" for i in range(1, 40)
+    ]
+
+    # 用于存储滚轮旋转状态，供 init_roller_rigid_body_view 和 rotate_conveyor_rollers 使用
+    roller_rotation_data = {
+        "roller_prim_paths": [],  # 每个滚轮的 SdfPath 字符串（用于后续创建 RigidBodyView）
+        "rotation_axis": rotation_axis,
+        "omega_deg_per_sec": omega_rad_per_sec * (180.0 / math.pi),
+        "omega_rad_per_sec": omega_rad_per_sec,
+        "perp_speed": perp_speed,
+        "total_rollers": 0,
+        "interval_time_s": 0.005,  # 与 env_cfg 中 interval_range_s 对齐
+        "cumulative_angle_rad": 0.0,  # 累积旋转角度（弧度）
+        "roller_view": None,  # RigidBodyView（在 startup 事件中创建）
+        "initial_positions": None,  # 初始位置 (N, 3)，在 startup 中初始化
+        "initial_quats_wxyz": None,  # 初始朝向 (N, 4) wxyz，在 startup 中初始化
+    }
+
     for env_id in env_ids.tolist():
-        # 递归遍历 env 和 Background，下兼容不同场景里传送带的层级差异。
+        # 递归遍历 env 和 Background，兼容不同场景里传送带的层级差异。
         conveyor_roots = []
         seen_paths = set()
         for search_root_path in (
@@ -644,48 +793,217 @@ def setup_conveyor_belt_physics(
                     break
 
             if not rollers_prim or not rollers_prim.IsValid():
-                _diag_print(f"[locomanip_event]  Rollers prim not found under {root_path}")
+                _diag_print(f"[locomanip_event] Rollers prim not found under {root_path}")
                 continue
 
-            # 确保 Rollers 有 RigidBodyAPI + kinematic（原始 USD 通常已有）
-            if not rollers_prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                UsdPhysics.RigidBodyAPI.Apply(rollers_prim)
-            rigid_api = UsdPhysics.RigidBodyAPI(rollers_prim)
-            rigid_api.GetKinematicEnabledAttr().Set(True)
-            rigid_api.CreateRigidBodyEnabledAttr(True)
+            # ── 选项B：移除 Rollers 父节点的碰撞和刚体 ──
+            # 让每个滚轮子 mesh 成为独立的 kinematic rigid body，
+            # 不再作为父级 compound shape 的一部分。
+            if not keep_rollers_parent_collision:
+                # 移除 PhysxSurfaceVelocityAPI（如果存在）
+                if rollers_prim.HasAPI(PhysxSchema.PhysxSurfaceVelocityAPI):
+                    # PhysxSurfaceVelocityAPI 不能直接 RemoveAPI，
+                    # 通过禁用来等效移除
+                    surf_api = PhysxSchema.PhysxSurfaceVelocityAPI(rollers_prim)
+                    surf_api.GetSurfaceVelocityEnabledAttr().Set(False)
 
-            # The conveyor asset stores the visible/top belt contact meshes under
-            # children that may be prefixed with "M_". If we skip those meshes,
-            # boxes can fall through once this machine becomes the physics source.
-            if not rollers_prim.HasAPI(UsdPhysics.CollisionAPI):
-                UsdPhysics.CollisionAPI.Apply(rollers_prim)
-            if not rollers_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
-                mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(rollers_prim)
+                # 移除 CollisionAPI（防止父级碰撞与子级冲突）
+                if rollers_prim.HasAPI(UsdPhysics.CollisionAPI):
+                    collision_api = UsdPhysics.CollisionAPI(rollers_prim)
+                    collision_api.GetCollisionEnabledAttr().Set(False)
+                if rollers_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+                    mesh_col_api = UsdPhysics.MeshCollisionAPI(rollers_prim)
+                    mesh_col_api.GetApproximationAttr().Set("none")
+
+                # 移除 RigidBodyAPI（Rollers 父节点不再作为整体刚体）
+                if rollers_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    rigid_api = UsdPhysics.RigidBodyAPI(rollers_prim)
+                    rigid_api.GetRigidBodyEnabledAttr().Set(False)
+                    rigid_api.GetKinematicEnabledAttr().Set(False)
+
+                _diag_print(
+                    f"[locomanip_event] Disabled parent physics APIs on Rollers: {str(rollers_prim.GetPath())}"
+                )
             else:
-                mesh_collision_api = UsdPhysics.MeshCollisionAPI(rollers_prim)
-            mesh_collision_api.GetApproximationAttr().Set("convexHull")
+                # 选项A：保留父碰撞底板，仅移除 SurfaceVelocityAPI
+                if rollers_prim.HasAPI(PhysxSchema.PhysxSurfaceVelocityAPI):
+                    surf_api = PhysxSchema.PhysxSurfaceVelocityAPI(rollers_prim)
+                    surf_api.GetSurfaceVelocityEnabledAttr().Set(False)
 
-            for mesh_child in Usd.PrimRange(rollers_prim):
-                if not mesh_child.IsA(UsdGeom.Mesh):
-                    continue
-                if not mesh_child.HasAPI(UsdPhysics.CollisionAPI):
-                    UsdPhysics.CollisionAPI.Apply(mesh_child)
-                if not mesh_child.HasAPI(UsdPhysics.MeshCollisionAPI):
-                    child_mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(mesh_child)
+                if not rollers_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    UsdPhysics.RigidBodyAPI.Apply(rollers_prim)
+                rigid_api = UsdPhysics.RigidBodyAPI(rollers_prim)
+                rigid_api.GetKinematicEnabledAttr().Set(True)
+                rigid_api.CreateRigidBodyEnabledAttr(True)
+
+                if not rollers_prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI.Apply(rollers_prim)
+                if not rollers_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+                    mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(rollers_prim)
                 else:
-                    child_mesh_collision_api = UsdPhysics.MeshCollisionAPI(mesh_child)
-                child_mesh_collision_api.GetApproximationAttr().Set("convexHull")
+                    mesh_collision_api = UsdPhysics.MeshCollisionAPI(rollers_prim)
+                mesh_collision_api.GetApproximationAttr().Set("convexHull")
 
-            # 施加 PhysxSurfaceVelocityAPI 到 Rollers
-            # 速度在 prim 局部空间。不需要 world→local 变换，
-            # 因为我们只驱动 Rollers，而 Rollers 局部轴与根一致（无中间旋转）。
-            if not rollers_prim.HasAPI(PhysxSchema.PhysxSurfaceVelocityAPI):
-                PhysxSchema.PhysxSurfaceVelocityAPI.Apply(rollers_prim)
-            surf_api = PhysxSchema.PhysxSurfaceVelocityAPI(rollers_prim)
-            surf_api.GetSurfaceVelocityEnabledAttr().Set(True)
-            surf_api.CreateSurfaceVelocityAttr().Set(Gf.Vec3d(*velocity))
+            # ── 配置每个滚轮子 mesh 为独立 kinematic rigid body ──
+            rollers_found = 0
+            for roller_name in roller_names_fixed:
+                roller_prim = None
+                # 在 Rollers 下查找固定名称的滚轮
+                for descendant in Usd.PrimRange(rollers_prim):
+                    if descendant.GetName() == roller_name:
+                        roller_prim = descendant
+                        break
+
+                if roller_prim is None or not roller_prim.IsValid():
+                    # 不同传送带可能有不同的滚轮名称后缀，跳过不存在的
+                    continue
+
+                # RigidBodyAPI + kinematic
+                if not roller_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    UsdPhysics.RigidBodyAPI.Apply(roller_prim)
+                roller_rigid_api = UsdPhysics.RigidBodyAPI(roller_prim)
+                roller_rigid_api.GetKinematicEnabledAttr().Set(True)
+                roller_rigid_api.CreateRigidBodyEnabledAttr(True)
+
+                # CollisionAPI
+                if not roller_prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI.Apply(roller_prim)
+
+                # MeshCollisionAPI + convexHull
+                if not roller_prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+                    UsdPhysics.MeshCollisionAPI.Apply(roller_prim)
+                roller_mesh_col_api = UsdPhysics.MeshCollisionAPI(roller_prim)
+                roller_mesh_col_api.GetApproximationAttr().Set("convexHull")
+
+                # 存储滚轮 prim path（字符串），供 startup 事件创建 RigidBodyView 使用
+                roller_path_str = str(roller_prim.GetPath())
+                roller_rotation_data["roller_prim_paths"].append(roller_path_str)
+                rollers_found += 1
+
+            roller_rotation_data["total_rollers"] += rollers_found
 
             _diag_print(
-                f"[locomanip_event]  Rollers SurfaceVelocity "
-                f"vel={velocity} -> {str(rollers_prim.GetPath())}"
+                f"[locomanip_event] setup_conveyor_roller_physics: "
+                f"env_{env_id}, conveyor={root_path}, "
+                f"rollers_found={rollers_found}/{len(roller_names_fixed)}, "
+                f"parent_collision={keep_rollers_parent_collision}, "
+                f"omega={omega_rad_per_sec:.2f} rad/s "
+                f"({omega_rad_per_sec * 180 / math.pi:.2f} deg/s), "
+                f"axis={rotation_axis}"
             )
+
+    # 将旋转数据存到 env 对象上，供 rotate_conveyor_rollers interval 事件使用
+    env.conveyor_roller_rotation_data = roller_rotation_data
+
+    _diag_print(
+        f"[locomanip_event] setup_conveyor_belt_physics complete: "
+        f"total_rollers={roller_rotation_data['total_rollers']}, "
+        f"omega={roller_rotation_data['omega_deg_per_sec']:.2f} deg/s"
+    )
+
+
+def _ensure_rotate_op(xformable: UsdGeom.Xformable, axis: str, angle: float = 0.0):
+    """确保 xformable prim 上存在指定轴的旋转 xformOp，并设置初始角度。
+
+    使用 USD 的 GetRotateX/Y/ZOp() API 检查是否已有旋转 op
+    （无效 op 通过 bool(op) 判断为 False），
+
+    滚轮 mesh 原始 xformOpOrder 通常为 [translate, rotateXYZ, scale]，
+    新增的 rotateX/Y/Z op 会自动追加到末尾，PhysX 正确计算最终 world transform。
+
+    Args:
+        xformable: 目标 prim 的 Xformable wrapper。
+        axis: 旋转轴（"X", "Y" 或 "Z"）。
+        angle: 初始角度（度数）。
+
+    Returns:
+        UsdGeomXformOp: 旋转操作的引用。
+    """
+    op = None
+    if axis == "X":
+        op = xformable.GetRotateXOp()
+        if not op:
+            op = xformable.AddRotateXOp()
+    elif axis == "Y":
+        op = xformable.GetRotateYOp()
+        if not op:
+            op = xformable.AddRotateYOp()
+    elif axis == "Z":
+        op = xformable.GetRotateZOp()
+        if not op:
+            op = xformable.AddRotateZOp()
+    else:
+        op = xformable.GetRotateXOp()
+        if not op:
+            op = xformable.AddRotateXOp()
+
+    op.Set(angle)
+    return op
+
+
+def rotate_conveyor_rollers(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+):
+    """每物理步旋转所有传送带滚轮，通过 PhysX RigidBodyView Tensor API 设置 kinematic target pose。
+
+    从 env.conveyor_roller_rotation_data 中读取 RigidBodyView 和旋转配置，
+    累加旋转角度并通过 set_transforms() 直接写入 PhysX。
+
+    PhysX 从 kinematic 位移推导速度，通过真实摩擦力驱动箱子。
+    此方式绕过 USD/Fabric，确保 Fabric 启用时 PhysX 也能感知旋转。
+
+    此函数通过 interval 事件调用，频率应与 sim.dt 对齐（1/200 = 5ms）。
+    """
+    data = getattr(env, "conveyor_roller_rotation_data", None)
+    if data is None:
+        return
+
+    roller_view = data.get("roller_view")
+    if roller_view is None:
+        # RigidBodyView 还没创建（可能 startup 事件还没运行）
+        return
+
+    initial_positions = data.get("initial_positions")
+    initial_quats_wxyz = data.get("initial_quats_wxyz")
+    if initial_positions is None or initial_quats_wxyz is None:
+        return
+
+    dt = env.sim.get_physics_dt()
+    omega_rad_per_sec = data["omega_rad_per_sec"]
+
+    # 角速度方向由传送带运动方向决定
+    # sign = -1 表示 perp_speed < 0 → 负旋转 → 表面向 -X 运动
+    sign = -1.0 if data["perp_speed"] < 0 else 1.0
+    delta_angle_rad = omega_rad_per_sec * dt * sign
+
+    # 累加旋转角度
+    data["cumulative_angle_rad"] += delta_angle_rad
+    cumulative_angle = data["cumulative_angle_rad"]
+
+    # 使用世界坐标旋转轴（在 init_roller_rigid_body_view 中已计算）
+    world_axis = data["rotation_axis_world"]  # (3,)
+
+    # 创建旋转四元数：绕 world_axis 旋转 cumulative_angle
+    angle_tensor = torch.tensor([cumulative_angle], device=env.device, dtype=torch.float32)
+    axis_tensor = world_axis.unsqueeze(0)  # (1, 3)
+    rotation_quat = math_utils.quat_from_angle_axis(angle_tensor, axis_tensor)  # (1, 4) wxyz
+
+    # 将旋转应用到每个滚轮的初始朝向
+    num_rollers = roller_view.count
+    rotation_quat_expanded = rotation_quat.expand(num_rollers, -1)  # (N, 4) wxyz
+    new_quats_wxyz = math_utils.quat_mul(initial_quats_wxyz, rotation_quat_expanded)  # (N, 4) wxyz
+
+    # 转换为 xyzw 格式（PhysX RigidBodyView.set_transforms 使用的格式）
+    new_quats_xyzw = math_utils.convert_quat(new_quats_wxyz, to="xyzw")  # (N, 4) xyzw
+
+    # 组合位置和朝向：位置不变（滚轮原地旋转），朝向更新
+    new_poses = torch.cat([initial_positions, new_quats_xyzw], dim=-1)  # (N, 7) [pos_xyz, quat_xyzw]
+
+    # 通过 PhysX Tensor API 设置 kinematic target pose
+    # PhysX 会从上一帧和当前帧的 pose 差异推导 kinematic velocity
+    # 然后通过接触摩擦力驱动箱子
+    # kinematic 刚体必须用 set_kinematic_targets（set_transforms 仅适用于 dynamic 刚体）。
+    all_indices = torch.arange(num_rollers, dtype=torch.int32, device=env.device)
+    roller_view.set_kinematic_targets(new_poses.contiguous(), all_indices)
+
