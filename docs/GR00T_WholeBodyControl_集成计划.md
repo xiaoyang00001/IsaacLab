@@ -103,7 +103,41 @@
 ### 验证
 - 3 个改动文件 AST parse 全通过
 - ONNX dual-pass 已在 env_isaaclab 独立验证：encoder 3.37ms + decoder 2.55ms = 6.45ms，输出 29D 数值合理
-- **未启动 Isaac Sim Play 实测**——需要 GUI/USD nucleus 加载，建议本次直接眼测：`sonic_robot` 是否出现在 (-2.0, 1.5, 0.75) + 是否做出"非零但温和"的姿态偏移
+
+### 如何手动 Play 验证（推荐用 zero_agent）
+
+`zero_agent.py` 每帧用 zero action 调 `process_actions`，会触发 `SONICWholeBodyAction` 的 dual-pass 推理 + 关节写入，最适合验证骨架。
+
+```powershell
+# 项目根目录 d:\src\Isaac\xiaoyangIssacLab\IsaacLab\ 下执行
+.\isaaclab.bat -p scripts/environments/zero_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 --num_envs 1
+```
+
+弹出 Isaac Sim GUI 后点 viewport 左下 Play ▶（不自动开始的话）。
+
+**终端预期日志**：
+```
+[IsaacLab] [SONIC] asset=sonic_robot resolved=29/29 joints action_scale=0.25 enc_in=1762D dec_in=994D
+```
+- `resolved=29/29`：29 个关节全部在 USD 中匹配到，未 skip
+- `enc_in=1762D dec_in=994D`：ONNX 加载尺寸正确
+- 若出现 `[SONIC] skip joint '...'`：USD 关节名与 SONIC MJCF 不一致，需建 perm 映射（阶段 3 任务）
+
+**Viewport 预期现象**：
+1. 场景出现 **4 个 G1**：`robot` / `remote_robot`（IK 站立）、`walker_robot`（在 (-2.0, 0.0, 0.75)，CPG 步态）、**`sonic_robot`（在 (-2.0, 1.5, 0.75)，walker 旁边）**
+2. `sonic_robot` 摆出**固定但奇怪的姿态**（zero-fill obs → decoder 输出恒定 → 关节目标恒定）
+3. 可能**缓慢倾倒**（姿态非为站立设计，且无真实反馈观测）—— 正常现象，不是失败信号
+
+**眼测通过标准**：①日志有 `resolved=29/29` 且无 ImportError ②`sonic_robot` 出现在场景中 ③做出某种姿态（哪怕摔倒）。三项都满足 = 阶段 2 验证通过。
+
+### 常见故障排查
+
+| 报错 / 现象 | 根因 | 处理 |
+|---|---|---|
+| `ImportError: SONIC requires onnxruntime` | env_isaaclab 未激活 | `isaaclab.bat` 通常自动激活 env_isaaclab，确认是否用了正确的入口脚本 |
+| `FileNotFoundError: ...model_encoder.onnx` | `retrieve_file_path` 可能不识别纯本地 Windows 路径（它原本设计来处理 Omniverse Nucleus URL） | 把 [mdp/actions.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py) 里 `retrieve_file_path(self.cfg.encoder_path)` 直接改为 `self.cfg.encoder_path`；decoder 同理 |
+| `find_joints` 报 0 match → `[SONIC] skip joint` | USD 关节命名与 SONIC MJCF 略有差异 | 临时不影响 pipeline 验证；阶段 3 要建立完整 perm 映射 |
+| 仿真黑屏 / 卡住 | GPU/显存问题，与本任务无关 | 改 `--device cpu`（会很慢） |
 
 ### 阶段 3 必做（按优先级）
 1. **真实多帧 buffer**：维护过去 10 帧的 `base_angular_velocity` / `joint_pos` / `joint_vel` / `last_actions` / `gravity_dir`，按 observation_config.yaml 偏移写入 decoder 输入
