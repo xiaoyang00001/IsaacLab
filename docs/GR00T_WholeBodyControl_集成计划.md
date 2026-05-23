@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
 > **进度：阶段 1（环境准备）+ 阶段 2（最小骨架）✅ 完成于 2026-05-23**
-> 仓库已克隆、`gear_sonic` core 已装入 `env_isaaclab`、GEAR-SONIC ONNX + PyTorch ckpt 已下载、`SONICWholeBodyAction` 骨架已落地为场景中的第 4 个机器人 `sonic_robot`。详见下方"阶段 1 / 阶段 2 完成纪要"。
+> 仓库已克隆、`gear_sonic` core 已装入 `env_isaaclab`、GEAR-SONIC ONNX + PyTorch ckpt 已下载、`SONICWholeBodyAction` 骨架已落地为场景中的第 4 个机器人 `sonic_robot`，并通过 `sonic_verify.py --headless --max_steps 200` 实测：200 帧 dual-pass ONNX 推理 + 关节写入 + 物理 step 零错退出。详见下方"阶段 1 / 阶段 2 完成纪要"。
 
 ## 概述
 
@@ -471,7 +471,10 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
    - [x] 在 `configs/action_cfg.py` 创建 `SONICWholeBodyActionCfg`
    - [x] **偏离原意图**：未动 robot/remote_robot（紧耦合 IK+ZMQ），改为新增第 4 个机器人 `sonic_robot`
    - [x] 三个文件 AST parse 全通过
-   - [ ] *待用户手动 Play 验证*：`sonic_robot` 是否在场景中出现 + 是否做出温和姿态偏移
+   - [x] 创建 `scripts/tools/sonic_verify.py`（pick_place 在 blacklist 里，必须手动 import 触发 gym.register）
+   - [x] 修复 v3 物理驱动后 `forward_speed` 字段未清理的 2 处遗漏（env_cfg 调用方 + AutoWalkAction.__init__ print）
+   - [x] **运行时通过**：`sonic_verify.py --headless --max_steps 200` 跑完 0 错（SONIC 加载 / env 构造 / reset / 200 step loop 全过）
+   - [ ] *待 GUI 眼测*：去掉 `--headless` 看 `sonic_robot` 实际姿态表现
 
 3. **阶段 3：真实观测构造**（下一步）
    - [ ] 维护 10-frame history buffer（`base_ang_vel` / `joint_pos` / `joint_vel` / `last_actions` / `gravity_dir`）
