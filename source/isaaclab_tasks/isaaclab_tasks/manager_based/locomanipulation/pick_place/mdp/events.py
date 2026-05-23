@@ -108,6 +108,18 @@ def setup_usd_rigid_object_physics(
             ang_damping = physx_api.CreateAngularDampingAttr()
         ang_damping.Set(float(angular_damping))
 
+        # Enable per-body CCD only for dynamic (non-kinematic) bodies to prevent GPU tunnelling.
+        # Global scene CCD (physx.enable_ccd) breaks kinematic set_transforms, so we use
+        # per-body CCD here instead.
+        if not kinematic_enabled:
+            try:
+                ccd_attr = physx_api.GetCcdEnabledAttr()
+                if not ccd_attr:
+                    ccd_attr = physx_api.CreateCcdEnabledAttr()
+                ccd_attr.Set(True)
+            except Exception:
+                pass
+
         # For dynamic rigid bodies, triangle mesh collision is not supported.
         # Force mesh collision approximation on the root prim and all child mesh prims.
         mesh_collision_api = UsdPhysics.MeshCollisionAPI.Get(stage, prim.GetPath())
