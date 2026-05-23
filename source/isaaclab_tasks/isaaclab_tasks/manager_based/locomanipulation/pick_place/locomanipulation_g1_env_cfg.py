@@ -408,29 +408,35 @@ class EventsCfg:
         params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
     )
 
+    # 方案E：滚轮角速度驱动（替代 PhysxSurfaceVelocityAPI，兼容 CUDA 管道）
+    # 每个滚轮 mesh 作为独立 kinematic rigid body，interval 事件旋转产生表面速度。
+    # 注意：使用 RigidBodyView Tensor API 替代 USD xformOp，确保 Fabric 启用时 PhysX 能感知旋转。
     setup_conveyor_belt_physics = EventTerm(
         func=locomanip_mdp.setup_conveyor_belt_physics,
         mode="prestartup",
         params={
             "velocity": (-0.5, 0.0, 0.0),
             "prim_name_patterns": ("ConveyorBelt_A08_06", "ConveyorBelt_A08_07", "ConveyorBelt_A08_08"),
+            "roller_radius": 0.028951416,
+            "rotation_axis": "X",
+            "keep_rollers_parent_collision": False,
         },
     )
 
-    # 箱子改为主要依靠传送带表面速度/接触摩擦带动前进，不再定时强制写线速度。
-    # drive_test_box = EventTerm(
-    #     func=locomanip_mdp.drive_object_on_conveyor,
-    #     mode="interval",
-    #     interval_range_s=(0.05, 0.05),
-    #     params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
-    # )
+    # 在 sim.play() 之后创建 RigidBodyView，读取初始 pose
+    # 必须作为 startup 事件运行（physics_sim_view 在 sim.play() 后才可用）
+    init_roller_rigid_body_view = EventTerm(
+        func=locomanip_mdp.init_roller_rigid_body_view,
+        mode="startup",
+    )
 
-    # drive_test_box1 = EventTerm(
-    #     func=locomanip_mdp.drive_object_on_conveyor,
-    #     mode="interval",
-    #     interval_range_s=(0.05, 0.05),
-    #     params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
-    # )
+    # 每物理步旋转所有滚轮（interval 频率与 sim.dt=1/200=0.005s 对齐）
+    # 通过 RigidBodyView Tensor API 直接设置 kinematic target pose
+    rotate_conveyor_rollers = EventTerm(
+        func=locomanip_mdp.rotate_conveyor_rollers,
+        mode="interval",
+        interval_range_s=(0.005, 0.005),
+    )
 
 
 ##

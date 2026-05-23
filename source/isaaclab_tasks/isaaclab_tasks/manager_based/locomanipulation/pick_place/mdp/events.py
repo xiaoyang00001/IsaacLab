@@ -10,7 +10,6 @@ import os
 from typing import TYPE_CHECKING
 
 import torch
-from isaacsim.core.simulation_manager import SimulationManager
 from isaacsim.core.utils.stage import get_current_stage
 from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics
 
@@ -518,14 +517,11 @@ def init_roller_rigid_body_view(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
 ):
-    """在 sim.play() 之后为所有传送带滚轮创建 PhysX RigidBodyView。
+    """startup 事件：验证传送带滚轮旋转数据已就绪。
 
-    此函数必须作为 startup 事件运行（在 sim.play() 之后），因为 RigidBodyView 需要
-    physics_sim_view 在 PhysX 初始化后才能创建。
-
-    从 env.conveyor_roller_rotation_data 中读取滚轮 prim 路径，
-    创建 RigidBodyView 并读取初始 pose，存储到 rotation data 中供
-    rotate_conveyor_rollers interval 事件使用。
+    setup_conveyor_belt_physics（prestartup）已为每个滚轮添加了 rotate xformOp，
+    rotate_conveyor_rollers（interval）通过直接写 USD xformOp 旋转滚轮，
+    PhysX 从 kinematic 位置差异推导速度（CPU/GPU 均兼容，无需 Tensor API）。
     """
     data = getattr(env, "conveyor_roller_rotation_data", None)
     if data is None:
@@ -537,65 +533,11 @@ def init_roller_rigid_body_view(
         _diag_print("[locomanip_event] init_roller_rigid_body_view: no roller paths found, skipping")
         return
 
-    # 获取 physics_sim_view（仅在 sim.play() 之后可用）
-    physics_sim_view = SimulationManager.get_physics_sim_view()
-
-    # 将 roller prim paths 转换为 glob 模式（env_0 → env_*）
-    # 对于单个 env，直接用精确路径；多个 env 时用 env_* 通配
-    roller_glob_paths = []
-    for path_str in roller_prim_paths:
-        # 替换 env_数字 为 env_* 以匹配所有环境实例
-        glob_path = path_str.replace("env_0", "env_*")
-        # PhysX glob 使用 * 而非 .*  (与 Isaac Lab 的惯例一致)
-        glob_path = glob_path.replace(".*", "*")
-        roller_glob_paths.append(glob_path)
-
-    # 创建 RigidBodyView，包含所有滚轮
-    try:
-        roller_view = physics_sim_view.create_rigid_body_view(roller_glob_paths)
-    except Exception as e:
-        _diag_print(f"[locomanip_event] init_roller_rigid_body_view: Failed to create RigidBodyView: {e}")
-        return
-
-    if roller_view.count == 0:
-        _diag_print("[locomanip_event] init_roller_rigid_body_view: RigidBodyView has 0 bodies, skipping")
-        return
-
-    # 读取初始 pose（xyzw 格式）
-    initial_transforms = roller_view.get_transforms().clone()  # (N, 7) [pos_xyz, quat_xyzw]
-
-    # 分离位置和朝向
-    initial_positions = initial_transforms[:, :3].clone()  # (N, 3)
-    initial_quats_xyzw = initial_transforms[:, 3:7].clone()  # (N, 4) xyzw
-
-    # 转换为 wxyz 格式（Isaac Lab 内部使用的格式）
-    initial_quats_wxyz = math_utils.convert_quat(initial_quats_xyzw, to="wxyz")  # (N, 4) wxyz
-
-    # 存储到 rotation data
-    data["roller_view"] = roller_view
-    data["initial_positions"] = initial_positions
-    data["initial_quats_wxyz"] = initial_quats_wxyz
-    data["cumulative_angle_rad"] = 0.0  # 重置累积角度
-
-    # 计算旋转轴的局部向量并转换为世界坐标
-    rotation_axis_map = {"X": torch.tensor([1.0, 0.0, 0.0]), "Y": torch.tensor([0.0, 1.0, 0.0]), "Z": torch.tensor([0.0, 0.0, 1.0])}
-    local_axis = rotation_axis_map.get(data["rotation_axis"], torch.tensor([1.0, 0.0, 0.0]))
-    local_axis = local_axis.to(device=env.device, dtype=torch.float32)
-
-    # 使用第一个滚轮的初始朝向将局部旋转轴转为世界坐标
-    # （所有滚轮在直传送带上朝向一致）
-    world_axis = math_utils.quat_apply(initial_quats_wxyz[0:1], local_axis.unsqueeze(0)).squeeze(0)
-    world_axis_norm = torch.linalg.norm(world_axis)
-    if world_axis_norm > 1e-6:
-        world_axis = world_axis / world_axis_norm
-    data["rotation_axis_world"] = world_axis  # (3,) 世界坐标旋转轴
+    data["cumulative_angle_rad"] = 0.0
 
     _diag_print(
-        f"[locomanip_event] init_roller_rigid_body_view: RigidBodyView created with "
-        f"{roller_view.count} rollers, initial_poses read. "
-        f"rotation_axis_world=({world_axis[0]:.4f}, {world_axis[1]:.4f}, {world_axis[2]:.4f}), "
-        f"omega={data['omega_rad_per_sec']:.2f} rad/s, "
-        f"perp_speed={data['perp_speed']:.2f}"
+        f"[locomanip_event] init_roller_rigid_body_view: {data['total_rollers']} rollers ready "
+        f"(USD xformOp approach), omega={data['omega_rad_per_sec']:.2f} rad/s"
     )
 
 
@@ -875,7 +817,9 @@ def setup_conveyor_belt_physics(
                 roller_mesh_col_api = UsdPhysics.MeshCollisionAPI(roller_prim)
                 roller_mesh_col_api.GetApproximationAttr().Set("convexHull")
 
-                # 存储滚轮 prim path（字符串），供 startup 事件创建 RigidBodyView 使用
+                # 添加旋转 xformOp，供 rotate_conveyor_rollers 通过 USD 直接设置角度
+                _ensure_rotate_op(UsdGeom.Xformable(roller_prim), rotation_axis, 0.0)
+
                 roller_path_str = str(roller_prim.GetPath())
                 roller_rotation_data["roller_prim_paths"].append(roller_path_str)
                 rollers_found += 1
@@ -945,65 +889,46 @@ def rotate_conveyor_rollers(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
 ):
-    """每物理步旋转所有传送带滚轮，通过 PhysX RigidBodyView Tensor API 设置 kinematic target pose。
+    """每物理步旋转所有传送带滚轮，通过直接写 USD xformOp 设置 kinematic 目标姿态。
 
-    从 env.conveyor_roller_rotation_data 中读取 RigidBodyView 和旋转配置，
-    累加旋转角度并通过 set_transforms() 直接写入 PhysX。
-
-    PhysX 从 kinematic 位移推导速度，通过真实摩擦力驱动箱子。
-    此方式绕过 USD/Fabric，确保 Fabric 启用时 PhysX 也能感知旋转。
-
-    此函数通过 interval 事件调用，频率应与 sim.dt 对齐（1/200 = 5ms）。
+    PhysX 从 kinematic 位移推导速度，通过接触摩擦力驱动箱子。
+    此方案兼容 GPU（--device cuda:0）和 CPU 管道：USD xformOp 写入经 Fabric 同步
+    后被 PhysX 读取为 kinematic target，无需 Tensor API（GPU 管道下 Tensor API 不
+    支持 set_kinematic_targets）。
     """
     data = getattr(env, "conveyor_roller_rotation_data", None)
     if data is None:
         return
 
-    roller_view = data.get("roller_view")
-    if roller_view is None:
-        # RigidBodyView 还没创建（可能 startup 事件还没运行）
+    roller_prim_paths = data.get("roller_prim_paths", [])
+    if not roller_prim_paths:
         return
 
-    initial_positions = data.get("initial_positions")
-    initial_quats_wxyz = data.get("initial_quats_wxyz")
-    if initial_positions is None or initial_quats_wxyz is None:
+    stage = get_current_stage()
+    if stage is None:
         return
 
     dt = env.sim.get_physics_dt()
     omega_rad_per_sec = data["omega_rad_per_sec"]
-
-    # 角速度方向由传送带运动方向决定
-    # sign = -1 表示 perp_speed < 0 → 负旋转 → 表面向 -X 运动
     sign = -1.0 if data["perp_speed"] < 0 else 1.0
     delta_angle_rad = omega_rad_per_sec * dt * sign
 
-    # 累加旋转角度
     data["cumulative_angle_rad"] += delta_angle_rad
-    cumulative_angle = data["cumulative_angle_rad"]
+    cumulative_angle_deg = math.degrees(data["cumulative_angle_rad"])
 
-    # 使用世界坐标旋转轴（在 init_roller_rigid_body_view 中已计算）
-    world_axis = data["rotation_axis_world"]  # (3,)
+    rotation_axis = data["rotation_axis"]
 
-    # 创建旋转四元数：绕 world_axis 旋转 cumulative_angle
-    angle_tensor = torch.tensor([cumulative_angle], device=env.device, dtype=torch.float32)
-    axis_tensor = world_axis.unsqueeze(0)  # (1, 3)
-    rotation_quat = math_utils.quat_from_angle_axis(angle_tensor, axis_tensor)  # (1, 4) wxyz
-
-    # 将旋转应用到每个滚轮的初始朝向
-    num_rollers = roller_view.count
-    rotation_quat_expanded = rotation_quat.expand(num_rollers, -1)  # (N, 4) wxyz
-    new_quats_wxyz = math_utils.quat_mul(initial_quats_wxyz, rotation_quat_expanded)  # (N, 4) wxyz
-
-    # 转换为 xyzw 格式（PhysX RigidBodyView.set_transforms 使用的格式）
-    new_quats_xyzw = math_utils.convert_quat(new_quats_wxyz, to="xyzw")  # (N, 4) xyzw
-
-    # 组合位置和朝向：位置不变（滚轮原地旋转），朝向更新
-    new_poses = torch.cat([initial_positions, new_quats_xyzw], dim=-1)  # (N, 7) [pos_xyz, quat_xyzw]
-
-    # 通过 PhysX Tensor API 设置 kinematic target pose
-    # PhysX 会从上一帧和当前帧的 pose 差异推导 kinematic velocity
-    # 然后通过接触摩擦力驱动箱子
-    # kinematic 刚体必须用 set_kinematic_targets（set_transforms 仅适用于 dynamic 刚体）。
-    all_indices = torch.arange(num_rollers, dtype=torch.int32, device=env.device)
-    roller_view.set_kinematic_targets(new_poses.contiguous(), all_indices)
+    for path_str in roller_prim_paths:
+        prim = stage.GetPrimAtPath(path_str)
+        if not (prim and prim.IsValid()):
+            continue
+        xformable = UsdGeom.Xformable(prim)
+        if rotation_axis == "X":
+            op = xformable.GetRotateXOp()
+        elif rotation_axis == "Y":
+            op = xformable.GetRotateYOp()
+        else:
+            op = xformable.GetRotateZOp()
+        if op:
+            op.Set(cumulative_angle_deg)
 
