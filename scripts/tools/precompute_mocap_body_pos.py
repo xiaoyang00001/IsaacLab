@@ -102,23 +102,38 @@ def _process_pkl(pkl_path: Path, hb, sonic_idx: list[int]) -> np.ndarray:
         with torch.no_grad():
             fk_res = hb.fk_batch(pose, trans, fps=fps, interpolate_data=False)
 
-        # fk_batch return: EasyDict with global_translation / global_rotation / ...
-        # 形状 (B, T, num_bodies, 3)
+        # fk_batch return: EasyDict with global_translation + global_rotation_mat
+        # body_pos in pelvis local frame = R_pelvis_world.T @ (body_world - pelvis_world)
+        # 必须同时去 root translation **和** root rotation，否则 walking 时 14 body 残留
+        # world frame 旋转，对 SONIC 是 OOD（用户阶段 3.4 GUI 实测：scale=0.05 仍摔倒）。
         if hasattr(fk_res, "global_translation"):
-            wbody = fk_res.global_translation  # (1, T, N, 3)
+            wbody_t = fk_res.global_translation  # (1, T, N, 3)
+            wbody_R = fk_res.global_rotation_mat  # (1, T, N, 3, 3)
         elif hasattr(fk_res, "global_translation_extend"):
-            wbody = fk_res.global_translation_extend
+            wbody_t = fk_res.global_translation_extend
+            wbody_R = fk_res.global_rotation_mat_extend
         else:
             raise RuntimeError(f"fk_batch return missing global_translation, keys={list(fk_res.keys())}")
 
-        wbody = wbody.squeeze(0).cpu().numpy()  # (T, N, 3)
-        body14 = wbody[:, sonic_idx, :]  # (T, 14, 3)
-        pelvis = body14[:, 0:1, :]  # (T, 1, 3)
-        rel = body14 - pelvis  # (T, 14, 3) in pelvis frame (translation only)
+        wbody_t = wbody_t.squeeze(0).cpu().numpy()  # (T, N, 3)
+        wbody_R = wbody_R.squeeze(0).cpu().numpy()  # (T, N, 3, 3)
 
-        absmax = float(np.abs(rel).max())
-        print(f"  [{name}] T={T} fps={fps} pelvis-frame body_pos absmax={absmax:.4f}")
-        out_per_motion.append(rel.astype(np.float32))
+        body14_t = wbody_t[:, sonic_idx, :]  # (T, 14, 3) world translation
+        pelvis_t = body14_t[:, 0:1, :]  # (T, 1, 3)
+        pelvis_R = wbody_R[:, sonic_idx[0], :, :]  # (T, 3, 3) pelvis world rotation
+
+        rel_w = body14_t - pelvis_t  # (T, 14, 3) world frame, root translation removed
+        # rotate into pelvis local: rel_b = R_p^T @ rel_w
+        pelvis_R_T = np.transpose(pelvis_R, (0, 2, 1))  # (T, 3, 3)
+        rel_b = np.einsum("tij,tnj->tni", pelvis_R_T, rel_w)  # (T, 14, 3) pelvis local frame
+
+        absmax_w = float(np.abs(rel_w).max())
+        absmax_b = float(np.abs(rel_b).max())
+        print(
+            f"  [{name}] T={T} fps={fps} "
+            f"world-rel absmax={absmax_w:.4f} → pelvis-local absmax={absmax_b:.4f}"
+        )
+        out_per_motion.append(rel_b.astype(np.float32))
 
     return out_per_motion[0] if len(out_per_motion) == 1 else np.concatenate(out_per_motion, axis=0)
 
