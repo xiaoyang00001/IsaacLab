@@ -738,12 +738,29 @@ class SONICWholeBodyAction(ActionTerm):
         body_flat = body_pos_b.flatten().cpu().numpy()  # (42,)
         enc[0, 1:421] = np.repeat(body_flat, 10)  # dim-major
 
-        # offset 431:491 = motion_anchor_ori_b_mf_nonflat (10 × 6D rotation diff)
-        # self-reference: ori diff = identity → 6D = rotation matrix 前两列 flatten = [1,0,0,0,1,0]
-        identity_6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-        enc[0, 431:491] = np.repeat(identity_6d, 10)  # dim-major
+        # offset 431:491 = motion_anchor_ori_b_mf_nonflat (10 × 6D rotation diff, dim-major)
+        if self._mocap_root_rot_wxyz is not None:
+            # mocap 时变：取未来 10 帧（step=5）的 root_rot，与 robot identity 算 diff → 6D
+            n = self._mocap_num_frames
+            indices = (self._mocap_frame + torch.arange(10, device=self.device) * self._mocap_step) % n
+            ref_quat = self._mocap_root_rot_wxyz[indices]  # (10, 4) wxyz
+            # robot quat = identity (fix_root_link=True)，所以 diff = ref_quat
+            mat = matrix_from_quat(ref_quat)  # (10, 3, 3)
+            ori_6d = mat[..., :2].reshape(10, 6)  # (10, 6) row-major: [m00,m01,m10,m11,m20,m21]
+            # dim-major flatten: (10, 6) → (6, 10) → 1D
+            enc[0, 431:491] = ori_6d.t().contiguous().flatten().cpu().numpy()
+        else:
+            # 无 mocap：fallback 到 identity row-major
+            identity_6d = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+            enc[0, 431:491] = np.repeat(identity_6d, 10)
 
         return enc
+
+    def _advance_mocap(self):
+        """每个 env step 推进 mocap 帧（每 step 推进 1 帧 → 加大时变信号）。"""
+        if self._mocap_root_rot_wxyz is None:
+            return
+        self._mocap_frame = (self._mocap_frame + 1) % self._mocap_num_frames
 
     def _run_sonic(self) -> torch.Tensor:
         """Encoder self-reference g1 mode (阶段 3.2 D1), decoder 用真实 10-frame history。"""
