@@ -603,9 +603,19 @@ class SONICWholeBodyAction(ActionTerm):
         self._mocap_root_rot_wxyz = torch.from_numpy(root_rot_wxyz).to(self.device).float()
         self._mocap_num_frames = self._mocap_root_rot_wxyz.shape[0]
         self._mocap_fps = float(motion.get("fps", 30))
-        # _10frame_step5 = 10 帧、step=5（间隔 5 mocap 帧 ≈ 0.17s）
-        self._mocap_step = 5
+        # 训练 (sonic_release/config.yaml commands.motion):
+        #   target_fps=50, dt_future_ref_frames=0.1s, num_future_frames=10
+        # → 取未来 10 帧、相邻帧间隔 0.1s（在 50Hz 训练时 = 5 sim steps）
+        # 我们 mocap PKL 是 30fps（sample_data，没过 motion_lib target_fps=50 重采样），
+        # 所以 0.1s 间隔对应 mocap 帧数 = round(0.1 × 30) = 3，而非原硬编码的 5。
+        # 错用 5 会导致 dt_future=0.167s（67% 偏差），future ref 跨度 1.67s 而非训练的 1.0s。
+        self._mocap_step = max(1, round(0.1 * self._mocap_fps))
+        # 每 sim step（50Hz 默认）推进的 mocap 帧数 = mocap_fps / sim_fps
+        # 错用 1.0 会让 mocap 播放 1.67× 慢（30fps mocap 当 50fps 播 → robot 跟不上速度）
+        self._sim_fps = 50.0
+        self._mocap_advance_per_step = self._mocap_fps / self._sim_fps
         self._mocap_frame = 0
+        self._mocap_frame_f = 0.0
 
         # 14 body in pelvis frame：优先用 F4 预算的 .npy（gear_sonic Humanoid_Batch FK 输出），
         # 否则 fallback SMPL 24-joint 近似，最后 fallback self-ref。
@@ -809,10 +819,15 @@ class SONICWholeBodyAction(ActionTerm):
         return enc
 
     def _advance_mocap(self):
-        """每个 env step 推进 mocap 帧（每 step 推进 1 帧 → 加大时变信号）。"""
+        """每个 sim step 推进 mocap_fps/sim_fps 帧，使 mocap 真实速度与 sim 时钟同步。
+
+        例：mocap 30fps + sim 50Hz → 每 step 推 0.6 帧 → 50 个 sim step 推 30 mocap 帧 = 0.6s
+        mocap = 0.6s 真实时间，正确匹配。错用 1 frame/step 会让 mocap 1.67× 慢播。
+        """
         if self._mocap_root_rot_wxyz is None:
             return
-        self._mocap_frame = (self._mocap_frame + 1) % self._mocap_num_frames
+        self._mocap_frame_f += self._mocap_advance_per_step
+        self._mocap_frame = int(self._mocap_frame_f) % self._mocap_num_frames
 
     def _run_sonic(self) -> torch.Tensor:
         """Encoder self-reference g1 mode (阶段 3.2 D1), decoder 用真实 10-frame history。"""
@@ -863,6 +878,10 @@ class SONICWholeBodyAction(ActionTerm):
             self._hist_last_actions.zero_()
             self._hist_gravity_dir.zero_()
             self._hist_gravity_dir[:, :, 2] = -1.0
+            # 重置 mocap 帧指针，让动作从 walking 第 0 帧重新开始
+            if getattr(self, "_mocap_root_rot_wxyz", None) is not None:
+                self._mocap_frame = 0
+                self._mocap_frame_f = 0.0
         else:
             self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
             self._last_action[env_ids] = 0.0
