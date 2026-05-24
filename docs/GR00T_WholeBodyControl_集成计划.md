@@ -585,11 +585,40 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      这是 **SONIC 训练分布外**（训练时机器人在跟踪 mocap 动作）。
      模型看到"encoder token 说追踪 self-ref + history 说机器人完全僵死"→ 解读为异常 → garbage。
 
-     **下一步路径选择**（2026-05-24，待用户决定）：
-     - **E1. 物理解锁**：解 fix_root_link 让机器人有真实物理 history（base_ang_vel/joint_vel 非零），看是否回到训练分布。风险：可能仍立刻摔倒
-     - **E2. 缓冲 garbage**：action_scale 调小到 0.1~0.2，让 absmax=12 也只产生 1.2~2.4 rad 偏移
-     - **E3. 跳到 3.3 接真实 mocap**：从 sample_data 加载 walking mocap 帧（不再用 self-ref），符合 SONIC 训练范式
-     - **E4. 更深 standalone 诊断**：在 probe 里模拟真实 history（G1 default joint pos × 10 帧 + gravity），复现 absmax=12，定位是 encoder 哪个字段引发的
+     **E4 standalone history 模拟**（2026-05-24，复现失败 = 反向有效结论）：
+
+     扩展 [scripts/tools/sonic_encoder_layout_probe.py](../scripts/tools/sonic_encoder_layout_probe.py) 加 `build_decoder_history()` 模拟真实静止 history（G1 default pose 静止 + gravity[0,0,-1]）：
+
+     | 测试 | encoder | history | absmax |
+     |---|---|---|---|
+     | zero everything | zero | zero | 1.92 |
+     | zero + static history (joint_pos absolute) | zero | static abs | **2.23** |
+     | zero + static history (joint_pos_rel=0) | zero | static rel | **2.15** |
+     | self-ref + static history (joint_pos absolute) | self-ref | static abs | **2.69** |
+     | self-ref + static history (joint_pos_rel=0) | self-ref | static rel | **2.62** |
+     | **sonic_verify 实际跑** | self-ref | **真实** | **12~22** |
+
+     **结论**：standalone 无法复现 garbage。说明问题是 **反馈循环**：
+     - 第 0 帧 standalone-level absmax=2.6 → action_scale=1.0 × 2.6 = 2.6 rad 偏移
+     - 写关节 → 关节扭曲到极限 (3.0+) → history 进入 OOD 极端 pose
+     - 第 1 帧 SONIC 看到 OOD history → 训练分布外 → garbage 变大
+     - 正反馈循环放大到 absmax=12+
+
+     **额外发现 joint_pos_rel bug**：sonic_release/config.yaml line 458 用 `joint_pos_rel`（相对 default），
+     我代码传**绝对 joint_pos**。standalone 显示影响较小（2.23 vs 2.15），但应修复对齐训练。
+
+     **更深层根因**：**self-reference 假设本身错**。SONIC 训练时 reference = mocap 帧（与 robot 略不同），
+     robot 在追踪。让 reference=robot 自己是训练分布外，必须接真实 mocap (E3)。
+
+     **E4 后立即修复**（2026-05-24，已落地）：
+     - `_push_history()` 改用 `joint_pos - default` 传 joint_pos_rel
+     - `_init_history()` / `reset()` 把 `_hist_joint_pos` 初始化从 default → zero
+     - `action_scale: 1.0 → 0.2` 缓冲 self-ref 反馈循环
+     - 待验证：absmax 应被压制（2.6 × 0.2 = 0.52 rad），但 self-ref 仍是 OOD 假设，最终必须接 mocap
+
+     **下一步路径**：
+     - **优先验证修复**：跑 sonic_verify，看 absmax 是否被压制 + GUI 是否减弱关节扭曲
+     - **E3 接 mocap**（紧接其后）：`python download_from_hf.py --sample`（4MB 含 walking 序列），加载真实 mocap 帧替代 self-ref，回归 SONIC 训练范式
 
      **A 路径调研进展（D1 部分）**：
      - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）

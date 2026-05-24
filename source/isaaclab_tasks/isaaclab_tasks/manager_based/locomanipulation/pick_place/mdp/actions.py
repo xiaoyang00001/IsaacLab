@@ -545,9 +545,10 @@ class SONICWholeBodyAction(ActionTerm):
         N, J = self.num_envs, self.cfg.sonic_action_dim
         H = self.HISTORY_LEN
         dev = self.device
-        # joint_pos 用 default 初始化，gravity_dir 用 (0, 0, -1)，其余清零
+        # 注意：SONIC 训练用 joint_pos_rel = joint_pos - default → 静止时 = 0
+        # 之前用绝对 default joint pos 初始化是 bug，与训练对齐应当全 zero
         self._hist_base_ang_vel = torch.zeros(N, H, 3, device=dev)
-        self._hist_joint_pos = self._default_joint_pos.unsqueeze(1).expand(N, H, J).clone()
+        self._hist_joint_pos = torch.zeros(N, H, J, device=dev)
         self._hist_joint_vel = torch.zeros(N, H, J, device=dev)
         self._hist_last_actions = torch.zeros(N, H, J, device=dev)
         self._hist_gravity_dir = torch.zeros(N, H, 3, device=dev)
@@ -623,7 +624,9 @@ class SONICWholeBodyAction(ActionTerm):
     def _push_history(self):
         """FIFO 推入当前观测，最新帧在 [-1] 位置。所有按 SONIC 关节顺序取。"""
         ang_vel = self._asset.data.root_ang_vel_b  # (N, 3) body frame IMU
-        jp = self._asset.data.joint_pos[:, self._joint_ids]  # (N, 29)
+        # SONIC 训练用 joint_pos_rel = 当前 - default（与 sonic_release/config.yaml 一致）
+        jp_abs = self._asset.data.joint_pos[:, self._joint_ids]  # (N, 29) absolute
+        jp = jp_abs - self._default_joint_pos  # (N, 29) relative
         jv = self._asset.data.joint_vel[:, self._joint_ids]  # (N, 29)
         gravity = self._asset.data.projected_gravity_b  # (N, 3) 重力投影到 body frame
 
@@ -747,9 +750,9 @@ class SONICWholeBodyAction(ActionTerm):
         if env_ids is None:
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_action.zero_()
-            # history 重置：joint_pos 回到 default，其余清零，gravity 回 -z
+            # joint_pos history 是 relative（= 0 表示在 default），其余清零，gravity 回 -z
             self._hist_base_ang_vel.zero_()
-            self._hist_joint_pos[:] = self._default_joint_pos.unsqueeze(1)
+            self._hist_joint_pos.zero_()
             self._hist_joint_vel.zero_()
             self._hist_last_actions.zero_()
             self._hist_gravity_dir.zero_()
@@ -758,7 +761,7 @@ class SONICWholeBodyAction(ActionTerm):
             self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
             self._last_action[env_ids] = 0.0
             self._hist_base_ang_vel[env_ids] = 0.0
-            self._hist_joint_pos[env_ids] = self._default_joint_pos[env_ids].unsqueeze(1)
+            self._hist_joint_pos[env_ids] = 0.0
             self._hist_joint_vel[env_ids] = 0.0
             self._hist_last_actions[env_ids] = 0.0
             self._hist_gravity_dir[env_ids] = 0.0

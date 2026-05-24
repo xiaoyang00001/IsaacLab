@@ -287,13 +287,15 @@ class ActionsCfg:
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
     # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理
-    # 阶段 3.1（真实 decoder obs + encoder zero-fill），action_scale=1.0 回归 SONIC 训练默认
+    # 阶段 3.2 D1 self-ref + joint_pos_rel 修复后；
+    # action_scale=0.2 缓冲 self-ref 反馈循环（standalone 显示 self-ref 是 OOD，反馈放大 absmax → 12+）。
+    # 阶段 3.3 接真实 mocap 替代 self-ref 后再调回 1.0。
     sonic_wholebody = SONICWholeBodyActionCfg(
         asset_name="sonic_robot",
         encoder_path=SONIC_ENCODER_PATH,
         decoder_path=SONIC_DECODER_PATH,
         joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-        action_scale=1.0,
+        action_scale=0.2,
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）

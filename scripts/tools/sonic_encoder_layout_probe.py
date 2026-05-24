@@ -62,9 +62,35 @@ def main():
     id_col = np.array([1, 0, 0, 0, 1, 0], dtype=np.float32)  # rotation matrix first-2-cols, col-major
     id_row = np.array([1, 0, 0, 1, 0, 0], dtype=np.float32)  # row-major flatten
 
-    def run(label, enc_input):
+    # ── G1 default joint pos (按 SONIC_G1_29DOF_JOINT_ORDER 顺序) ────
+    default_jp = np.zeros(29, dtype=np.float32)
+    default_jp[0] = -0.10  # lhp
+    default_jp[3] = 0.30   # lknee
+    default_jp[4] = -0.20  # lap
+    default_jp[6] = -0.10  # rhp
+    default_jp[9] = 0.30   # rknee
+    default_jp[10] = -0.20  # rap
+
+    def build_decoder_history(joint_pos_rel=None, gravity_b=None):
+        """构造 decoder 994D 输入，按 dim-major 拼。"""
+        dec = np.zeros((1, 994), dtype=np.float32)
+        # offset 64:94 = his_base_ang_vel × 10 (zero static)
+        # offset 94:384 = his_joint_pos 29 × 10 (dim-major)
+        if joint_pos_rel is not None:
+            dec[0, 94:384] = np.repeat(joint_pos_rel, 10)
+        # offset 384:674 = his_joint_vel × 10 (zero static)
+        # offset 674:964 = his_last_actions × 10 (zero)
+        # offset 964:994 = his_gravity_dir × 10 (dim-major)
+        if gravity_b is not None:
+            dec[0, 964:994] = np.repeat(gravity_b, 10)
+        return dec
+
+    def run(label, enc_input, dec_history=None):
         tokens = enc.run([enc_out_name], {enc_in_name: enc_input})[0]
-        dec_in = np.zeros((1, 994), dtype=np.float32)
+        if dec_history is None:
+            dec_in = np.zeros((1, 994), dtype=np.float32)
+        else:
+            dec_in = dec_history.copy()
         dec_in[:, :64] = tokens
         action = dec.run([dec_out_name], {dec_in_name: dec_in})[0][0]
         print(fmt_row(label, tokens, action))
@@ -117,6 +143,39 @@ def main():
         e = e0.copy()
         e[0, off : off + 420] = np.repeat(body_flat, 10)
         run(f"body_pos dim-major at offset {off} ({label})", e)
+
+    print()
+    print("=" * 130)
+    print("E4 诊断: 真实 decoder history (静止 default pose) 是否复现 absmax=12 garbage")
+    print("=" * 130)
+
+    # 静止机器人在 default pose 时的真实 history:
+    # - joint_vel = 0, base_ang_vel = 0 (静止)
+    # - gravity_b = [0, 0, -1] (机器人直立)
+    # - joint_pos: 当前代码传 ABSOLUTE → default_jp; 训练用 joint_pos_rel → 应该是 0
+    gravity_b_static = np.array([0, 0, -1], dtype=np.float32)
+    hist_abs = build_decoder_history(joint_pos_rel=default_jp, gravity_b=gravity_b_static)
+    hist_rel = build_decoder_history(joint_pos_rel=np.zeros(29, dtype=np.float32), gravity_b=gravity_b_static)
+
+    # 测试：(encoder, decoder history) 4 种组合
+    e_zero = np.zeros((1, 1762), dtype=np.float32)
+    e_ref = e_zero.copy()
+    e_ref[0, 1:421] = np.repeat(body_flat, 10)
+    e_ref[0, 431:491] = np.repeat(id_row, 10)
+
+    print("\n[A] encoder zero + static history (模拟 sonic_verify 阶段 3.1 dim-major baseline):")
+    run("  joint_pos=absolute (current code BUG?)", e_zero, hist_abs)
+    run("  joint_pos=relative=0 (correct)         ", e_zero, hist_rel)
+
+    print("\n[B] encoder self-ref + static history (模拟当前 D1 v2 实际跑的):")
+    run("  joint_pos=absolute (current code BUG?)", e_ref, hist_abs)
+    run("  joint_pos=relative=0 (correct)         ", e_ref, hist_rel)
+
+    print("\n[C] sanity: zero everything")
+    run("  zero encoder + zero history (baseline) ", e_zero, None)
+
+    print()
+    print("如果 [A] absolute 的 absmax >> relative → 复现了 sonic_verify 里的 garbage，joint_pos_rel 是关键修复点")
 
 
 if __name__ == "__main__":
