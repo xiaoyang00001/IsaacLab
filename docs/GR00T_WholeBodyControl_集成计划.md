@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
-> **进度：阶段 1（环境）+ 阶段 2（骨架）+ 阶段 3.1（真实 decoder 观测）+ 阶段 3.2（encoder 真实布局）+ 阶段 3.3（mocap anchor_ori + 物理验证）+ 阶段 3.4 F4（body_pos FK 落地）✅ 集成通过于 2026-05-24**
-> 用 `gear_sonic.Humanoid_Batch.fk_batch()` 给 mocap 预算 1202 帧 14 body in pelvis frame（197 KB .npy 缓存），headless 集成日志确认 `body_pos=F4 FK npy (absmax=0.753)` 已读。**action absmax 7.69（vs self-ref 1.65~3.02），数值变大符合"追踪 walking 目标"预期，待 GUI 视觉验证**。详见下方"阶段 3.4 F4 落地"。
+> **进度：阶段 1+2+3.1+3.2+3.3+3.4(F4) 集成通过；GUI 视觉验证显示反馈循环回潮（2026-05-24）**
+> F4 落地：用 `gear_sonic.Humanoid_Batch.fk_batch()` 预算 1202 帧 14 body in pelvis frame（197 KB .npy）。GUI 实测 action absmax 在 step 50→300 内从 7.69 飙到 **18.58 峰值**，joint_pos absmax 持续撞 1.97（≈G1 关节限位 2.0），用户眼测三种现象都有（部分 walking + 部分抽搐 + 部分摔倒）= **反馈循环放大占主导**。已修 `action_scale: 0.2 → 0.05`（峰值 ×0.05 = 0.93 rad 单帧偏移，避开限位）。详见"阶段 3.4 F4 落地"。
 
 ## 概述
 
@@ -847,22 +847,45 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
    body indices resolved: 14/14
    step=50  action mean=-2.2038 absmax=7.6925 std=2.7820 | joint_pos absmax=1.6144
    ```
-5. **GUI 视觉验证** — 待用户跑
+5. **GUI 视觉验证 + 反馈循环回潮**（2026-05-24 实测）
 
-### F4 落地后数值变化
+### F4 落地后数值变化 + GUI 实测
 
-| 状态 | action absmax | action std | joint_pos absmax | self_ref_body_pos absmax |
+| 状态 | action absmax | action std | joint_pos absmax |
+|---|---|---|---|
+| 阶段 3.3 self-ref body_pos | 1.65~3.02 | 0.58~0.83 | 1.34 |
+| 阶段 3.4 F4 headless step 50 | 7.69 | 2.78 | 1.61 |
+| **阶段 3.4 F4 GUI step 300 峰值** | **18.58** | **5.46** | **1.97** |
+
+**GUI 全 step 演化**（30 秒，500 帧）：
+
+| step | action absmax | std | joint_pos absmax | 趋势 |
 |---|---|---|---|---|
-| 阶段 3.3 self-ref body_pos | 1.65~3.02 | 0.58~0.83 | 1.34 | 0.6617 |
-| **阶段 3.4 F4 mocap body_pos** | **7.69** | **2.78** | **1.61** | 0.6617（独立字段） |
+| 50 | 7.69 | 2.78 | 1.61 | — |
+| 100 | 10.08 | 3.04 | 1.97 | ↑ 撞限位 |
+| 150 | 10.92 | 3.55 | 1.86 | ↑ |
+| 200 | 10.06 | 3.54 | 1.96 | 停顿 |
+| 250 | 12.72 | 4.85 | 2.13 | ↑↑ |
+| **300** | **18.58** | **5.46** | 1.97 | **峰值** |
+| 350 | 12.41 | 3.49 | 1.97 | 抖动 |
+| 400 | 12.38 | 4.32 | 1.97 | 抖动 |
+| 450 | 10.48 | 3.98 | 1.61 | 抖动 |
 
-**数值变大是预期方向**：self-ref 给的是 robot 当前静态姿态（≈ "我在哪里"），mocap 给的是未来 10 帧 walking 目标姿态（≈ "我应该在哪里"），SONIC 输出 action 来跨越这个 gap，幅度自然增大。但 **7.69 偏高**——下一步根据 GUI 现象分支处理：
+**用户眼测：三种现象都有**（部分像 walking 腿摆动 + 部分关节抽搐 + 部分立刻摔倒）。
 
-| GUI 现象 | 含义 | 处理 |
-|---|---|---|
-| 出现像 walking 的腿部摆动（即使最后摔） | F4 真有用，SONIC 在追踪 mocap | action_scale 0.2 → 0.1，再加 mocap velocity 字段 |
-| 关节抽搐 / 大幅扭曲 | action 过大触发反馈循环（self-ref 反馈 + mocap 跟踪幅度） | 立刻 action_scale 0.05~0.1 |
-| 立刻摔倒、动作不像 walking | mocap 信号未被 SONIC 转成可用 action | 复查 FK pelvis frame 定义（可能需要去掉 root rotation 影响） |
+**诊断（反馈循环占主导）**：
+- joint_pos absmax 持续黏在 1.97 ≈ G1 大多数关节限位 **2.0**，意味着关节被打到极限
+- 极端姿态进 10-frame history → decoder 看到 OOD 输入 → action absmax 持续放大
+- 这与阶段 3.2 D1 v2 的 garbage 状态同质（当时也是 absmax 12+），只是现在 mocap 信号比 self-ref 提供了部分有效追踪（→ 三种现象并存）
+
+**已修**（[locomanipulation_g1_env_cfg.py:298](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py#L298)）：
+- `action_scale: 0.2 → 0.05`
+- 峰值偏移：18.58 × 0.05 = **0.93 rad / 单帧**，避开关节限位
+- 预期 joint_pos absmax 跌出 1.97 → history 回归合理 → action absmax 回落
+
+**待 GUI 再验**：
+- 顺：absmax 跌到 3~5、joint_pos 跌到 1.0~1.3、walking 动作变明显 → 进 walking 微调阶段
+- 不顺（仍涨）：scale 不是真根因，可能是 FK pelvis frame 定义错——当前实现只减了 pelvis translation，没剔除 root rotation 的影响。SONIC 训练时 14 body 应该在 **完全去 root pose 后**的 pelvis 坐标系，需要补 quat inverse 旋转
 
 ### 当前空间约束（2026-05-24 实测）
 
