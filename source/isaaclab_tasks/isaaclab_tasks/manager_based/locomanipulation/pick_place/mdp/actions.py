@@ -693,14 +693,16 @@ class SONICWholeBodyAction(ActionTerm):
 
         # offset 1:421 = command_multi_future_nonflat (10 frames × 14 bodies × 3)
         # self-reference: motion target = 当前 body pose，10 帧重复
+        # dim-major layout: 每维的 10 帧连续 → [d0×10, d1×10, ..., d41×10]
+        # 用 np.repeat 而非 np.tile（tile=frame-major、repeat=dim-major）
         body_pos_b = self._self_ref_body_pos_b[env_idx]  # (14, 3)
         body_flat = body_pos_b.flatten().cpu().numpy()  # (42,)
-        enc[0, 1:421] = np.tile(body_flat, 10)  # frame-major: f0_b0_xyz..f0_b13_xyz, f1_...
+        enc[0, 1:421] = np.repeat(body_flat, 10)  # dim-major
 
         # offset 431:491 = motion_anchor_ori_b_mf_nonflat (10 × 6D rotation diff)
         # self-reference: ori diff = identity → 6D = rotation matrix 前两列 flatten = [1,0,0,0,1,0]
         identity_6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-        enc[0, 431:491] = np.tile(identity_6d, 10)
+        enc[0, 431:491] = np.repeat(identity_6d, 10)  # dim-major
 
         return enc
 

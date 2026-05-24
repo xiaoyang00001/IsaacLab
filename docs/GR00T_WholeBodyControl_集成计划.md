@@ -553,7 +553,18 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      - `_build_encoder_input(env_idx)`：显式 `enc[0,0]=0.0` 选 g1 mode；填 self-reference body_pos（14 个 SONIC body 在 pelvis 坐标系下的位置，10 帧重复）；motion_anchor_ori 填 identity 6D（reference orientation == robot orientation）
      - `_init_sonic_body_indices()`：用 `find_bodies` 解析 14 个 SONIC body link 到 USD 索引
      - `_compute_self_ref_body_pos_b()`：用 `body_link_pos_w - root_link_pos_w` + `quat_apply_inverse(root_quat_w, ...)` 转 body frame
-     - 待 GUI 验证：sonic_robot 在 fix_root_link=True 悬空状态下 absmax 应仍合理（< 3）+ 数值分布与 zero-fill 不同（因为 encoder 现在拿到真实 g1 motion target）
+
+     **D1 第一次验证（frame-major repeat）失败**（2026-05-24）：
+     - `[SONIC INIT] body indices resolved: 14/14` ✅ — 14 个 body 全部解析（ids=`[0, 4, 10, 18, 5, 11, 19, 9, 16, 22, 28, 17, 23, 29]`）
+     - `self_ref_body_pos absmax=0.7466 mean≈0` ✅ — body_pos_b 数据合理（~75cm 与 G1 几何一致）
+     - 但 `action absmax=10~22, mean=-1~-3, joint_pos absmax=2.6~3.1（撞限位）` ❌ — 与 D2 失败模式一致
+     - **根因**：body data 与 mode 都对，问题在 **flatten layout** —— 当前用 `np.tile(body_flat, 10)` 是 **frame-major repeat**（`[f0_b0..b13, f1_b0..b13, ...]`），但 decoder 端已验证 SONIC 用 **dim-major**
+
+     **D1 修正（dim-major repeat）**（2026-05-24，待验证）：
+     - 改用 `np.repeat(body_flat, 10)` —— **dim-major**（`[d0×10, d1×10, ..., d41×10]`，每维 10 帧连续）
+     - 同样改 identity 6D：`np.repeat([1,0,0,0,1,0], 10)` 而非 `np.tile`
+     - **关键区别**：`np.tile([a,b,c], 3)`=`[a,b,c,a,b,c,a,b,c]`（frame-major）；`np.repeat([a,b,c], 3)`=`[a,a,a,b,b,b,c,c,c]`（dim-major）
+     - 待验证：absmax 应落回 < 3 + 与 zero-fill (1.27~2.62) 不同（因为 motion ref 真填了 self-ref）
 
      **A 路径调研进展（D1 部分）**：
      - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）
