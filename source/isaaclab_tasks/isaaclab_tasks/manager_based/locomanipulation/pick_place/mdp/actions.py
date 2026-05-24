@@ -603,6 +603,35 @@ class SONICWholeBodyAction(ActionTerm):
         self._mocap_root_rot_wxyz = torch.from_numpy(root_rot_wxyz).to(self.device).float()
         self._mocap_num_frames = self._mocap_root_rot_wxyz.shape[0]
         self._mocap_fps = float(motion.get("fps", 30))
+
+        # 缓存 dof + root_trans，给 reset() 同步 robot 初始姿态到 mocap 第 0 帧用
+        # （下游修复 2：避免 reset 时 robot 站立 + mocap walking 起步 → 反馈循环爆炸）
+        # mocap dof 顺序与 SONIC_G1_29DOF_JOINT_ORDER 完全一致（MJCF actuator order）
+        self._mocap_dof = torch.from_numpy(motion["dof"]).to(self.device).float()  # (T, 29)
+        self._mocap_root_trans = (
+            torch.from_numpy(motion["root_trans_offset"]).to(self.device).float()  # (T, 3)
+        )
+
+        # 消掉 mocap 第 0 帧的全局 yaw，让 robot 从 identity 朝向开始（reset 时 robot
+        # 也设 identity，避免 root_pos 不动 + 大 yaw 导致初始侧站不稳）。
+        # 公式：q_aligned[t] = q_inv(q[0]) * q[t]，使得 q_aligned[0] = identity
+        q0 = self._mocap_root_rot_wxyz[0]
+        q0_inv = torch.tensor(
+            [q0[0], -q0[1], -q0[2], -q0[3]], device=self.device  # conjugate for unit quat
+        )
+        # quat_mul (wxyz): (w1w2-x1x2-y1y2-z1z2, w1x2+x1w2+y1z2-z1y2, w1y2-x1z2+y1w2+z1x2, w1z2+x1y2-y1x2+z1w2)
+        q = self._mocap_root_rot_wxyz  # (T, 4)
+        w1, x1, y1, z1 = q0_inv[0], q0_inv[1], q0_inv[2], q0_inv[3]
+        w2, x2, y2, z2 = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        self._mocap_root_rot_wxyz = torch.stack(
+            [
+                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            ],
+            dim=-1,
+        )
         # 训练 (sonic_release/config.yaml commands.motion):
         #   target_fps=50, dt_future_ref_frames=0.1s, num_future_frames=10
         # → 取未来 10 帧、相邻帧间隔 0.1s（在 50Hz 训练时 = 5 sim steps）
@@ -901,6 +930,12 @@ class SONICWholeBodyAction(ActionTerm):
             if getattr(self, "_mocap_root_rot_wxyz", None) is not None:
                 self._mocap_frame = 0
                 self._mocap_frame_f = 0.0
+            # 下游修复 2：把 sonic_robot 同步到 mocap 第 0 帧（joint_pos + root_rot）
+            # 训练时 motion_lib 在 episode 开始时这么做；reset 时 robot 与 mocap 一致 →
+            # 第一帧 SONIC 输出 ≈ 0，避免反馈循环。root_pos 保持 spawn 位置不动。
+            # history 保持 zero（与训练 reset 一致；填充 mocap[0]-default 会让 SONIC 误以
+            # 为"已在该姿态 10 帧"立即催加速，反而 OOD）
+            self._sync_robot_to_mocap_frame0()
         else:
             self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
             self._last_action[env_ids] = 0.0
@@ -910,3 +945,59 @@ class SONICWholeBodyAction(ActionTerm):
             self._hist_last_actions[env_ids] = 0.0
             self._hist_gravity_dir[env_ids] = 0.0
             self._hist_gravity_dir[env_ids, :, 2] = -1.0
+            self._sync_robot_to_mocap_frame0(env_ids)
+
+    def _sync_robot_to_mocap_frame0(self, env_ids: torch.Tensor | None = None) -> None:
+        """把 sonic_robot 的 29 个 SONIC 关节设为 mocap.dof[0]，root_rot 设为 mocap.root_rot[0]。
+
+        root_pos 保持 sonic_robot spawn 位置（不用 mocap.root_trans[0]，那是 mocap 坐标系
+        起点）。velocity 全清零，避免初速度带来 obs 偏差。
+
+        训练 (sonic_release/config.yaml commands.motion + motion_lib) 在 episode 开始时把
+        robot 设为 mocap 第 0 帧姿态。这里复现该行为，让 reset 后第一帧 SONIC 看到
+        "robot ≈ mocap" → 输出 raw_action ≈ 0 → 不触发反馈循环爆炸。
+        """
+        if getattr(self, "_mocap_dof", None) is None:
+            return
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        else:
+            env_ids = env_ids.to(device=self.device, dtype=torch.long)
+        n_e = len(env_ids)
+        if n_e == 0:
+            return
+
+        joint_ids_t = torch.tensor(self._joint_ids, device=self.device, dtype=torch.long)
+        dof0 = self._mocap_dof[0].unsqueeze(0).expand(n_e, -1)  # (n_e, 29)
+        zero_jvel = torch.zeros(n_e, 29, device=self.device)
+        self._asset.write_joint_state_to_sim(
+            dof0, zero_jvel, joint_ids=joint_ids_t, env_ids=env_ids
+        )
+
+        # root pose: 保持当前 root_pos (spawn 位置)，旋转用 mocap 第 0 帧
+        current_root_pos = self._asset.data.root_pos_w[env_ids]  # (n_e, 3)
+        mocap_rot0 = self._mocap_root_rot_wxyz[0].unsqueeze(0).expand(n_e, -1)  # (n_e, 4)
+        root_pose = torch.cat([current_root_pos, mocap_rot0], dim=-1)
+        self._asset.write_root_pose_to_sim(root_pose, env_ids=env_ids)
+        zero_root_vel = torch.zeros(n_e, 6, device=self.device)
+        self._asset.write_root_velocity_to_sim(zero_root_vel, env_ids=env_ids)
+
+        # _processed_actions 也同步到 mocap.dof[0]，apply_actions 第一帧不会拉回 default
+        self._processed_actions[env_ids] = dof0
+
+        # debug: 一次性打印同步是否生效
+        if not getattr(self, "_sync_debug_printed", False):
+            actual = self._asset.data.joint_pos[env_ids[0], joint_ids_t]
+            mocap0_cpu = self._mocap_dof[0].cpu()
+            default_cpu = self._default_joint_pos[0].cpu()
+            print(
+                f"[IsaacLab] [SONIC RESET] sync to mocap.dof[0]: "
+                f"target absmax={mocap0_cpu.abs().max():.3f} mean={mocap0_cpu.mean():+.3f} "
+                f"| default absmax={default_cpu.abs().max():.3f} "
+                f"| post-write actual absmax={actual.abs().max().item():.3f} "
+                f"| dof0-default absmax={(mocap0_cpu - default_cpu).abs().max():.3f}"
+            )
+            print(
+                f"[IsaacLab] [SONIC RESET] mocap root_rot[0] wxyz={self._mocap_root_rot_wxyz[0].cpu().tolist()}"
+            )
+            self._sync_debug_printed = True
