@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
-> **进度：阶段 1+2+3.1+3.2+3.3+3.4 集成通过；下游修复 1（时序）落地，下游修复 2（reset 初始姿态）待实施（2026-05-24）**
-> 时序修复后 GUI 第三轮：仍站着/缓慢倒，手部动腿不动（scale=0.05 让腿幅度 5-7° 不够 walking；scale=0.15 反馈循环爆炸）。**真正根因**：reset 时 robot=站立 default、mocap 第 0 帧=walking 起步，SONIC 看到"我静止+我应该动"→ 输出大 raw 想追上 → 反馈循环。修复 2：reset 时把 sonic_robot 同步到 mocap 第 0 帧 dof + root pose，scale 调回训练值 1.0。详见"阶段 3.4 下游修复 2 计划"。
+> **进度：阶段 1+2+3.1+3.2+3.3+3.4 集成通过；下游修复 1+2 落地，闭环 SONIC 推理仍反馈循环（2026-05-24）**
+> 完成：FK body_pos / 时间窗对齐 / reset 同步 robot 到 mocap[0] + yaw align / scale=1.0。**部分成功**：step 1 raw=2.56 接近训练分布（mocap.dof.absmax 1.69），证明 reset "起点"修对。**仍失败**：step 3→20 持续放大到 17.67，joint_pos 撞限位 3.09。最可疑剩余：**actuator stiffness/damping 不匹配训练**（我们 IsaacLab DCMotor，训练 ImplicitActuator + NATURAL_FREQ=10Hz）。详见"阶段 3.4 已尽快速修复路径"。
 
 ## 概述
 
@@ -1029,15 +1029,61 @@ commands.motion:
 
 **反馈循环机制**：robot 与 mocap 初始姿态不同步 → SONIC 输出大 raw 想追上 → scale 小则 obs 反馈"我没动多少" → SONIC 输出更大 raw → 爆炸。
 
-#### 下游修复 2 计划
+### 阶段 3.4 下游修复 2 落地（2026-05-24）
 
-1. **reset 时同步 sonic_robot 到 mocap 第 0 帧**：
-   - `asset.write_joint_state_to_sim(mocap_dof_0, joint_ids=_joint_ids)` — 29 个 SONIC 关节
-   - `asset.write_root_pose_to_sim([mocap_root_trans_0 + offset, mocap_root_rot_0])` — root pose
-   - `asset.write_root_velocity_to_sim(zero)` — 速度归零
-2. **action_scale 调回训练值** 1.0
-3. **时机**：第一次 reset 在 env 创建后，sonic_robot 物理已初始化。`SONICWholeBodyAction.reset()` 调用时机就可以做，类似 mocap_playback.py 验证脚本里的做法
-4. **预期**：robot 与 mocap 同步 → SONIC 第一帧输出 ≈ 0 → 反馈循环不触发 → 真实 walking 动作出现
+实施：
+1. `_load_mocap` 缓存 `_mocap_dof (T, 29)` + `_mocap_root_trans (T, 3)`
+2. `_load_mocap` 把 `_mocap_root_rot_wxyz` 整体减去 root_rot[0]，使 `aligned[0] = identity`（消掉初始 yaw -88°）
+3. `_sync_robot_to_mocap_frame0()`：
+   - `asset.write_joint_state_to_sim(mocap_dof_0, joint_ids)` ✅ post-write actual absmax = 1.692 与 mocap.dof[0] 一致
+   - `asset.write_root_pose_to_sim([current_root_pos, mocap_rot0 = identity])`
+   - `asset.write_root_velocity_to_sim(zero)`
+   - `_processed_actions = mocap_dof_0`
+4. `reset()` 调 `_sync_robot_to_mocap_frame0()`
+5. `action_scale 0.15 → 1.0`（训练值）
+
+### 阶段 3.4 GUI 第四轮（reset 同步 + scale 1.0 后，headless 实测）
+
+| step | absmax | std | joint_pos absmax | legs[0:12] |
+|---|---|---|---|---|
+| 1 | **2.56** | 1.01 | 1.69 | 1.84 |
+| 3 | 5.93 | 2.01 | 1.08 | 5.42 |
+| 5 | 10.10 | 3.24 | 1.34 | 6.29 |
+| 10 | 11.25 | 3.90 | 2.03 | 8.97 |
+| 20 | 17.67 | 6.49 | 3.09 | 11.89 |
+| 50 | 16.49 | 4.67 | 2.61 | 6.67 |
+
+**部分成功**：step 1 raw=2.56 ≈ mocap.dof.absmax=1.69（合理量级），证明 reset 同步把"起点"修对了。
+
+**仍失败**：step 3 → 20 仍持续放大到 17.67，joint_pos 撞限位 3.09。反馈循环没消除。
+
+**对照表**（不同修复阶段 step 1 / step 50 absmax）：
+| 状态 | step 1 | step 50 | step 200 |
+|---|---|---|---|
+| 阶段 3.3 self-ref scale=0.2 | — | 7.69 | 18.58 |
+| 阶段 3.4 mocap body_pos scale=0.15 | — | 10.59 | 14.56 |
+| 阶段 3.4 + reset 同步 + history=mocap[0] | — | 18.47 | 23.26 |
+| **阶段 3.4 + reset 同步 + history=zero + yaw align** | **2.56** | 16.49 | (爆炸) |
+
+### 阶段 3.4 已尽快速修复路径，剩余可疑根因
+
+reset 同步 + 时间窗 + FK 都做了，**反馈循环仍未消除**。剩余可疑（按代价从小到大）：
+
+| 候选 | 可疑度 | 检验代价 |
+|---|---|---|
+| **actuator stiffness/damping 不匹配训练** | 高 | 看 [gear_sonic/.../robots/g1.py:258-275](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/envs/manager_env/robots/g1.py#L258) ImplicitActuator NATURAL_FREQ=10Hz vs IsaacLab DCMotor stiffness=100 — 改 G1_29DOF_CFG 用同款 ImplicitActuator |
+| **sim_dt 不匹配训练** | 中 | 训练用 50Hz control，physics 通常 200-400Hz。我们 IsaacLab 默认未知。改 sim dt |
+| **base_ang_vel / gravity_dir 坐标系不匹配** | 中 | 训练 obs func 在 [gear_sonic/.../observations.py](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/envs/manager_env/mdp/observations.py)，需要看每个字段的 frame 转换 |
+| **mocap PKL 没经过 motion_lib.target_fps=50 重采样** | 中 | 训练时 motion_lib 把 mocap 重采样到 50fps；我们用 30fps 原始数据。需要预先重采样 |
+| **PyTorch checkpoint vs ONNX 输出有差异** | 低 | 试用 sonic_release/last.pt 验证 |
+
+### 阶段 3.4 当前状态总结
+
+- ✅ Pipeline 完整（ONNX 加载、994D decoder obs、1762D encoder layout、mocap FK body_pos、时序对齐、reset 同步）
+- ✅ joint mapping 正确（SONIC[i] → USD joint 验证通过）
+- ✅ 上游 mocap 数据合格（mocap_playback kinematic 验证）
+- ❌ **闭环 SONIC 推理仍反馈循环爆炸**，最可能原因是 **actuator stiffness/damping 不匹配训练**（我们 IsaacLab DCMotor stiffness=100，训练用 ImplicitActuator stiffness=99 + armature=0.025 + 不同 PD 配方）
+- ⏳ 下一步选项：A 改 actuator 匹配训练；B 接 motion_lib 数据加载验证 PyTorch ckpt；C 接受当前为半成品停止深挖
 
 ### 当前空间约束（2026-05-24 实测）
 
