@@ -614,11 +614,20 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      - `_push_history()` 改用 `joint_pos - default` 传 joint_pos_rel
      - `_init_history()` / `reset()` 把 `_hist_joint_pos` 初始化从 default → zero
      - `action_scale: 1.0 → 0.2` 缓冲 self-ref 反馈循环
-     - 待验证：absmax 应被压制（2.6 × 0.2 = 0.52 rad），但 self-ref 仍是 OOD 假设，最终必须接 mocap
 
-     **下一步路径**：
-     - **优先验证修复**：跑 sonic_verify，看 absmax 是否被压制 + GUI 是否减弱关节扭曲
-     - **E3 接 mocap**（紧接其后）：`python download_from_hf.py --sample`（4MB 含 walking 序列），加载真实 mocap 帧替代 self-ref，回归 SONIC 训练范式
+     **修复实测通过**（2026-05-24，sonic_verify GUI）：
+
+     | 指标 | 修复前 garbage | **修复后** |
+     |---|---|---|
+     | action absmax | 12~22 | **1.65~2.73** ✅ |
+     | action mean | -1~-3 | **-0.10~-0.20** ✅ |
+     | action std | 4~5.7 | **0.58~0.83** ✅ |
+     | joint_pos absmax (relative) | 3.0+ 撞限位 | **1.34** ✅ 远离限位 |
+
+     数值范围与 encoder zero-fill 基线（absmax=1.27~2.62）几乎一致，反馈循环被打破。
+     但 self-ref 仍是 OOD 假设，sonic_robot 摆出"奇怪固定姿态"而非真有意义的目标跟踪。
+
+     **下一步：E3 接真实 mocap**（替代 self-ref）—— `python download_from_hf.py --sample` 下 walking 序列。
 
      **A 路径调研进展（D1 部分）**：
      - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）
