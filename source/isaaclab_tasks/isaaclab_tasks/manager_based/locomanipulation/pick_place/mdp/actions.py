@@ -16,6 +16,7 @@ from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
+from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -37,6 +38,17 @@ SONIC_G1_29DOF_JOINT_ORDER: tuple[str, ...] = (
     "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
     "right_elbow_joint",
     "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+)
+
+# SONIC encoder 用的 14 个 body link（来自 sonic_release/config.yaml body_names）。
+# command_multi_future_nonflat 返回这 14 个 body 在 pelvis 坐标系下的位置（10 帧）。
+SONIC_BODY_NAMES: tuple[str, ...] = (
+    "pelvis",
+    "left_hip_roll_link", "left_knee_link", "left_ankle_roll_link",
+    "right_hip_roll_link", "right_knee_link", "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_roll_link", "left_elbow_link", "left_wrist_yaw_link",
+    "right_shoulder_roll_link", "right_elbow_link", "right_wrist_yaw_link",
 )
 
 
@@ -514,6 +526,7 @@ class SONICWholeBodyAction(ActionTerm):
         self._last_action = torch.zeros(self.num_envs, cfg.sonic_action_dim, device=self.device)
 
         self._init_history()
+        self._init_sonic_body_indices()
         self._load_policies()
         self._debug_counter = 0
 
@@ -539,6 +552,21 @@ class SONICWholeBodyAction(ActionTerm):
         self._hist_last_actions = torch.zeros(N, H, J, device=dev)
         self._hist_gravity_dir = torch.zeros(N, H, 3, device=dev)
         self._hist_gravity_dir[:, :, 2] = -1.0
+
+    def _init_sonic_body_indices(self):
+        """找 SONIC 训练用 14 个 body link 在 USD articulation 中的索引。"""
+        self._sonic_body_ids: list[int] = []
+        for name in SONIC_BODY_NAMES:
+            ids, _ = self._asset.find_bodies([f"^{name}$"])
+            if len(ids) == 1:
+                self._sonic_body_ids.append(int(ids[0]))
+            else:
+                print(f"[IsaacLab] [SONIC] WARNING body '{name}' not found (matches={len(ids)})")
+                self._sonic_body_ids.append(0)  # fallback to root，避免索引错位
+        print(
+            f"[IsaacLab] [SONIC] body indices resolved: "
+            f"{len([i for i in self._sonic_body_ids if i > 0]) + 1}/14"
+        )
 
     def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
         ids, names = [], []
@@ -630,25 +658,55 @@ class SONICWholeBodyAction(ActionTerm):
         dec[0, 964:994] = self._hist_gravity_dir[env_idx].t().flatten().cpu().numpy()
         return dec
 
-    def _build_encoder_input(self) -> np.ndarray:
-        """Encoder 1762D 输入（阶段 3.2 D2：mode 字段最小试探）。
+    def _compute_self_ref_body_pos_b(self) -> torch.Tensor:
+        """计算 14 个 SONIC body 在 pelvis (root) 坐标系下的位置。
 
-        基于 observation_config.yaml 推测 offset 0-3 是 encoder_mode_4 字段。
-        填 [1,0,0,0] 假设 mode_id=0 (g1 mode) 是 one-hot；其余 1758D 暂全 zero。
-        如果 mode 信号到位，token_state 应带 g1 语义；decoder 输出预期比阶段 3.1 更稳。
+        self-reference 时 reference == 当前 robot → 这些就是当前姿态下 body 相对 pelvis 的位置。
+        Returns: (N, 14, 3)
+        """
+        body_pos_w = self._asset.data.body_link_pos_w[:, self._sonic_body_ids, :]  # (N, 14, 3)
+        root_pos_w = self._asset.data.root_link_pos_w  # (N, 3)
+        root_quat_w = self._asset.data.root_link_quat_w  # (N, 4)
+        rel_w = body_pos_w - root_pos_w.unsqueeze(1)  # (N, 14, 3)
+        quat_expanded = root_quat_w.unsqueeze(1).expand(-1, 14, -1)  # (N, 14, 4)
+        return quat_apply_inverse(quat_expanded, rel_w)  # (N, 14, 3)
 
-        待 D1 精确解 1762D 后再补 motion_joint_positions / anchor_orientation 等字段。
+    def _build_encoder_input(self, env_idx: int) -> np.ndarray:
+        """Encoder 1762D 输入（阶段 3.2 D1：self-reference for g1 mode）。
+
+        layout（按 sonic_release/config.yaml tokenizer 段顺序）::
+            [0]         encoder_index = 0 (mode_id=0 = g1)
+            [1:421]     command_multi_future_nonflat (420D = 10 × 14 × 3) — body_pos_b × 10 帧
+            [421:431]   command_z_multi_future_nonflat (10D) — g1 不用，zero
+            [431:491]   motion_anchor_ori_b_mf_nonflat (60D = 10 × 6) — identity 6D × 10 帧
+            [491:1762]  其他字段（teleop / smpl）g1 mode 下全 zero
         """
         enc = np.zeros((1, self._encoder_input_dim), dtype=np.float32)
-        enc[0, 0] = 1.0  # encoder_mode_4 one-hot: mode_id=0 = g1
+
+        # offset 0: encoder_index = 0 → g1 mode (cast to long in encoder forward)
+        enc[0, 0] = 0.0
+
+        # offset 1:421 = command_multi_future_nonflat (10 frames × 14 bodies × 3)
+        # self-reference: motion target = 当前 body pose，10 帧重复
+        body_pos_b = self._self_ref_body_pos_b[env_idx]  # (14, 3)
+        body_flat = body_pos_b.flatten().cpu().numpy()  # (42,)
+        enc[0, 1:421] = np.tile(body_flat, 10)  # frame-major: f0_b0_xyz..f0_b13_xyz, f1_...
+
+        # offset 431:491 = motion_anchor_ori_b_mf_nonflat (10 × 6D rotation diff)
+        # self-reference: ori diff = identity → 6D = rotation matrix 前两列 flatten = [1,0,0,0,1,0]
+        identity_6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        enc[0, 431:491] = np.tile(identity_6d, 10)
+
         return enc
 
     def _run_sonic(self) -> torch.Tensor:
-        """Encoder mode-only 输入（阶段 3.2 D2），decoder 用真实 10-frame history。"""
+        """Encoder self-reference g1 mode (阶段 3.2 D1), decoder 用真实 10-frame history。"""
         n_act = self.cfg.sonic_action_dim
-        enc_in = self._build_encoder_input()
+        # 缓存当前帧 body_pos_b（per-env loop 内复用）
+        self._self_ref_body_pos_b = self._compute_self_ref_body_pos_b()  # (N, 14, 3)
         out = np.zeros((self.num_envs, n_act), dtype=np.float32)
         for i in range(self.num_envs):
+            enc_in = self._build_encoder_input(env_idx=i)
             tokens = self._encoder.run([self._enc_output_name], {self._enc_input_name: enc_in})[0]
             dec_in = self._build_decoder_input(tokens, env_idx=i)
             action = self._decoder.run([self._dec_output_name], {self._dec_input_name: dec_in})[0][0]

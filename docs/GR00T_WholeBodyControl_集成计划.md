@@ -538,11 +538,22 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 
      **路径已选 C → A**（2026-05-23）：3.1 物理验证已跑，机器人立刻摔倒 → **必须接 encoder，进 A 路径**。
 
-     **D2 最小试探**（2026-05-24，先于 D1 精确解）：
-     - `_build_encoder_input()` 只填 `encoder_mode_4 = [1,0,0,0]`（假设 offset 0-3、one-hot mode_id=0=g1），其余 1758D zero
-     - 目的：验证"mode 字段填对，token_state 带 g1 语义，decoder 输出更稳"假设
-     - 如果 D2 后 sonic_robot 悬空状态 action absmax 仍 ~1.27~2.62（与全 zero encoder 几乎无差）→ mode 字段 offset/编码可能错位 → 必须做 D1
-     - 如果 D2 后 absmax 明显变小 / 数值分布有规律变化 → mode 信号生效 → 继续 D1 精确填其他字段
+     **D2 最小试探**（2026-05-24）失败：填 `enc[0,0]=1.0` 后 `action absmax=12~18`、`joint_pos absmax=3.0+ 撞限位` —— 与摔倒分布外几乎一致。证明假设全错，撤回到 zero-fill。
+
+     **D1 重大解码**（2026-05-24，从 [gear_sonic/utils/inference_helpers.py:200-310](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/utils/inference_helpers.py) 的 ONNX export 代码逆向）：
+     - Encoder input 真实 layout: `[encoder_index(1) | tokenizer_obs 按 sonic_release/config.yaml tokenizer 段顺序拼接]`
+     - **encoder_index 是 1 个 long scalar**（不是 4D one-hot）：value=mode_id（0=g1, 1=teleop, 2=smpl），forward 时 `inputs[..., 0].long()` 取出，cast 后 0=g1
+     - **3.1 encoder zero-fill 隐式选了 mode_id=0=g1**（因为 zero = 0.0 cast long = 0），这就是 dim-major 数值合理（absmax=1.27~2.62）的原因！
+     - D2 失败：`enc[0,0]=1.0 → mode_id=1 → teleop`，与 g1 inputs 错位 → garbage
+     - **训练 g1 encoder 只用 2 个字段**（来自 sonic_release/config.yaml line 75-78）：
+       - `command_multi_future_nonflat`（offset 1-420，420D = 10 frames × 14 bodies × 3）
+       - `motion_anchor_ori_b_mf_nonflat`（offset 431-490，60D = 10 frames × 6D rotation）
+
+     **D1 实施**（2026-05-24，代码已落地）：
+     - `_build_encoder_input(env_idx)`：显式 `enc[0,0]=0.0` 选 g1 mode；填 self-reference body_pos（14 个 SONIC body 在 pelvis 坐标系下的位置，10 帧重复）；motion_anchor_ori 填 identity 6D（reference orientation == robot orientation）
+     - `_init_sonic_body_indices()`：用 `find_bodies` 解析 14 个 SONIC body link 到 USD 索引
+     - `_compute_self_ref_body_pos_b()`：用 `body_link_pos_w - root_link_pos_w` + `quat_apply_inverse(root_quat_w, ...)` 转 body frame
+     - 待 GUI 验证：sonic_robot 在 fix_root_link=True 悬空状态下 absmax 应仍合理（< 3）+ 数值分布与 zero-fill 不同（因为 encoder 现在拿到真实 g1 motion target）
 
      **A 路径调研进展（D1 部分）**：
      - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）
