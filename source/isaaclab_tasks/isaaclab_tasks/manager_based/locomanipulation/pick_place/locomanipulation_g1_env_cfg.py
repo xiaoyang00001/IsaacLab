@@ -81,11 +81,157 @@ WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 #
 # 阶段 3.3 E3 D：mocap anchor 时变信号已接，解 fix_root_link 再次物理验证
 # 对比 3.1 初次物理验证（立刻摔倒），看 mocap motion 信号是否提供有意义的平衡反馈
+#
+# 阶段 A（gr00t-sonic-actuator-match 分支）：用 SONIC 训练同款 ImplicitActuator + PD 配方
+# 替换默认 G1_29DOF_CFG 的 DCMotor。参考 gear_sonic/envs/manager_env/robots/g1.py:10-358
+# （来自 BeyondMimic / whole_body_tracking）。NATURAL_FREQ=10Hz、DAMPING_RATIO=2.0，
+# 各 actuator armature 配 stiffness=armature×NATURAL_FREQ²、damping=2×DAMPING_RATIO×armature×NATURAL_FREQ。
+# 注意：不动 G1_29DOF_CFG（robot / walker_robot / remote_robot 仍用 IsaacLab DCMotor）。
+from isaaclab.actuators import ImplicitActuatorCfg as _SonicImplicitActuatorCfg
+
+_SONIC_ARMATURE_5020 = 0.003609725
+_SONIC_ARMATURE_7520_14 = 0.010177520
+_SONIC_ARMATURE_7520_22 = 0.025101925
+_SONIC_ARMATURE_4010 = 0.00425
+_SONIC_NATURAL_FREQ = 10.0 * 2.0 * 3.1415926535  # 10Hz
+_SONIC_DAMPING_RATIO = 2.0
+
+_S_5020 = _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ**2
+_S_7520_14 = _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ**2
+_S_7520_22 = _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ**2
+_S_4010 = _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ**2
+
+_D_5020 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ
+_D_7520_14 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ
+_D_7520_22 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ
+_D_4010 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ
+
 SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
 SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
 SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+# 整体替换 actuators，与 SONIC 训练完全对齐
+SONIC_G1_29DOF_CFG.actuators = {
+    "legs": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_hip_yaw_joint",
+            ".*_hip_roll_joint",
+            ".*_hip_pitch_joint",
+            ".*_knee_joint",
+        ],
+        effort_limit_sim={
+            ".*_hip_yaw_joint": 88.0,
+            ".*_hip_roll_joint": 139.0,
+            ".*_hip_pitch_joint": 139.0,
+            ".*_knee_joint": 139.0,
+        },
+        velocity_limit_sim={
+            ".*_hip_yaw_joint": 32.0,
+            ".*_hip_roll_joint": 20.0,
+            ".*_hip_pitch_joint": 20.0,
+            ".*_knee_joint": 20.0,
+        },
+        stiffness={
+            ".*_hip_pitch_joint": _S_7520_22,
+            ".*_hip_roll_joint": _S_7520_22,
+            ".*_hip_yaw_joint": _S_7520_14,
+            ".*_knee_joint": _S_7520_22,
+        },
+        damping={
+            ".*_hip_pitch_joint": _D_7520_22,
+            ".*_hip_roll_joint": _D_7520_22,
+            ".*_hip_yaw_joint": _D_7520_14,
+            ".*_knee_joint": _D_7520_22,
+        },
+        armature={
+            ".*_hip_pitch_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_roll_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_yaw_joint": _SONIC_ARMATURE_7520_14,
+            ".*_knee_joint": _SONIC_ARMATURE_7520_22,
+        },
+    ),
+    "feet": _SonicImplicitActuatorCfg(
+        joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_roll_joint", "waist_pitch_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist_yaw": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_yaw_joint"],
+        effort_limit_sim=88.0,
+        velocity_limit_sim=32.0,
+        stiffness=_S_7520_14,
+        damping=_D_7520_14,
+        armature=_SONIC_ARMATURE_7520_14,
+    ),
+    "arms": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_shoulder_pitch_joint",
+            ".*_shoulder_roll_joint",
+            ".*_shoulder_yaw_joint",
+            ".*_elbow_joint",
+            ".*_wrist_roll_joint",
+            ".*_wrist_pitch_joint",
+            ".*_wrist_yaw_joint",
+        ],
+        effort_limit_sim={
+            ".*_shoulder_pitch_joint": 25.0,
+            ".*_shoulder_roll_joint": 25.0,
+            ".*_shoulder_yaw_joint": 25.0,
+            ".*_elbow_joint": 25.0,
+            ".*_wrist_roll_joint": 25.0,
+            ".*_wrist_pitch_joint": 5.0,
+            ".*_wrist_yaw_joint": 5.0,
+        },
+        velocity_limit_sim={
+            ".*_shoulder_pitch_joint": 37.0,
+            ".*_shoulder_roll_joint": 37.0,
+            ".*_shoulder_yaw_joint": 37.0,
+            ".*_elbow_joint": 37.0,
+            ".*_wrist_roll_joint": 37.0,
+            ".*_wrist_pitch_joint": 22.0,
+            ".*_wrist_yaw_joint": 22.0,
+        },
+        stiffness={
+            ".*_shoulder_pitch_joint": _S_5020,
+            ".*_shoulder_roll_joint": _S_5020,
+            ".*_shoulder_yaw_joint": _S_5020,
+            ".*_elbow_joint": _S_5020,
+            ".*_wrist_roll_joint": _S_5020,
+            ".*_wrist_pitch_joint": _S_4010,
+            ".*_wrist_yaw_joint": _S_4010,
+        },
+        damping={
+            ".*_shoulder_pitch_joint": _D_5020,
+            ".*_shoulder_roll_joint": _D_5020,
+            ".*_shoulder_yaw_joint": _D_5020,
+            ".*_elbow_joint": _D_5020,
+            ".*_wrist_roll_joint": _D_5020,
+            ".*_wrist_pitch_joint": _D_4010,
+            ".*_wrist_yaw_joint": _D_4010,
+        },
+        armature={
+            ".*_shoulder_pitch_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_yaw_joint": _SONIC_ARMATURE_5020,
+            ".*_elbow_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_pitch_joint": _SONIC_ARMATURE_4010,
+            ".*_wrist_yaw_joint": _SONIC_ARMATURE_4010,
+        },
+    ),
+}
 
 # SONIC ONNX 模型路径（由 download_from_hf.py 下载，详见 docs/GR00T_WholeBodyControl_集成计划.md）
 SONIC_ENCODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
