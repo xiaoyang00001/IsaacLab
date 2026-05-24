@@ -555,18 +555,23 @@ class SONICWholeBodyAction(ActionTerm):
 
     def _init_sonic_body_indices(self):
         """找 SONIC 训练用 14 个 body link 在 USD articulation 中的索引。"""
+        all_body_names = list(self._asset.data.body_names)
+        print(f"[IsaacLab] [SONIC INIT] USD has {len(all_body_names)} bodies: {all_body_names}")
+
         self._sonic_body_ids: list[int] = []
+        missing = []
         for name in SONIC_BODY_NAMES:
             ids, _ = self._asset.find_bodies([f"^{name}$"])
             if len(ids) == 1:
                 self._sonic_body_ids.append(int(ids[0]))
             else:
-                print(f"[IsaacLab] [SONIC] WARNING body '{name}' not found (matches={len(ids)})")
-                self._sonic_body_ids.append(0)  # fallback to root，避免索引错位
-        print(
-            f"[IsaacLab] [SONIC] body indices resolved: "
-            f"{len([i for i in self._sonic_body_ids if i > 0]) + 1}/14"
-        )
+                missing.append(name)
+                self._sonic_body_ids.append(0)  # fallback to root link
+
+        resolved = 14 - len(missing)
+        print(f"[IsaacLab] [SONIC INIT] body indices resolved: {resolved}/14, ids={self._sonic_body_ids}")
+        if missing:
+            print(f"[IsaacLab] [SONIC INIT] MISSING SONIC bodies (fall back to root): {missing}")
 
     def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
         ids, names = [], []
@@ -725,10 +730,12 @@ class SONICWholeBodyAction(ActionTerm):
         if self._debug_counter % 50 == 0:
             a = action_rel[0].detach().cpu()
             jp = self._hist_joint_pos[0, -1].detach().cpu()
+            bp = self._self_ref_body_pos_b[0].detach().cpu()  # (14, 3) self-ref motion
             print(
                 f"[IsaacLab] [SONIC] step={self._debug_counter} "
                 f"action mean={a.mean():+.4f} absmax={a.abs().max():.4f} std={a.std():.4f} "
-                f"| joint_pos mean={jp.mean():+.4f} absmax={jp.abs().max():.4f}"
+                f"| joint_pos absmax={jp.abs().max():.4f} "
+                f"| self_ref_body_pos absmax={bp.abs().max():.4f} mean={bp.mean():+.4f}"
             )
 
     def apply_actions(self):
