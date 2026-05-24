@@ -637,11 +637,21 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      - **GUI 实测结果**：absmax 1.91~3.02（vs E3 前 identity anchor 时 1.65~2.73），mean/std 微增——**mocap 信号确实通过 token 影响 decoder 输出**，但量级小（anchor_ori 仅占 encoder 1762D 的 3.4%，body_pos 420D 仍 self-ref 主导）
      - 仍未做：body_pos 用 mocap pose（需 forward kinematics）→ step 3b
 
-     **E3 step 3b 待决策**（FK 让 body_pos 跟 mocap）：
-     - 方案 A：用 pinocchio 离线算 1202 帧 × 14 body × 3 缓存（需 `pip install pinocchio`）
-     - 方案 B：每帧把 sonic_robot 关节临时 set 到 mocap dof，读 body_link_pos_w 后 restore（hack）
-     - 方案 C：用 IsaacLab 创建第二个不可见 G1 instance 专做 FK
-     - 方案 D：跳过 body_pos FK，直接看物理下表现（解 fix_root_link + mocap anchor）能否站住
+     **E3 D 物理验证**（2026-05-24，✅ 突破性结果）：
+     - 解 fix_root_link 让 sonic_robot 物理生效
+     - **站立时长 > 5 秒**（vs 3.1 立刻摔倒），`self_ref_body_pos absmax 从 0.7466 → 0.6822` = robot 在物理下真的在动 + body 相对 pelvis 位置在改变
+     - mocap anchor 信号在物理下提供了有意义的平衡基准，证明这条路是对的
+     - 但 absmax 仍 12.69（OOD body_pos self-ref 仍主导），需要 step 3b 提供 mocap body_pos
+
+     **E3 step 3b（SMPL→SONIC body_pos 近似映射，2026-05-24，已落地）**：
+     - 关键发现：mocap PKL 已含 `smpl_joints (1202, 24, 3)` —— 不用 pinocchio FK！
+     - SMPL 24 关节标准命名与 SONIC 14 body 几乎一一对应：
+       - `SMPL_TO_SONIC_BODY_IDX = (0,1,4,7,2,5,8,6,16,18,20,17,19,21)` 14 个 SMPL index
+     - `_load_mocap()` 加载 smpl_joints → 减 pelvis → 缓存 `(1202, 14, 3)`
+     - `_build_encoder_input()` 的 `command_multi_future_nonflat` 改为：取未来 10 帧 mocap body_pos → reshape (10, 42) → dim-major flatten 写入 offset 1:421
+     - 精度注：SMPL 是人体几何，G1 比例略有不同（腿/臂长度差异），近似但远胜 self-ref（420D 主导信号现在有 mocap 时变内容）
+     - 不转 yaw frame（粗略），如效果不佳可加 quat 旋转修正
+     - **待验证**：absmax 应明显压低 + sonic_robot 站立时长应延长 + viewport 应能看到 walking 节奏
 
      **A 路径调研进展（D1 部分）**：
      - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）

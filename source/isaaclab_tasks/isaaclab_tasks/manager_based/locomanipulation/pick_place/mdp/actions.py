@@ -51,6 +51,28 @@ SONIC_BODY_NAMES: tuple[str, ...] = (
     "right_shoulder_roll_link", "right_elbow_link", "right_wrist_yaw_link",
 )
 
+# SMPL 24-joint → SONIC 14-body 近似映射（用 mocap['smpl_joints'] 替代 forward kinematics）。
+# SMPL 标准关节顺序：0=pelvis, 1=l_hip, 2=r_hip, 3=spine1, 4=l_knee, 5=r_knee, 6=spine2,
+#                    7=l_ankle, 8=r_ankle, 9=spine3, 10=l_foot, 11=r_foot, 12=neck, 13=l_collar,
+#                    14=r_collar, 15=head, 16=l_shoulder, 17=r_shoulder, 18=l_elbow, 19=r_elbow,
+#                    20=l_wrist, 21=r_wrist, 22=l_hand, 23=r_hand
+SMPL_TO_SONIC_BODY_IDX: tuple[int, ...] = (
+    0,   # pelvis
+    1,   # left_hip_roll_link  ≈ l_hip
+    4,   # left_knee_link      ≈ l_knee
+    7,   # left_ankle_roll_link ≈ l_ankle
+    2,   # right_hip_roll_link
+    5,   # right_knee_link
+    8,   # right_ankle_roll_link
+    6,   # torso_link          ≈ spine2
+    16,  # left_shoulder_roll_link
+    18,  # left_elbow_link
+    20,  # left_wrist_yaw_link
+    17,  # right_shoulder_roll_link
+    19,  # right_elbow_link
+    21,  # right_wrist_yaw_link
+)
+
 
 class AgileBasedLowerBodyAction(ActionTerm):
     """Action term that drives robot A lower-body walking from a locomotion policy."""
@@ -583,12 +605,27 @@ class SONICWholeBodyAction(ActionTerm):
         self._mocap_fps = float(motion.get("fps", 30))
         # _10frame_step5 = 10 帧、step=5（间隔 5 mocap 帧 ≈ 0.17s）
         self._mocap_step = 5
-        # 当前帧索引（每 env 一个，方便不同 env 错位采样；此处单 env 简化）
         self._mocap_frame = 0
-        print(
-            f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
-            f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} duration={self._mocap_num_frames/self._mocap_fps:.1f}s"
-        )
+
+        # 从 smpl_joints 取 14 个 body 位置（近似 SONIC body link 位置）
+        # smpl_joints shape (F, 24, 3) in world frame → 减 pelvis 得 in pelvis frame（粗略近似，不转 yaw）
+        self._mocap_body_pos_b: torch.Tensor | None = None
+        if "smpl_joints" in motion:
+            smpl = motion["smpl_joints"]  # (F, 24, 3)
+            pelvis = smpl[:, 0:1, :]  # (F, 1, 3)
+            rel = smpl[:, list(SMPL_TO_SONIC_BODY_IDX), :] - pelvis  # (F, 14, 3) in world frame
+            self._mocap_body_pos_b = torch.from_numpy(rel).to(self.device).float()
+            print(
+                f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
+                f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} "
+                f"smpl_joints shape={smpl.shape} → 14 body_pos cached (SMPL approx)"
+            )
+        else:
+            print(
+                f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
+                f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} "
+                f"(NO smpl_joints, body_pos fallback to self-ref)"
+            )
 
     def _init_sonic_body_indices(self):
         """找 SONIC 训练用 14 个 body link 在 USD articulation 中的索引。"""
@@ -730,13 +767,20 @@ class SONICWholeBodyAction(ActionTerm):
         # offset 0: encoder_index = 0 → g1 mode (cast to long in encoder forward)
         enc[0, 0] = 0.0
 
-        # offset 1:421 = command_multi_future_nonflat (10 frames × 14 bodies × 3)
-        # self-reference: motion target = 当前 body pose，10 帧重复
-        # dim-major layout: 每维的 10 帧连续 → [d0×10, d1×10, ..., d41×10]
-        # 用 np.repeat 而非 np.tile（tile=frame-major、repeat=dim-major）
-        body_pos_b = self._self_ref_body_pos_b[env_idx]  # (14, 3)
-        body_flat = body_pos_b.flatten().cpu().numpy()  # (42,)
-        enc[0, 1:421] = np.repeat(body_flat, 10)  # dim-major
+        # offset 1:421 = command_multi_future_nonflat (10 frames × 14 bodies × 3, dim-major)
+        if self._mocap_body_pos_b is not None:
+            # mocap 时变 body_pos: 取未来 10 帧（step=5），每帧 14×3
+            n = self._mocap_num_frames
+            indices = (self._mocap_frame + torch.arange(10, device=self.device) * self._mocap_step) % n
+            mocap_bp = self._mocap_body_pos_b[indices]  # (10, 14, 3)
+            mocap_bp_flat = mocap_bp.reshape(10, 42)  # (10, 42)
+            # dim-major flatten: (10, 42) → (42, 10) → 1D
+            enc[0, 1:421] = mocap_bp_flat.t().contiguous().flatten().cpu().numpy()
+        else:
+            # fallback: self-ref（当前 robot body_pos，10 帧重复）
+            body_pos_b = self._self_ref_body_pos_b[env_idx]  # (14, 3)
+            body_flat = body_pos_b.flatten().cpu().numpy()  # (42,)
+            enc[0, 1:421] = np.repeat(body_flat, 10)  # dim-major
 
         # offset 431:491 = motion_anchor_ori_b_mf_nonflat (10 × 6D rotation diff, dim-major)
         if self._mocap_root_rot_wxyz is not None:
