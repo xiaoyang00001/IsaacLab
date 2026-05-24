@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
-> **进度：阶段 1（环境）+ 阶段 2（骨架）+ 阶段 3.1（真实 decoder 观测）+ 阶段 3.2（encoder 真实布局）+ 阶段 3.3（mocap anchor_ori + 物理验证）✅ 通过于 2026-05-24**
-> sonic_robot 解 fix_root_link 后**站立时长 > 5 秒**；mocap 60D anchor_ori 时变信号已接入 encoder；action absmax 稳定在 1.65~3.02。**唯一剩余卡点是 body_pos FK**（mocap PKL 的 smpl_joints 全 0，需要 G1 自己的 forward kinematics 算 14 body in pelvis frame）。详见下方"已完成 / 剩余工作梳理"。
+> **进度：阶段 1（环境）+ 阶段 2（骨架）+ 阶段 3.1（真实 decoder 观测）+ 阶段 3.2（encoder 真实布局）+ 阶段 3.3（mocap anchor_ori + 物理验证）+ 阶段 3.4 F4（body_pos FK 落地）✅ 集成通过于 2026-05-24**
+> 用 `gear_sonic.Humanoid_Batch.fk_batch()` 给 mocap 预算 1202 帧 14 body in pelvis frame（197 KB .npy 缓存），headless 集成日志确认 `body_pos=F4 FK npy (absmax=0.753)` 已读。**action absmax 7.69（vs self-ref 1.65~3.02），数值变大符合"追踪 walking 目标"预期，待 GUI 视觉验证**。详见下方"阶段 3.4 F4 落地"。
 
 ## 概述
 
@@ -828,33 +828,50 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 | MJCF | `gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml`（仓库自带） |
 | 当前 env_isaaclab 缺 | `lxml`（必装，wheel 几 MB） + `open3d`（500MB+，可能可 stub） |
 
-### 落地步骤（F4）
+### 落地步骤（F4，2026-05-24 已全部完成）
 
-1. **依赖安装**（先 lxml，再决定 open3d）：
+1. **依赖安装** ✅：`D:/miniconda3/envs/env_isaaclab/python.exe -m pip install lxml`（lxml-6.1.1，4 MB）。`open3d` 不装——验证发现它只在 `torch_humanoid_batch.py` line 793 `o3d.io.read_triangle_mesh` 和 line 873（注释掉的 write）用到，**fk_batch 路径完全不依赖**。
+2. **预算脚本** ✅：[scripts/tools/precompute_mocap_body_pos.py](../scripts/tools/precompute_mocap_body_pos.py)
+   - `_stub_open3d()`：把 `open3d` / `open3d.io` 注册为返回 None 的 stub module
+   - `Humanoid_Batch.load_mesh = lambda self: None`：monkey-patch 跳过 mesh 加载（fk_batch 不需要）
+   - 配置 MJCF 路径 `gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml`
+   - 输入：sample PKL 的 `pose_aa (T, 30, 3)` axis-angle + `root_trans_offset (T, 3)`
+   - `fk_batch(pose, trans, fps=30)` → `global_translation (1, T, 30, 3)` 世界系
+   - `SONIC_BODY_NAMES` 14 个名字 resolve 到 `Humanoid_Batch.body_names` indices `[0, 2, 4, 6, 8, 10, 12, 15, 17, 19, 22, 24, 26, 29]`（注意：与 IsaacLab USD 的 indices `[0, 4, 10, 18, 5, 11, 19, 9, 16, 22, 28, 17, 23, 29]` **不同**，因为 Humanoid_Batch 的 body order 是 MJCF 树遍历，与 USD 不一致——这正是按 name resolve 而非 index 透传的原因）
+   - 减 pelvis (index 0) → pelvis frame → 落 `walk_forward_amateur_001__A001__body_pos14_pelvis.npy`（**197 KB**）
+   - 实测 1202 帧 pelvis-frame body_pos absmax = **0.7531**，与 self-ref 的 0.6822 量级一致
+3. **`SONICWholeBodyAction._load_mocap()` 集成** ✅：自动检测 `{pkl_stem}__body_pos14_pelvis.npy`，加载到 `self._mocap_body_pos_b`；shape 不匹配则 fallthrough SMPL，最后 self-ref。优先级 = **F4 .npy > SMPL approx > self-ref**。
+4. **headless smoke test** ✅：`sonic_verify.py --headless --max_steps 60` 日志确认：
    ```
-   D:/miniconda3/envs/env_isaaclab/python.exe -m pip install lxml
-   # 试 import Humanoid_Batch；若卡 open3d 再决定装 / stub
+   loaded mocap from ... body_pos=F4 FK npy (absmax=0.753) @ walk_forward_amateur_001__A001__body_pos14_pelvis.npy
+   body indices resolved: 14/14
+   step=50  action mean=-2.2038 absmax=7.6925 std=2.7820 | joint_pos absmax=1.6144
    ```
-2. **新建 `scripts/tools/precompute_mocap_body_pos.py`**：
-   - 加载 sample PKL（已有：root_rot wxyz + pose_aa + root_trans_offset）
-   - 调 `Humanoid_Batch.fk_batch(pose_aa, root_trans, fps=30)` → wbody_pos (T, N, 3)
-   - 减去 pelvis 坐标 → pelvis frame
-   - 按 `SONIC_BODY_NAMES` 14 个名字 resolve body index → (T, 14, 3)
-   - 落 `.npy` 缓存到 mocap 同目录（< 1 MB）
-3. **修改 `SONICWholeBodyAction`**：
-   - `_load_mocap()` 同步加载 `.npy` body_pos
-   - `_build_encoder_input()` 用 mocap body_pos 替换 self-ref，flatten 仍 dim-major `np.repeat`
-4. **GUI 验证**：观察 action absmax 是否进一步下降 + 是否出现真实行走动作
+5. **GUI 视觉验证** — 待用户跑
+
+### F4 落地后数值变化
+
+| 状态 | action absmax | action std | joint_pos absmax | self_ref_body_pos absmax |
+|---|---|---|---|---|
+| 阶段 3.3 self-ref body_pos | 1.65~3.02 | 0.58~0.83 | 1.34 | 0.6617 |
+| **阶段 3.4 F4 mocap body_pos** | **7.69** | **2.78** | **1.61** | 0.6617（独立字段） |
+
+**数值变大是预期方向**：self-ref 给的是 robot 当前静态姿态（≈ "我在哪里"），mocap 给的是未来 10 帧 walking 目标姿态（≈ "我应该在哪里"），SONIC 输出 action 来跨越这个 gap，幅度自然增大。但 **7.69 偏高**——下一步根据 GUI 现象分支处理：
+
+| GUI 现象 | 含义 | 处理 |
+|---|---|---|
+| 出现像 walking 的腿部摆动（即使最后摔） | F4 真有用，SONIC 在追踪 mocap | action_scale 0.2 → 0.1，再加 mocap velocity 字段 |
+| 关节抽搐 / 大幅扭曲 | action 过大触发反馈循环（self-ref 反馈 + mocap 跟踪幅度） | 立刻 action_scale 0.05~0.1 |
+| 立刻摔倒、动作不像 walking | mocap 信号未被 SONIC 转成可用 action | 复查 FK pelvis frame 定义（可能需要去掉 root rotation 影响） |
 
 ### 当前空间约束（2026-05-24 实测）
 
 - D 盘剩余 **15.3 GB**、C 盘剩余 **13.1 GB**
-- F4 最小开销：`lxml` < 10 MB，`.npy` 缓存 < 1 MB
-- F4 完整开销：+ `open3d` ~500 MB
+- F4 实际开销（已落地）：lxml 4 MB + .npy 197 KB ≈ **< 5 MB**（open3d stub 省了 500 MB）
 - BONES-SEED `g1.tar.gz`：估 10-30 GB → **当前不可承受**
 - BONES-SEED 完整 114 GB → **完全超出**
 
-→ 当前阶段只走 F4，BONES-SEED 留到清理出 30+ GB 后再考虑。
+→ F4 已经把 FK 卡点解掉；BONES-SEED 留到清理出 30+ GB 后再考虑。
 
 ---
 

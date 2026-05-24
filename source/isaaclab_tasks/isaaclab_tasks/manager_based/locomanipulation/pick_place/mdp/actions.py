@@ -607,19 +607,29 @@ class SONICWholeBodyAction(ActionTerm):
         self._mocap_step = 5
         self._mocap_frame = 0
 
-        # 从 smpl_joints 取 14 个 body 位置（近似 SONIC body link 位置）
-        # 注意：robot_filtered 的 PKL 中 smpl_joints 是全零 placeholder！
-        # g1 mode 真正需要的是 dof + FK → body_pos，但 Windows 上 pinocchio 编译失败。
-        # 这里先 fallback 到 self-ref；FK 方案待后续解决。
+        # 14 body in pelvis frame：优先用 F4 预算的 .npy（gear_sonic Humanoid_Batch FK 输出），
+        # 否则 fallback SMPL 24-joint 近似，最后 fallback self-ref。
+        # F4 预算脚本：scripts/tools/precompute_mocap_body_pos.py
         self._mocap_body_pos_b: torch.Tensor | None = None
+        body_pos_npy = Path(path).with_name(Path(path).stem + "__body_pos14_pelvis.npy")
         smpl = motion.get("smpl_joints")
-        if smpl is not None and np.abs(smpl).max() > 1e-6:
+        if body_pos_npy.exists():
+            arr = np.load(body_pos_npy)
+            if arr.shape[0] == self._mocap_num_frames and arr.shape[1:] == (14, 3):
+                self._mocap_body_pos_b = torch.from_numpy(arr).to(self.device).float()
+                body_src = f"F4 FK npy (absmax={np.abs(arr).max():.3f}) @ {body_pos_npy.name}"
+            else:
+                body_src = (
+                    f"F4 npy shape mismatch {arr.shape} vs ({self._mocap_num_frames}, 14, 3); "
+                    "fall through"
+                )
+        if self._mocap_body_pos_b is None and smpl is not None and np.abs(smpl).max() > 1e-6:
             pelvis = smpl[:, 0:1, :]
             rel = smpl[:, list(SMPL_TO_SONIC_BODY_IDX), :] - pelvis
             self._mocap_body_pos_b = torch.from_numpy(rel).to(self.device).float()
             body_src = f"SMPL approx (absmax={np.abs(rel).max():.3f})"
-        else:
-            body_src = "self-ref fallback (smpl_joints zero/missing; FK not implemented)"
+        elif self._mocap_body_pos_b is None:
+            body_src = "self-ref fallback (no F4 npy, smpl_joints zero/missing)"
         print(
             f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
             f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} body_pos={body_src}"
