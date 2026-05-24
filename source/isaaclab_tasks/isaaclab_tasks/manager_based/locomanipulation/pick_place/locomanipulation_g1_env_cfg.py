@@ -289,14 +289,15 @@ class ActionsCfg:
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
     # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理
-    # 阶段 3.4 F4：mocap body_pos 真实 FK 接入后 action absmax 升至 7~18（追踪 walking 目标），
-    # action_scale 从 0.2 降到 0.05 防止反馈循环放大（峰值 18.58 × 0.05 = 0.93 rad 单帧偏移）。
+    # 阶段 3.4 下游修复 1（dt_future + advance + reset 时序对齐后）：scale 0.05 让腿幅度仅 5-7°
+    # 不够 walking（30-60° 需要），加到 0.15 让腿幅度 15-20° 看 walking 倾向。
+    # 时序对齐后 obs 已回训练分布，预期不再触发反馈循环爆炸。
     sonic_wholebody = SONICWholeBodyActionCfg(
         asset_name="sonic_robot",
         encoder_path=SONIC_ENCODER_PATH,
         decoder_path=SONIC_DECODER_PATH,
         joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-        action_scale=0.05,
+        action_scale=0.15,
         mocap_path=SONIC_MOCAP_PATH,
     )
 

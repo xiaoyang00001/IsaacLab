@@ -863,6 +863,25 @@ class SONICWholeBodyAction(ActionTerm):
                 f"| joint_pos absmax={jp.abs().max():.4f} "
                 f"| self_ref_body_pos absmax={bp.abs().max():.4f} mean={bp.mean():+.4f}"
             )
+            # 逐 segment absmax，定位"哪些 SONIC 输出 index 在动"
+            legs = a[:12].abs().max().item()
+            waist = a[12:15].abs().max().item()
+            l_arm = a[15:22].abs().max().item()
+            r_arm = a[22:29].abs().max().item()
+            print(
+                f"[IsaacLab] [SONIC] step={self._debug_counter} action by SONIC index: "
+                f"legs[0:12]={legs:.3f} waist[12:15]={waist:.3f} "
+                f"l_arm[15:22]={l_arm:.3f} r_arm[22:29]={r_arm:.3f}"
+            )
+            # 同步打印 articulation joint_names 顺序 (一次性) 以便核对 SONIC index → USD joint name 映射
+            if self._debug_counter == 50:
+                print(
+                    f"[IsaacLab] [SONIC] articulation joint_names "
+                    f"(SONIC index → USD joint name via self._joint_ids):"
+                )
+                art_names = self._asset.data.joint_names
+                for i_sonic, jid in enumerate(self._joint_ids):
+                    print(f"  SONIC[{i_sonic:2d}] → USD[{jid:2d}] {art_names[jid]}")
 
     def apply_actions(self):
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)

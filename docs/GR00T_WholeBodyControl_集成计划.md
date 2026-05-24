@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
-> **进度：阶段 1+2+3.1+3.2+3.3+3.4 集成通过；上游 mocap 验证合格，下游时间窗修复待 GUI 验（2026-05-24）**
-> F4 + scale=0.05 + FK rotation 修复后 sonic_robot 仍腿不动 + 摔倒。**上游 mocap_playback 验证 mocap 数据本身完全 OK（流畅 walking + 向前 8m）**，问题确定在 SONIC 调用下游。查 sonic_release/config.yaml 发现训练 `dt_future_ref_frames=0.1s` + `target_fps=50`，我们用了 5 mocap 帧间隔（=0.167s）+ 1 mocap 帧/sim step（mocap 1.67× 慢播）。已修 `_mocap_step=3` + `_mocap_advance_per_step=0.6` + reset 重置 mocap 指针。详见"阶段 3.4 下游修复 1"。
+> **进度：阶段 1+2+3.1+3.2+3.3+3.4 集成通过；下游修复 1（时序）落地，下游修复 2（reset 初始姿态）待实施（2026-05-24）**
+> 时序修复后 GUI 第三轮：仍站着/缓慢倒，手部动腿不动（scale=0.05 让腿幅度 5-7° 不够 walking；scale=0.15 反馈循环爆炸）。**真正根因**：reset 时 robot=站立 default、mocap 第 0 帧=walking 起步，SONIC 看到"我静止+我应该动"→ 输出大 raw 想追上 → 反馈循环。修复 2：reset 时把 sonic_robot 同步到 mocap 第 0 帧 dof + root pose，scale 调回训练值 1.0。详见"阶段 3.4 下游修复 2 计划"。
 
 ## 概述
 
@@ -988,6 +988,56 @@ commands.motion:
 | 出现 walking 腿前后摆动（即使最后摔） | dt_future + advance 是真根因 | 调 scale 0.05 → 0.1~0.2 加幅度 |
 | 仍只是站着 / 缓慢倒 | 时间窗不是关键，查 obs commands.motion 其它字段（teleop / smpl 字段我们 zero） | 接下游修复 2 |
 | 抽搐 / 爆炸 | _mocap_step=3 取太密或 advance 太快 | 回 step=5 或 advance=0.3 |
+
+### 阶段 3.4 GUI 第三轮（dt_future 修后，2026-05-24）
+
+**用户实测**：仍然只是站着 / 缓慢倒，**手部有动作但腿部没有动作**。
+
+#### 诊断打印（每 50 step 加输出 4 段 absmax + 一次性打印 SONIC index → USD joint name 映射）
+
+| step | legs[0:12] | waist[12:15] | l_arm[15:22] | r_arm[22:29] | 总 absmax |
+|---|---|---|---|---|---|
+| 50 | 2.26 | 2.60 | 2.36 | 3.76 | 3.76 |
+| 100 | 1.57 | 1.59 | 1.58 | 2.35 | 2.35 |
+| 150 | 1.56 | 1.73 | 2.22 | 2.65 | 2.65 |
+| 200 | 1.84 | 2.00 | 2.79 | 3.28 | 3.28 |
+
+**关键发现**：
+- joint mapping **完全正确**（SONIC[0]→USD[0]=left_hip_pitch, SONIC[12]→USD[2]=waist_yaw, ...）
+- SONIC **确实在给腿部输出动作**，量级与手部相当
+- scale=0.05 × 2 ≈ 5-7° / 关节：手部 5-7° = 整只手摆十几 cm 看得见；**腿部 5-7° = 大腿微动几 cm + 承重摩擦 = 看起来不动**
+- walking 真正需要的髋/膝幅度 30-60°，scale=0.05 远远不够
+
+#### scale 调参的反馈循环陷阱（headless smoke 实测）
+
+| action_scale | step 50 absmax | step 200 absmax | 状态 |
+|---|---|---|---|
+| 0.05 | 3.76 | 3.28 | ✅ 稳定，但腿幅度不够 |
+| 0.15 | **10.59** | **14.56** | ❌ 反馈循环爆炸 (joint_pos 撞限位 1.97) |
+| 0.20 | 7.69（早期）| 18.58 峰值 | ❌ 反馈循环爆炸（与之前同） |
+
+时序修复 (dt_future + advance) **没有消除反馈循环**。scale 提到 0.15 就爆。
+
+#### 真正根因诊断（reset 时 robot 与 mocap 初始姿态不同步）
+
+| 项 | 训练时 | 我们 |
+|---|---|---|
+| reset 后 robot joint_pos | `motion_lib` 把 robot 设为 `mocap.dof[0]`（与 mocap 同步） | `default_joint_pos`（站立） |
+| reset 后 robot root_pose | `mocap.root_trans[0]` + `mocap.root_rot[0]` | scene init_state 默认 |
+| 第一帧 SONIC 看到的 obs | "robot 当前姿态 ≈ mocap 当前帧" → raw_action ≈ 0 | "robot 静止站立 + mocap 在 walking" → raw_action 想追 mocap → 大 |
+| obs.joint_pos rel | raw 本身（scale=1.0） | scale × raw（永远小于训练分布） |
+
+**反馈循环机制**：robot 与 mocap 初始姿态不同步 → SONIC 输出大 raw 想追上 → scale 小则 obs 反馈"我没动多少" → SONIC 输出更大 raw → 爆炸。
+
+#### 下游修复 2 计划
+
+1. **reset 时同步 sonic_robot 到 mocap 第 0 帧**：
+   - `asset.write_joint_state_to_sim(mocap_dof_0, joint_ids=_joint_ids)` — 29 个 SONIC 关节
+   - `asset.write_root_pose_to_sim([mocap_root_trans_0 + offset, mocap_root_rot_0])` — root pose
+   - `asset.write_root_velocity_to_sim(zero)` — 速度归零
+2. **action_scale 调回训练值** 1.0
+3. **时机**：第一次 reset 在 env 创建后，sonic_robot 物理已初始化。`SONICWholeBodyAction.reset()` 调用时机就可以做，类似 mocap_playback.py 验证脚本里的做法
+4. **预期**：robot 与 mocap 同步 → SONIC 第一帧输出 ≈ 0 → 反馈循环不触发 → 真实 walking 动作出现
 
 ### 当前空间约束（2026-05-24 实测）
 
