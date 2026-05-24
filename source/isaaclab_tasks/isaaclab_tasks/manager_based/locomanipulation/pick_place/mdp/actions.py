@@ -630,10 +630,23 @@ class SONICWholeBodyAction(ActionTerm):
         dec[0, 964:994] = self._hist_gravity_dir[env_idx].t().flatten().cpu().numpy()
         return dec
 
+    def _build_encoder_input(self) -> np.ndarray:
+        """Encoder 1762D 输入（阶段 3.2 D2：mode 字段最小试探）。
+
+        基于 observation_config.yaml 推测 offset 0-3 是 encoder_mode_4 字段。
+        填 [1,0,0,0] 假设 mode_id=0 (g1 mode) 是 one-hot；其余 1758D 暂全 zero。
+        如果 mode 信号到位，token_state 应带 g1 语义；decoder 输出预期比阶段 3.1 更稳。
+
+        待 D1 精确解 1762D 后再补 motion_joint_positions / anchor_orientation 等字段。
+        """
+        enc = np.zeros((1, self._encoder_input_dim), dtype=np.float32)
+        enc[0, 0] = 1.0  # encoder_mode_4 one-hot: mode_id=0 = g1
+        return enc
+
     def _run_sonic(self) -> torch.Tensor:
-        """Encoder zero-fill (阶段 3.1)，decoder 用真实 10-frame history。"""
+        """Encoder mode-only 输入（阶段 3.2 D2），decoder 用真实 10-frame history。"""
         n_act = self.cfg.sonic_action_dim
-        enc_in = np.zeros((1, self._encoder_input_dim), dtype=np.float32)
+        enc_in = self._build_encoder_input()
         out = np.zeros((self.num_envs, n_act), dtype=np.float32)
         for i in range(self.num_envs):
             tokens = self._encoder.run([self._enc_output_name], {self._enc_input_name: enc_in})[0]

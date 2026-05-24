@@ -538,6 +538,22 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 
      **路径已选 C → A**（2026-05-23）：3.1 物理验证已跑，机器人立刻摔倒 → **必须接 encoder，进 A 路径**。
 
+     **D2 最小试探**（2026-05-24，先于 D1 精确解）：
+     - `_build_encoder_input()` 只填 `encoder_mode_4 = [1,0,0,0]`（假设 offset 0-3、one-hot mode_id=0=g1），其余 1758D zero
+     - 目的：验证"mode 字段填对，token_state 带 g1 语义，decoder 输出更稳"假设
+     - 如果 D2 后 sonic_robot 悬空状态 action absmax 仍 ~1.27~2.62（与全 zero encoder 几乎无差）→ mode 字段 offset/编码可能错位 → 必须做 D1
+     - 如果 D2 后 absmax 明显变小 / 数值分布有规律变化 → mode 信号生效 → 继续 D1 精确填其他字段
+
+     **A 路径调研进展（D1 部分）**：
+     - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）
+     - 关键事实：`num_future_frames=10`、`num_bodies=14`（pelvis + 6 leg + torso + 6 arm，关键骨架点）
+     - 维度修正（已确认）：
+       - `motion_joint_positions_10frame_step5` = **420D**（10×14×3，body positions in body-local frame，非 joint angles！命名误导）
+       - `motion_anchor_orientation_10frame_step5` = **60D**（10×6）
+       - `motion_anchor_orientation` = **6D**（单帧）
+       - `motion_root_z_position_10frame_step5` = **10D**、`motion_root_z_position` = **1D**
+     - 累加已确认 ~921D，剩 ~841D 给 lower_body / vr / smpl / wrists 6 字段（待 D1 精确）
+
      备选路径：
      - **A. 硬解 1762**：读 sonic_release/config.yaml 中 obs term 的 func 定义 / C++ 部署代码；构造 self-reference 填 g1 mode 必需 4 字段，其余 zero
      - **B. 全 encoder zero-fill**：token_state 全 0（5min），作为下界 baseline
