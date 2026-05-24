@@ -878,14 +878,54 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
 - 极端姿态进 10-frame history → decoder 看到 OOD 输入 → action absmax 持续放大
 - 这与阶段 3.2 D1 v2 的 garbage 状态同质（当时也是 absmax 12+），只是现在 mocap 信号比 self-ref 提供了部分有效追踪（→ 三种现象并存）
 
-**已修**（[locomanipulation_g1_env_cfg.py:298](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py#L298)）：
+**第一轮修复**（[locomanipulation_g1_env_cfg.py:298](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py#L298)）：
 - `action_scale: 0.2 → 0.05`
 - 峰值偏移：18.58 × 0.05 = **0.93 rad / 单帧**，避开关节限位
-- 预期 joint_pos absmax 跌出 1.97 → history 回归合理 → action absmax 回落
 
-**待 GUI 再验**：
-- 顺：absmax 跌到 3~5、joint_pos 跌到 1.0~1.3、walking 动作变明显 → 进 walking 微调阶段
-- 不顺（仍涨）：scale 不是真根因，可能是 FK pelvis frame 定义错——当前实现只减了 pelvis translation，没剔除 root rotation 的影响。SONIC 训练时 14 body 应该在 **完全去 root pose 后**的 pelvis 坐标系，需要补 quat inverse 旋转
+### 阶段 3.4 GUI 第二轮（2026-05-24 实测，scale=0.05）
+
+| step | action absmax | std | joint_pos absmax |
+|---|---|---|---|
+| 50-300 | 3.2~3.5 稳定 | 1.15 稳定 | 0.19~0.54 |
+
+✅ **反馈循环已切断** + **关节远离限位**。
+❌ **但腿部不动 + 摔倒**：action_scale 0.05 × 3.5 ≈ 0.175 rad/帧 ≈ 10°/帧追不上 30fps walking 的髋膝 30~60° 摆动。robot 由重力被动摔倒（self_ref_body_pos 0.72 是 ragdoll 倒下不是有意 walking）。
+
+scale 在 **[0.05 太保守不动 / 0.2 反馈爆炸]** 没有 stable 中间区 → 说明 SONIC 收到的 mocap 信号本身就 OOD，scale 调参治标不治本。
+
+### 阶段 3.4 FK rotation 修复（2026-05-24，验证为非根因）
+
+候选根因 1：**FK pelvis frame 只去了 translation 没去 root rotation**，14 body 残留 world rotation 让 SONIC 看到 OOD body_pos。
+
+[precompute_mocap_body_pos.py:115-130](../scripts/tools/precompute_mocap_body_pos.py#L115-L130) 修复：
+```python
+rel_w = body14_t - pelvis_t            # 减 translation
+pelvis_R_T = pelvis_R.transpose(-1,-2) # pelvis world rotation transpose
+rel_b = einsum("tij,tnj->tni", pelvis_R_T, rel_w)  # 旋到 pelvis local frame
+```
+
+**实测**：`world-rel absmax=0.7531 → pelvis-local absmax=0.7552`（差 0.3%）。
+
+**结论**：当前 sample mocap 是直线行走（`root_rot absmax=0.9996` ≈ identity quaternion），pelvis world R ≈ I，去不去 rotation 数值几乎一样。**rotation 修复本身正确**（未来转弯 mocap 必须用），但**不是当前问题的根因**。
+
+### 阶段 3.4 上游验证工具（mocap_playback.py，2026-05-24）
+
+scale 调参无效 + rotation 修复无效，需要判定责任在 **mocap 数据上游** 还是 **SONIC 调用下游**。
+
+[scripts/tools/mocap_playback.py](../scripts/tools/mocap_playback.py)：绕过 SONIC 直接 kinematic 播放 mocap dof → 看是否合理 walking。
+
+- 复用 sonic_verify 的 env 启动（保留场景 + sonic_robot），但 step loop 里跳过 `env.step()`，直接 `asset.write_joint_state_to_sim(mocap_dof) + asset.write_root_pose_to_sim(mocap_root) + sim.step()`
+- 关键事实：mocap PKL 的 `dof (T, 29)` 顺序 = MJCF actuator order = **与 `SONIC_G1_29DOF_JOINT_ORDER` 完全一致**（确认自 [convert_soma_csv_to_motion_lib.py:130-162 `BONES_CSV_JOINT_NAMES`](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/data_process/convert_soma_csv_to_motion_lib.py#L130-L162)），可直接逐帧覆写
+- `frame_step=0.6`（30fps mocap → 50Hz sim），匹配真实速度
+- headless smoke test 通过：dof absmax=1.692、root_trans Y 方向位移 8.19m（向前走 8 米）= 数值层面 mocap 数据合理
+
+**判定三分支**：
+
+| GUI 现象 | 含义 | 下一步 |
+|---|---|---|
+| 腿前后摆 + 整体向前位移 ~8m 流畅 walking | mocap 数据 OK，问题在 SONIC 调用层（action 应用方式 / 帧率 / 时间窗 / 字段 unit） | 查 [sonic_release/config.yaml](D:/src/Isaac/GR00T-WholeBodyControl/sonic_release/config.yaml) 训练 action term 定义 |
+| 关节穿模 / 抖动 / 不像 walking | mocap 数据本身坏（关节单位 / 顺序 / retarget 错） | mocap 数据是死路，需要别的 walking 源（planner_sonic.onnx 或 BONES-SEED 重新 retarget） |
+| 卡在原地 / 关节几乎不变 | dof 字段是 placeholder（virtual） | 看具体哪个 joint 在变 + 切别的 mocap 序列 |
 
 ### 当前空间约束（2026-05-24 实测）
 
