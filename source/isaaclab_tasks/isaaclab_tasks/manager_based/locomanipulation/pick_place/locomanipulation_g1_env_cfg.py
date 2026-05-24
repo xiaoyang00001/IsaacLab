@@ -79,11 +79,11 @@ WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 # init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
 # X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
 #
-# 阶段 3.1 物理验证已做（2026-05-23）：立刻摔倒（absmax=14~16），decoder 真观测不足以维持平衡。
-# 改回 fix_root_link=True + disable_gravity=True，隔离训练分布外问题，让 3.2 接 encoder 时机器人在站立姿态。
+# 阶段 3.3 E3 D：mocap anchor 时变信号已接，解 fix_root_link 再次物理验证
+# 对比 3.1 初次物理验证（立刻摔倒），看 mocap motion 信号是否提供有意义的平衡反馈
 SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
-SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
-SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
 SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 
