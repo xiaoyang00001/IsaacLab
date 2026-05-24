@@ -608,24 +608,22 @@ class SONICWholeBodyAction(ActionTerm):
         self._mocap_frame = 0
 
         # 从 smpl_joints 取 14 个 body 位置（近似 SONIC body link 位置）
-        # smpl_joints shape (F, 24, 3) in world frame → 减 pelvis 得 in pelvis frame（粗略近似，不转 yaw）
+        # 注意：robot_filtered 的 PKL 中 smpl_joints 是全零 placeholder！
+        # g1 mode 真正需要的是 dof + FK → body_pos，但 Windows 上 pinocchio 编译失败。
+        # 这里先 fallback 到 self-ref；FK 方案待后续解决。
         self._mocap_body_pos_b: torch.Tensor | None = None
-        if "smpl_joints" in motion:
-            smpl = motion["smpl_joints"]  # (F, 24, 3)
-            pelvis = smpl[:, 0:1, :]  # (F, 1, 3)
-            rel = smpl[:, list(SMPL_TO_SONIC_BODY_IDX), :] - pelvis  # (F, 14, 3) in world frame
+        smpl = motion.get("smpl_joints")
+        if smpl is not None and np.abs(smpl).max() > 1e-6:
+            pelvis = smpl[:, 0:1, :]
+            rel = smpl[:, list(SMPL_TO_SONIC_BODY_IDX), :] - pelvis
             self._mocap_body_pos_b = torch.from_numpy(rel).to(self.device).float()
-            print(
-                f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
-                f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} "
-                f"smpl_joints shape={smpl.shape} → 14 body_pos cached (SMPL approx)"
-            )
+            body_src = f"SMPL approx (absmax={np.abs(rel).max():.3f})"
         else:
-            print(
-                f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
-                f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} "
-                f"(NO smpl_joints, body_pos fallback to self-ref)"
-            )
+            body_src = "self-ref fallback (smpl_joints zero/missing; FK not implemented)"
+        print(
+            f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
+            f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} body_pos={body_src}"
+        )
 
     def _init_sonic_body_indices(self):
         """找 SONIC 训练用 14 个 body link 在 USD articulation 中的索引。"""
