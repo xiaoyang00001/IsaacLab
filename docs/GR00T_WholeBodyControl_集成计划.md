@@ -560,11 +560,36 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      - 但 `action absmax=10~22, mean=-1~-3, joint_pos absmax=2.6~3.1（撞限位）` ❌ — 与 D2 失败模式一致
      - **根因**：body data 与 mode 都对，问题在 **flatten layout** —— 当前用 `np.tile(body_flat, 10)` 是 **frame-major repeat**（`[f0_b0..b13, f1_b0..b13, ...]`），但 decoder 端已验证 SONIC 用 **dim-major**
 
-     **D1 修正（dim-major repeat）**（2026-05-24，待验证）：
-     - 改用 `np.repeat(body_flat, 10)` —— **dim-major**（`[d0×10, d1×10, ..., d41×10]`，每维 10 帧连续）
-     - 同样改 identity 6D：`np.repeat([1,0,0,0,1,0], 10)` 而非 `np.tile`
+     **D1 修正 v2（dim-major repeat）**（2026-05-24）：
+     - 改用 `np.repeat(body_flat, 10)` —— dim-major（每维 10 帧连续）
      - **关键区别**：`np.tile([a,b,c], 3)`=`[a,b,c,a,b,c,a,b,c]`（frame-major）；`np.repeat([a,b,c], 3)`=`[a,a,a,b,b,b,c,c,c]`（dim-major）
-     - 待验证：absmax 应落回 < 3 + 与 zero-fill (1.27~2.62) 不同（因为 motion ref 真填了 self-ref）
+     - **结果**：仍 garbage（`absmax=12.75, mean=-1.79, std=4.52` vs frame-major `14.54, -2.07, 5.30` 几乎相同）
+
+     **standalone encoder layout probe** ([scripts/tools/sonic_encoder_layout_probe.py](../scripts/tools/sonic_encoder_layout_probe.py))（2026-05-24）：
+
+     直接加载 ONNX 跑遍 layout 组合（30 秒，不需要 IsaacSim）：
+
+     | 测试 | encoder | decoder history | action absmax |
+     |---|---|---|---|
+     | baseline | 全 zero | zero | **1.92** ✅ |
+     | body_pos dim-major + id6 dim-major | self-ref | zero | **2.75~2.93** ✅ |
+     | body_pos frame-major + id6 frame-major | self-ref | zero | **3.21~3.32** ≈ OK |
+     | mode_id=1 (teleop) only | zero | zero | 1.09 |
+     | sonic_verify D1 v2 (实际) | self-ref dim-major | **真实 history** | **12~22** ❌ |
+
+     **结论**：**问题不在 encoder layout**！encoder 单独填充时 absmax 总在 1.7~3.3 合理范围。
+     **真实根因**：encoder token + decoder real history 的组合产生 garbage。
+
+     **推测的本质问题**：sonic_robot 当前 `fix_root_link=True` 让 decoder history 是"完全静止"
+     （joint_vel=0、base_ang_vel=0、joint_pos 不变、gravity 不变）——
+     这是 **SONIC 训练分布外**（训练时机器人在跟踪 mocap 动作）。
+     模型看到"encoder token 说追踪 self-ref + history 说机器人完全僵死"→ 解读为异常 → garbage。
+
+     **下一步路径选择**（2026-05-24，待用户决定）：
+     - **E1. 物理解锁**：解 fix_root_link 让机器人有真实物理 history（base_ang_vel/joint_vel 非零），看是否回到训练分布。风险：可能仍立刻摔倒
+     - **E2. 缓冲 garbage**：action_scale 调小到 0.1~0.2，让 absmax=12 也只产生 1.2~2.4 rad 偏移
+     - **E3. 跳到 3.3 接真实 mocap**：从 sample_data 加载 walking mocap 帧（不再用 self-ref），符合 SONIC 训练范式
+     - **E4. 更深 standalone 诊断**：在 probe 里模拟真实 history（G1 default joint pos × 10 帧 + gravity），复现 absmax=12，定位是 encoder 哪个字段引发的
 
      **A 路径调研进展（D1 部分）**：
      - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）
