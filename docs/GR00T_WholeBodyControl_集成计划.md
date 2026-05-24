@@ -627,7 +627,15 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
      数值范围与 encoder zero-fill 基线（absmax=1.27~2.62）几乎一致，反馈循环被打破。
      但 self-ref 仍是 OOD 假设，sonic_robot 摆出"奇怪固定姿态"而非真有意义的目标跟踪。
 
-     **下一步：E3 接真实 mocap**（替代 self-ref）—— `python download_from_hf.py --sample` 下 walking 序列。
+     **E3 第一步 mocap 接入**（2026-05-24，代码已落地，待 GUI 验证）：
+     - 已下载 sample mocap：`D:/src/Isaac/GR00T-WholeBodyControl/sample_data/robot_filtered/210531/walk_forward_amateur_001__A001.pkl`（1202 帧、30 fps、含 dof/root_rot/smpl_joints）
+     - **mocap 格式**：joblib + zlib 压缩（非 raw pickle）；顶层 `{motion_name: motion_dict}`；root_rot 是 **xyzw 顺序**（IsaacLab 用 wxyz，需 `[3,0,1,2]` 重排）
+     - `_load_mocap()` 加载 + 转 wxyz + 缓存到 device tensor (1202, 4)
+     - `_build_encoder_input()` 的 `motion_anchor_ori_b_mf_nonflat` 改为：取未来 10 帧（step=5）的 mocap root_rot → matrix_from_quat → 前两列 row-major reshape → dim-major flatten 写入 offset 431:491
+     - `_advance_mocap()` 每 process_actions 推进 1 帧（mocap 跑得比 env step 略快，加大时变信号）
+     - body_pos 仍 self-ref（待 step 3b 加 forward kinematics 才能给真实 mocap body_pos）
+     - `SONICWholeBodyActionCfg.mocap_path` 新增字段；env_cfg 默认设为 sample mocap 路径
+     - 待验证：absmax 维持 ~2 不爆炸 + sonic_robot 视觉上是否随 mocap 周期有节奏感的姿态变化（vs 之前 self-ref 固定姿态）
 
      **A 路径调研进展（D1 部分）**：
      - 部署字段 ↔ 训练 obs term ↔ func 映射已找全（在 gear_sonic/envs/manager_env/mdp/observations.py）

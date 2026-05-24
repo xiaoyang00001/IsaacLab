@@ -90,6 +90,8 @@ SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 # SONIC ONNX 模型路径（由 download_from_hf.py 下载，详见 docs/GR00T_WholeBodyControl_集成计划.md）
 SONIC_ENCODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
 SONIC_DECODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+# Walking mocap (4MB sample，由 download_from_hf.py --sample 下载)
+SONIC_MOCAP_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/sample_data/robot_filtered/210531/walk_forward_amateur_001__A001.pkl"
 
 # 模拟骨骼数据驱动的全身关节列表（缺失关节会被 AutoWalkAction 自动跳过）
 WALKER_WHOLE_BODY_JOINTS = [
@@ -287,15 +289,14 @@ class ActionsCfg:
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
     # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理
-    # 阶段 3.2 D1 self-ref + joint_pos_rel 修复后；
-    # action_scale=0.2 缓冲 self-ref 反馈循环（standalone 显示 self-ref 是 OOD，反馈放大 absmax → 12+）。
-    # 阶段 3.3 接真实 mocap 替代 self-ref 后再调回 1.0。
+    # 阶段 3.3 E3：接 walking mocap 替代 self-ref + identity，给 encoder 时变 motion 信号
     sonic_wholebody = SONICWholeBodyActionCfg(
         asset_name="sonic_robot",
         encoder_path=SONIC_ENCODER_PATH,
         decoder_path=SONIC_DECODER_PATH,
         joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
         action_scale=0.2,
+        mocap_path=SONIC_MOCAP_PATH,
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）

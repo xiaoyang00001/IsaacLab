@@ -16,7 +16,7 @@ from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -528,6 +528,7 @@ class SONICWholeBodyAction(ActionTerm):
         self._init_history()
         self._init_sonic_body_indices()
         self._load_policies()
+        self._load_mocap()
         self._debug_counter = 0
 
         if self.num_envs > 1:
@@ -553,6 +554,41 @@ class SONICWholeBodyAction(ActionTerm):
         self._hist_last_actions = torch.zeros(N, H, J, device=dev)
         self._hist_gravity_dir = torch.zeros(N, H, 3, device=dev)
         self._hist_gravity_dir[:, :, 2] = -1.0
+
+    def _load_mocap(self):
+        """加载 walking mocap 序列，提供时变 motion anchor orientation 给 encoder。
+
+        E3 第一版：仅用 mocap 的 root_rot 给 anchor_ori，body_pos 仍 self-ref。
+        后续可加 forward kinematics 让 body_pos 也跟 mocap pose。
+        """
+        path = self.cfg.mocap_path
+        if not path or path == "":
+            self._mocap_root_rot_wxyz = None
+            self._mocap_num_frames = 0
+            print("[IsaacLab] [SONIC] no mocap_path; encoder anchor_ori 用 identity（self-ref）")
+            return
+        try:
+            import joblib
+        except ImportError as exc:
+            raise ImportError("SONIC mocap 加载需要 joblib，请 pip install joblib") from exc
+        raw = joblib.load(path)
+        # 顶层是 {motion_name: motion_dict}
+        motion_name = next(iter(raw.keys()))
+        motion = raw[motion_name]
+        root_rot_xyzw = motion["root_rot"]  # (F, 4) xyzw 顺序（mocap 标准）
+        # 转 IsaacLab wxyz: [3, 0, 1, 2]
+        root_rot_wxyz = root_rot_xyzw[:, [3, 0, 1, 2]]
+        self._mocap_root_rot_wxyz = torch.from_numpy(root_rot_wxyz).to(self.device).float()
+        self._mocap_num_frames = self._mocap_root_rot_wxyz.shape[0]
+        self._mocap_fps = float(motion.get("fps", 30))
+        # _10frame_step5 = 10 帧、step=5（间隔 5 mocap 帧 ≈ 0.17s）
+        self._mocap_step = 5
+        # 当前帧索引（每 env 一个，方便不同 env 错位采样；此处单 env 简化）
+        self._mocap_frame = 0
+        print(
+            f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
+            f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} duration={self._mocap_num_frames/self._mocap_fps:.1f}s"
+        )
 
     def _init_sonic_body_indices(self):
         """找 SONIC 训练用 14 个 body link 在 USD articulation 中的索引。"""
@@ -725,6 +761,7 @@ class SONICWholeBodyAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor):
         self._push_history()
+        self._advance_mocap()
         action_rel = self._run_sonic()
         n_resolved = len(self._joint_ids)
         # SONIC 训练用 JointPositionActionCfg(use_default_offset=true)，输出 = 相对 default 的偏移

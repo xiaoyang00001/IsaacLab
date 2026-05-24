@@ -115,3 +115,12 @@ class SONICWholeBodyActionCfg(ActionTermCfg):
     SONIC 训练时 IsaacLab 默认 scale=1.0，但 zero-fill 观测推理时 decoder 输出可达 ±2 rad，
     直接 ×1 会让机器人剧烈晃动。最小骨架阶段保守用 0.25；接入真实观测后可调回 1.0。
     """
+
+    mocap_path: str = ""
+    """walking mocap PKL 路径（joblib 格式，{motion_name: {root_rot, dof, ...}}）。
+
+    用作 SONIC encoder 的 motion reference 源，替代 self-reference。
+    第一版仅用 root_rot 给 anchor_orientation；后续可加 forward kinematics 算 body_pos。
+    设为空字符串则 fallback 到 self-ref + identity anchor。
+    建议路径：`D:/src/Isaac/GR00T-WholeBodyControl/sample_data/robot_filtered/210531/walk_forward_amateur_001__A001.pkl`
+    """
