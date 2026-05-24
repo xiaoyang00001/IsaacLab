@@ -1,7 +1,7 @@
 # GR00T-WholeBodyControl 集成计划
 
-> **进度：阶段 1（环境准备）+ 阶段 2（最小骨架）+ 阶段 3.1（真实 decoder 观测）✅ headless 全部通过于 2026-05-23**
-> 仓库已克隆、`gear_sonic` core 已装入 `env_isaaclab`、GEAR-SONIC ONNX + PyTorch ckpt 已下载、`SONICWholeBodyAction` 骨架已落地为场景中的第 4 个机器人 `sonic_robot`、994D decoder 端按真实 10-frame history 拼装（encoder 仍 zero-fill），均以 `sonic_verify.py --headless --max_steps 200` 实测 200 帧零错。GUI 视觉变化眼测尚未做。详见下方"阶段 1 / 阶段 2 完成纪要"。
+> **进度：阶段 1（环境）+ 阶段 2（骨架）+ 阶段 3.1（真实 decoder 观测）+ 阶段 3.2（encoder 真实布局）+ 阶段 3.3（mocap anchor_ori + 物理验证）✅ 通过于 2026-05-24**
+> sonic_robot 解 fix_root_link 后**站立时长 > 5 秒**；mocap 60D anchor_ori 时变信号已接入 encoder；action absmax 稳定在 1.65~3.02。**唯一剩余卡点是 body_pos FK**（mocap PKL 的 smpl_joints 全 0，需要 G1 自己的 forward kinematics 算 14 body in pelvis frame）。详见下方"已完成 / 剩余工作梳理"。
 
 ## 概述
 
@@ -706,6 +706,157 @@ walker_sonic = SONICWholeBodyActionCfg(...)  # GR00T 实现
    - [ ] 集成 VLA 功能（需补 `gear_sonic[inference]`）
    - [ ] 针对特定任务微调（需补 30 GB SMPL + `gear_sonic[training]`，64+ GPU 训练）
    - [ ] 部署到真实 G1 机器人（C++ 推理栈 + TensorRT）
+
+---
+
+## 已完成 / 剩余工作梳理（2026-05-24）
+
+### ✅ 已完成
+
+#### 阶段 1 — 环境准备
+- GR00T-WholeBodyControl 仓库克隆（2.17 GiB）
+- `env_isaaclab` 装 `gear_sonic` core（IsaacLab 2.3.2 + Py 3.11.15 + Torch 2.7.0+cu128）
+- GEAR-SONIC ONNX（encoder 48MB + decoder 40MB）+ PyTorch ckpt + observation_config.yaml + planner ONNX 全部下载
+- `onnxruntime-gpu` 1.26.0 装好（CPU provider dual-pass 6.45ms，单 env 50Hz 足够）
+- Windows 坑已记录：`conda run` 在 conda 25.5.1 上崩 → 直调 python.exe；`check_environment.py` 的 `os.statvfs` Windows 不可用
+
+#### 阶段 2 — 最小骨架
+- 新增 `SONICWholeBodyAction` + `SONICWholeBodyActionCfg`（< 200 行）
+- 新增 `sonic_robot`（第 4 个机器人），不动 robot/remote_robot 的 IK + ZMQ 耦合
+- `sonic_verify.py` 启动脚本（手动 import 触发 gym.register，绕过 `_BLACKLIST_PKGS`）
+- zero-fill encoder 跑通 dual-pass ONNX → 29D action → joint write 整条 pipeline
+- headless 200 帧零错
+
+#### 阶段 3.1 — 真实 decoder 观测（994D）
+- 10-frame history buffer 5 块（base_ang_vel / joint_pos_rel / joint_vel / last_actions / gravity_dir）
+- **dim-major flatten** 实测确认（`tensor.t().flatten()`，vs frame-major absmax 25→1.27 差距明显）
+- action absmax 稳定 1.27~2.62（vs encoder zero-fill 基线一致）
+- `joint_pos_rel` = `joint_pos - default_joint_pos`（对齐 sonic_release/config.yaml line 458）
+
+#### 阶段 3.2 — Encoder 1762D 真实布局
+- mode_id=0（g1）确认是 1D 标量 long，不是 4D one-hot（D2 失败教训）
+- body_pos 420D layout = 10×14×3，**body in pelvis frame**，dim-major flatten（`np.repeat`）
+- anchor_ori 60D = 10×6（rotation matrix 前 2 列）
+- 14 body 名单 `SONIC_BODY_NAMES` 已定义并 resolve 通过
+- standalone 探测脚本 `sonic_encoder_layout_probe.py` 验证 layout 假设
+
+#### 阶段 3.3 — Mocap anchor_ori 接入 + 物理验证
+- sample mocap：`walk_forward_amateur_001__A001.pkl`（1202 帧、30 fps、40.1s walking）
+- 格式：**joblib + zlib 压缩**；root_rot **xyzw → wxyz**（`[3,0,1,2]` 重排）
+- `_advance_mocap` 每 process_actions 推进 1 帧
+- mocap-based anchor_ori 60D 时变信号已通过 encoder token 影响 decoder
+- **关键突破**：解 `fix_root_link` 让 sonic_robot 物理生效 → **站立时长 > 5 秒**（vs 3.1 立刻摔倒）
+- `action_scale: 1.0 → 0.2` 缓冲 self-ref 反馈循环 → action absmax 1.65~3.02 稳定
+
+#### 工程化基础设施
+- `sonic_verify.py` headless / GUI 验证脚本
+- 每 50 步 debug print：action mean/absmax/std + joint_pos absmax + self_ref_body_pos 统计
+- 文档 + memory 全部同步
+
+### ❌ 未完成
+
+#### 核心阻塞：body_pos FK
+- 现状：mocap PKL 的 `smpl_joints (1202, 24, 3)` 是 placeholder 全 0，自动 fallback 到 self-ref
+- self-ref 是训练分布外（SONIC 训练 reference=mocap 帧 ≠ robot 自身），导致 body_pos 420D 仍是主导误差源
+- 三个待选方案：
+  - **F1** IsaacLab Articulation runtime 临时驱动 + sim step 预算（30-60 min，可能 sim step 时序卡顿）
+  - **F2** 独立 IsaacSim 启动脚本预算 body_pos 到 `.npy` 缓存（45 min，最干净，推荐）
+  - **F3** 手写 G1 FK 链（60-90 min，复杂、易出错）
+- pinocchio Windows 安装失败（cmeel-boost 编译缺 boost），暂不走 pinocchio 路线
+
+#### 次要清理项
+- [ ] `action_scale: 0.2 → 1.0` 调回（body_pos FK 落地后再尝试）
+- [ ] `sonic_robot.init_state.pos` 当前硬编码 `(-2.0, 11.008, 0.75)`，应改成 event 对齐 walker_robot
+- [ ] mocap 帧率：当前 1 frame/process_actions，实际播放 1.67x 真实速度（应每 1/0.6 ≈ 1.67 step 推一帧）
+- [ ] 运行时打印 `articulation.joint_names` 与 `SONIC_G1_29DOF_JOINT_ORDER` 对照，确认无 perm 错位
+- [ ] CUDA provider 启用（缺 cublasLt64_12.dll / cuDNN 9）— 单 env 不急
+
+#### 原意图未完成
+- [ ] SONIC 真正接管 `robot` / `remote_robot`（剥离 upper_body_ik + ZMQ 紧耦合，工作量数倍）
+- [ ] mocap 切换 / 多动作支持
+- [ ] target_vel → planner_sonic.onnx → motion ref（命令驱动接口，B 路径）
+
+#### 长期目标（不在本阶段范围）
+- [ ] VLA 集成（需 `gear_sonic[inference]` + Isaac-GR00T 客户端）
+- [ ] 任务微调（需 30 GB SMPL + 64+ GPU）
+- [ ] 部署到真实 G1（C++ + TensorRT）
+
+### 关键状态判断
+
+整个 pipeline 的"地基"已经牢固：ONNX 加载、994D decoder 完整观测、1762D encoder layout、mocap 加载与 anchor 信号、物理验证、反馈循环已破。**核心剩余卡点只有一个：body_pos FK**。FK 解决后预期 action 数值范围进一步降低 + 行走动作真正可识别，整个 pipeline 进入"训练分布内的真实推理"。
+
+下一步推荐：**F4（gear_sonic 自带 torch FK）**——见下方"BONES-SEED + F4 调研"。原 F2 独立 IsaacSim 预算脚本降级为备选。
+
+---
+
+## BONES-SEED 与 F4 方案调研（2026-05-24）
+
+### BONES-SEED 数据集判断
+
+调研背景：知识库 [[BONES-SEED数据集]] 笔记暗示 motion_lib 目录格式自带 `body_pos.csv` + `body_quat.csv`，可能直接解 body_pos FK 卡点。
+
+**实测核实结论：BONES-SEED 不直接解 FK 卡点**。
+
+| 路径 | 真相 |
+|---|---|
+| motion_lib 三件套（joint_pos / body_pos / body_quat.csv） | 是 SOMA retargeter 的**输出**（已 FK 过），不是 BONES-SEED 原始格式 |
+| BONES-SEED `g1/csv/` 平 CSV 文件 | 只有 `Frame + 6 root cols + 29 joint angles`，**没有 body_pos** |
+| 转换器 [convert_soma_csv_to_motion_lib.py:209-214](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/data_process/convert_soma_csv_to_motion_lib.py#L209-L214) | `body_pos_w` 写成 zeros 占位，只填了 root；输出 PKL 的 `smpl_joints` 也是 zeros |
+
+→ BONES-SEED CSV 与当前 sample PKL 完全同款问题：dof 真、body_pos 假。**单靠 BONES-SEED 仍需 FK**。
+
+### BONES-SEED 的真实价值（中长期，非当前阶段）
+
+| 时间窗 | 用途 | 紧迫度 |
+|---|---|---|
+| 当前阶段 | 不解 FK 卡点 | ⛔ 不下载 |
+| F4 落地后 | `g1.tar.gz`（估 10-30GB）→ 转换器 → F4 补 body_pos → 74K locomotion 序列替代当前 1 个 walking | 🟡 锦上添花 |
+| 语言条件控制 | `seed_metadata_v002_temporal_labels.jsonl` 6 万行时序文本标注 → 替代 planner_sonic.onnx 的 B 路径 | 🟡 命令驱动可选路 |
+| SONIC 微调 | `gear_sonic[training]` 路径必需训练数据源（含 SMPL 30GB） | 🟢 当前阶段外 |
+
+### F4 方案：gear_sonic 自带纯 torch FK
+
+调研意外发现 `Humanoid_Batch.fk_batch()` 是纯 PyTorch G1 FK，**无 pinocchio 依赖**——绕开了之前 F1/F2/F3 三选一的痛点。
+
+[torch_humanoid_batch.py:360 `Humanoid_Batch.fk_batch()`](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/utils/motion_lib/torch_humanoid_batch.py#L360)：
+
+| 项 | 值 |
+|---|---|
+| 输入 | `pose (B, T, 30, 3) axis-angle` + `trans (B, T, 3)` + fps |
+| 输出 | `wbody_pos (B, T, N_bodies, 3) 世界坐标` + `wbody_rot` |
+| 依赖 | torch + numpy + scipy + lxml + open3d（顶部 import；fk_batch 本身是否用到待确认） |
+| MJCF | `gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml`（仓库自带） |
+| 当前 env_isaaclab 缺 | `lxml`（必装，wheel 几 MB） + `open3d`（500MB+，可能可 stub） |
+
+### 落地步骤（F4）
+
+1. **依赖安装**（先 lxml，再决定 open3d）：
+   ```
+   D:/miniconda3/envs/env_isaaclab/python.exe -m pip install lxml
+   # 试 import Humanoid_Batch；若卡 open3d 再决定装 / stub
+   ```
+2. **新建 `scripts/tools/precompute_mocap_body_pos.py`**：
+   - 加载 sample PKL（已有：root_rot wxyz + pose_aa + root_trans_offset）
+   - 调 `Humanoid_Batch.fk_batch(pose_aa, root_trans, fps=30)` → wbody_pos (T, N, 3)
+   - 减去 pelvis 坐标 → pelvis frame
+   - 按 `SONIC_BODY_NAMES` 14 个名字 resolve body index → (T, 14, 3)
+   - 落 `.npy` 缓存到 mocap 同目录（< 1 MB）
+3. **修改 `SONICWholeBodyAction`**：
+   - `_load_mocap()` 同步加载 `.npy` body_pos
+   - `_build_encoder_input()` 用 mocap body_pos 替换 self-ref，flatten 仍 dim-major `np.repeat`
+4. **GUI 验证**：观察 action absmax 是否进一步下降 + 是否出现真实行走动作
+
+### 当前空间约束（2026-05-24 实测）
+
+- D 盘剩余 **15.3 GB**、C 盘剩余 **13.1 GB**
+- F4 最小开销：`lxml` < 10 MB，`.npy` 缓存 < 1 MB
+- F4 完整开销：+ `open3d` ~500 MB
+- BONES-SEED `g1.tar.gz`：估 10-30 GB → **当前不可承受**
+- BONES-SEED 完整 114 GB → **完全超出**
+
+→ 当前阶段只走 F4，BONES-SEED 留到清理出 30+ GB 后再考虑。
+
+---
 
 ## 参考文献
 
