@@ -799,11 +799,17 @@ class SONICWholeBodyAction(ActionTerm):
         """
         dec = np.zeros((1, self._decoder_input_dim), dtype=np.float32)
         dec[:, :64] = tokens
+        # 探针：force_zero_decoder_history → 全 history (offset 64:994) 留 zero，仅 token
+        if self.cfg.force_zero_decoder_history:
+            return dec
         # (10, K).T → (K, 10) → flatten → [d0_f0..f9, d1_f0..f9, ...]
         dec[0, 64:94] = self._hist_base_ang_vel[env_idx].t().flatten().cpu().numpy()
         dec[0, 94:384] = self._hist_joint_pos[env_idx].t().flatten().cpu().numpy()
         dec[0, 384:674] = self._hist_joint_vel[env_idx].t().flatten().cpu().numpy()
-        dec[0, 674:964] = self._hist_last_actions[env_idx].t().flatten().cpu().numpy()
+        # 探针：force_zero_last_action_history → his_last_actions 留 zero（其余字段保留）
+        # 用于隔离 _last_action 反馈是否是 step 3+ 爆炸的根因
+        if not self.cfg.force_zero_last_action_history:
+            dec[0, 674:964] = self._hist_last_actions[env_idx].t().flatten().cpu().numpy()
         dec[0, 964:994] = self._hist_gravity_dir[env_idx].t().flatten().cpu().numpy()
         return dec
 
@@ -895,10 +901,20 @@ class SONICWholeBodyAction(ActionTerm):
             action = self._decoder.run([self._dec_output_name], {self._dec_input_name: dec_in})[0][0]
             out[i] = action
 
-        if self.cfg.probe_encoder_mode != 0 or self.cfg.force_zero_body_pos:
+        if (
+            self.cfg.probe_encoder_mode != 0
+            or self.cfg.force_zero_body_pos
+            or self.cfg.force_zero_last_action_history
+            or self.cfg.force_zero_decoder_history
+        ):
             absmax = float(np.abs(out).max())
-            print(f"[SONIC PROBE] mode={self.cfg.probe_encoder_mode} zero_body={self.cfg.force_zero_body_pos} "
-                  f"action_absmax={absmax:.4f} mean={out.mean():.4f} std={out.std():.4f}")
+            print(
+                f"[SONIC PROBE] mode={self.cfg.probe_encoder_mode} "
+                f"zero_body={self.cfg.force_zero_body_pos} "
+                f"zero_la_hist={self.cfg.force_zero_last_action_history} "
+                f"zero_dec_hist={self.cfg.force_zero_decoder_history} "
+                f"action_absmax={absmax:.4f} mean={out.mean():.4f} std={out.std():.4f}"
+            )
 
         return torch.from_numpy(out).to(device=self.device, dtype=torch.float32)
 

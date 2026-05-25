@@ -445,6 +445,12 @@ class ActionsCfg:
         joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
         action_scale=1.0,
         mocap_path=SONIC_MOCAP_PATH,
+        # 探针字段（默认 False，按需开启验证反馈循环驱动）：
+        # - force_zero_last_action_history: 屏蔽 his_last_actions (offset 674:964)
+        #   实测 step 250 absmax 2-8 (vs 基线 16+)，证明 _last_action 是主反馈驱动
+        # - force_zero_decoder_history: 屏蔽全部 history (offset 64:994)，仅留 token
+        #   实测 step 1-250 absmax 完全 flat=2.7717（精确到小数 4 位），证明 decoder
+        #   history 是反馈循环唯一驱动 — SONIC ONNX 完全依赖 history 训练分布
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）

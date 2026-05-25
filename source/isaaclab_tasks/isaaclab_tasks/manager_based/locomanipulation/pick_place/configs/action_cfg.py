@@ -130,3 +130,12 @@ class SONICWholeBodyActionCfg(ActionTermCfg):
 
     force_zero_body_pos: bool = False
     """探针：强制将 body_pos 字段清零，隔离 body_pos 对 absmax 的贡献。"""
+
+    force_zero_last_action_history: bool = False
+    """探针：强制 decoder 输入的 his_last_actions (offset 674:964) 清零，
+    隔离 _last_action 累积反馈是否是 step 3+ 爆炸的根因。"""
+
+    force_zero_decoder_history: bool = False
+    """探针：强制 decoder 输入的全部 history (offset 64:994，含 base_ang_vel /
+    joint_pos / joint_vel / last_actions / gravity_dir) 清零，
+    仅保留 token_state (offset 0:64)。如果还爆，说明根因在 encoder token 本身。"""
