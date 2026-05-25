@@ -1196,6 +1196,36 @@ A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / re
   - **结果（2026-05-25）**：step1 zero_body=1.97 vs mocap=2.56（降 23%），但 step3+ 仍爆炸到 22+ —— **body_pos 不是根因**，反馈循环在别处
 - 其他保留在 [阶段 3.4 决策：选 C 收尾](#阶段-34-决策选-c-收尾2026-05-24) 的 C/D 项
 
+### 阶段 B 决定性探针：decoder history 是反馈循环唯一驱动（2026-05-25，分支 `gr00t-sonic-bodypos-probe`）
+
+新增两个探针 [action_cfg.py:131-139](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/configs/action_cfg.py#L131-L139)：
+- `force_zero_last_action_history`：屏蔽 `his_last_actions` (decoder offset 674:964)
+- `force_zero_decoder_history`：屏蔽**全部** history (decoder offset 64:994)，仅保留 token
+
+**对照实验**（headless，250 step）：
+
+| 实验 | step 1 | step 50 | step 250 | 现象 |
+|---|---|---|---|---|
+| 基线（保留全 history） | 2.56 | 14.48 | 16.49 / joint_pos 撞限位 3.09 | 反馈循环爆炸 |
+| zero `his_last_actions` | 2.56 | ~3-5 | 5-8 / joint_pos 2.76 | 主反馈消除，缓慢漂移 |
+| **zero 全 decoder history** | **2.77** | **2.77** | **2.77（精确到小数 4 位完全相同）** | **完全 flat，无 drift** |
+
+**根因确认**：
+1. **decoder history 是反馈循环唯一驱动**：history 全 zero 时 raw_action ≈ `f(encoder_token)` 是确定函数，250 step 输出毫无变化 = 整个 closed-loop drift 都来自 history 字段
+2. **`_last_action` 是主驱动**：单独屏蔽它就能让 absmax 从 16+ 降到 5-8
+3. **`joint_pos/joint_vel/base_ang_vel/gravity_dir` history 是次级累积**：屏蔽 `_last_action` 后还能让 absmax 从 ~3 慢涨到 ~7
+
+**为什么 history 与训练分布不匹配**（已查证 obs 字段单位/坐标系全对齐，下面是猜测）：
+- **训练时 obs noise vs 推理时无 noise**：sonic_release/config.yaml policy obs 配 AdditiveUniformNoise（joint_pos n=±0.01, joint_vel n=±0.5, ang_vel n=±0.2, gravity n=±0.05），SONIC 学到了"对 noise robust 的特征"，推理时严格干净 obs 反而 OOD
+- **训练 reset 时 motion_lib 初始化 robot 到 mocap[t_random]**，我们只支持 mocap[0]
+- **训练 dropout / batch_norm 推理模式差异**
+- **PyTorch ckpt vs ONNX 数值差异**（动静差 / 算子精度）
+
+**修复方向 = B 路径**：
+- 装 `gear_sonic[training]` extras → 用 PyTorch ckpt 直接推理（绕开 ONNX）
+- 加 obs noise 推理（最快测试，30 分钟）
+- 完整接 motion_lib（reset 时同步 robot 到 mocap[t_random]）
+
 ### 阶段 3.4 决策：选 C 收尾（2026-05-24）
 
 用户决策：**接受当前为半成品停下**，A / B 写入下方"后续 TODO"，本分支阶段 3.4 工作收尾。
