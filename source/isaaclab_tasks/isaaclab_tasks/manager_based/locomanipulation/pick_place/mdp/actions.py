@@ -832,11 +832,14 @@ class SONICWholeBodyAction(ActionTerm):
         """
         enc = np.zeros((1, self._encoder_input_dim), dtype=np.float32)
 
-        # offset 0: encoder_index = 0 → g1 mode (cast to long in encoder forward)
-        enc[0, 0] = 0.0
+        # offset 0: encoder_index (probe override or default g1=0)
+        enc[0, 0] = float(self.cfg.probe_encoder_mode)
 
         # offset 1:421 = command_multi_future_nonflat (10 frames × 14 bodies × 3, dim-major)
-        if self._mocap_body_pos_b is not None:
+        if self.cfg.force_zero_body_pos:
+            # 探针模式：body_pos 清零，隔离其对 absmax 的贡献
+            pass
+        elif self._mocap_body_pos_b is not None:
             # mocap 时变 body_pos: 取未来 10 帧（step=5），每帧 14×3
             n = self._mocap_num_frames
             indices = (self._mocap_frame + torch.arange(10, device=self.device) * self._mocap_step) % n
@@ -891,6 +894,12 @@ class SONICWholeBodyAction(ActionTerm):
             dec_in = self._build_decoder_input(tokens, env_idx=i)
             action = self._decoder.run([self._dec_output_name], {self._dec_input_name: dec_in})[0][0]
             out[i] = action
+
+        if self.cfg.probe_encoder_mode != 0 or self.cfg.force_zero_body_pos:
+            absmax = float(np.abs(out).max())
+            print(f"[SONIC PROBE] mode={self.cfg.probe_encoder_mode} zero_body={self.cfg.force_zero_body_pos} "
+                  f"action_absmax={absmax:.4f} mean={out.mean():.4f} std={out.std():.4f}")
+
         return torch.from_numpy(out).to(device=self.device, dtype=torch.float32)
 
     def process_actions(self, actions: torch.Tensor):

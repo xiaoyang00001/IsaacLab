@@ -124,3 +124,9 @@ class SONICWholeBodyActionCfg(ActionTermCfg):
     设为空字符串则 fallback 到 self-ref + identity anchor。
     建议路径：`D:/src/Isaac/GR00T-WholeBodyControl/sample_data/robot_filtered/210531/walk_forward_amateur_001__A001.pkl`
     """
+
+    probe_encoder_mode: int = 0
+    """探针：强制 encoder_index 值。0 = g1（默认）、1 = teleop、2 = smpl。"""
+
+    force_zero_body_pos: bool = False
+    """探针：强制将 body_pos 字段清零，隔离 body_pos 对 absmax 的贡献。"""
