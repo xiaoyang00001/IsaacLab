@@ -3,6 +3,8 @@
 > **进度：阶段 A 收尾（actuator + obs + mocap 50fps 全部对齐）；外部对齐路径已穷尽，反馈循环仍存（2026-05-25，分支 gr00t-sonic-actuator-match）**
 > A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / reset 同步 / 时间窗 / FK / mocap 50fps SLERP。仅 actuator 在 step 1-5 显著改善（-42%~-47%，GUI 看到早期腿部有动作），其余项都是"对齐 spec 但闭环数值无实质改善"。**结论**：反馈循环根因不在 A 路径范围。剩余真正可能：B（PyTorch ckpt vs ONNX 差异 / obs normalization / encoder mode / 训练 noise vs 推理无 noise）。本分支 A 路径收尾，后续走 B。详见"阶段 A 总结"。
 
+探针测试分支：`gr00t-sonic-bodypos-probe`（本分支）用于 encoder mode / body_pos 清零隔离实验。
+
 ## 概述
 
 将 NVIDIA GR00T-WholeBodyControl 集成到当前 IsaacLab 项目中，将基于 SONIC 的全身控制**应用到 `robot` / `remote_robot`**（这两个目前 `fix_root_link=True`，需要先解除）；`walker_robot` 保留现有 `AutoWalkAction`（CPG 解析步态）作为 baseline 进行对比。
@@ -1187,6 +1189,9 @@ A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / re
 
 - **B（接 motion_lib + PyTorch ckpt + obs normalization 验证）**：3-4 小时，最有可能解决残余反馈循环
 - **encoder mode 切换验证**：试 mode_id=1/2 看是否数值层面变化
+- **body_pos 探针测试**：分支 `gr00t-sonic-bodypos-probe` 已实现 `force_zero_body_pos=True` 探针，可隔离 body_pos 对 absmax 的贡献
+  - 对比 `zero body_pos` vs `mocap body_pos` 的 step 1 absmax（基线 2.56）
+  - 运行：`python ...sonic_verify.py --num_envs 1 --headless` 观察 `[SONIC PROBE]` 输出
 - 其他保留在 [阶段 3.4 决策：选 C 收尾](#阶段-34-决策选-c-收尾2026-05-24) 的 C/D 项
 
 ### 阶段 3.4 决策：选 C 收尾（2026-05-24）
