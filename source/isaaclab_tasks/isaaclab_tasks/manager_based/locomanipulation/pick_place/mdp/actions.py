@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -551,6 +552,7 @@ class SONICWholeBodyAction(ActionTerm):
         self._init_sonic_body_indices()
         self._load_policies()
         self._load_mocap()
+        self._load_action_noise_std()
         self._debug_counter = 0
 
         if self.num_envs > 1:
@@ -693,6 +695,30 @@ class SONICWholeBodyAction(ActionTerm):
         print(
             f"[IsaacLab] [SONIC] loaded mocap from {path}: motion={motion_name!r} "
             f"frames={self._mocap_num_frames} fps={self._mocap_fps:.1f} body_pos={body_src}"
+        )
+
+    def _load_action_noise_std(self):
+        """加载 per-joint action noise std (29,)，覆盖 scalar fallback。"""
+        path = self.cfg.action_noise_std_path
+        if not path:
+            self._action_noise_std_np = None
+            return
+        if not os.path.exists(path):
+            print(f"[IsaacLab] [SONIC] WARN action_noise_std_path 不存在: {path}，fallback scalar")
+            self._action_noise_std_np = None
+            return
+        arr = np.load(path).astype(np.float32)
+        if arr.shape != (self.cfg.sonic_action_dim,):
+            print(
+                f"[IsaacLab] [SONIC] WARN std shape {arr.shape} != ({self.cfg.sonic_action_dim},)，"
+                "fallback scalar"
+            )
+            self._action_noise_std_np = None
+            return
+        self._action_noise_std_np = arr
+        print(
+            f"[IsaacLab] [SONIC] loaded per-joint action noise std (29,) from {path}: "
+            f"min={arr.min():.3f} max={arr.max():.3f} mean={arr.mean():.3f}"
         )
 
     def _init_sonic_body_indices(self):
@@ -930,9 +956,13 @@ class SONICWholeBodyAction(ActionTerm):
             )
 
         # B2b: 训练 actor 是 Normal(mean, std).sample()，ONNX 只导出 mean。
-        # 给推理 action 叠加 noise，匹配训练时的 stochastic policy 分布
+        # 给推理 action 叠加 noise，匹配训练时的 stochastic policy 分布。
+        # B2b-iter: per-joint std (29,) 优先（broadcast over batch），fallback 到 scalar。
         if self.cfg.action_noise_enabled:
-            noise = np.random.normal(0.0, self.cfg.action_noise_std, out.shape).astype(np.float32)
+            if self._action_noise_std_np is not None:
+                noise = np.random.normal(0.0, 1.0, out.shape).astype(np.float32) * self._action_noise_std_np
+            else:
+                noise = np.random.normal(0.0, self.cfg.action_noise_std, out.shape).astype(np.float32)
             out = out + noise
 
         return torch.from_numpy(out).to(device=self.device, dtype=torch.float32)

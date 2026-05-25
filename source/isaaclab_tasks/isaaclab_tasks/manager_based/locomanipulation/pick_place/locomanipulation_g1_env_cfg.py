@@ -238,6 +238,8 @@ SONIC_ENCODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/pol
 SONIC_DECODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 # Walking mocap (4MB sample，由 download_from_hf.py --sample 下载)
 SONIC_MOCAP_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/sample_data/robot_filtered/210531/walk_forward_amateur_001__A001.pkl"
+# B2b-iter: per-joint action noise std (29,) 从 sonic_release/last.pt 提取（scripts/tools/extract_sonic_action_std.py）
+SONIC_ACTION_STD_PATH = os.path.join(os.path.dirname(__file__), "data", "sonic_action_std_29d.npy")
 
 # 模拟骨骼数据驱动的全身关节列表（缺失关节会被 AutoWalkAction 自动跳过）
 WALKER_WHOLE_BODY_JOINTS = [
@@ -462,8 +464,13 @@ class ActionsCfg:
         #   发现 trainable `std: (29,) ∈ [0.30, 0.50]` → 训练 actor 是 Normal(mean, std).sample()
         #   推理 ONNX 只取 mean → obs.last_action 训练含 noise / 推理 deterministic → noise gap 累积
         # B2b: 把 noise 加回 raw action（用 std 中位数 0.40），看反馈循环是否消除
+        # B2b 结果（2026-05-25, std=0.40 scalar）：腿部 finally 动起来（基线缺失），
+        #   但 r_arm absmax 仍 17~20 → 晃动倒下。验证 noise gap 假设方向正确。
+        # B2b-iter: per-joint std (29,) 替换 scalar，r_arm 末端 4 关节 std=0.50（训练
+        #   未有效更新，保持初始化），其余 0.30~0.42。期望进一步压制 r_arm OOD。
         action_noise_enabled=True,
-        action_noise_std=0.40,
+        action_noise_std=0.40,  # scalar fallback（path 不存在时启用）
+        action_noise_std_path=SONIC_ACTION_STD_PATH,
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）

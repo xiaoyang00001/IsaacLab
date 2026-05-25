@@ -177,7 +177,17 @@ class SONICWholeBodyActionCfg(ActionTermCfg):
     本字段开启后，每步给 raw 29D action 加噪声，模拟训练时的 stochastic policy。"""
 
     action_noise_std: float = 0.40
-    """B2b: action noise 标准差。
+    """B2b: action noise 标准差 (scalar fallback)。
 
-    取 ckpt 中 `std: (29,)` 中位数 ≈ 0.40。生产微调时可以读 ckpt 真实 per-joint std，
-    最小验证用单一 scalar 简化实现。"""
+    取 ckpt 中 `std: (29,)` 中位数 ≈ 0.40。若 `action_noise_std_path` 非空则被覆盖。"""
+
+    action_noise_std_path: str = ""
+    """B2b-iter: per-joint std (29,) .npy 文件路径，覆盖 scalar `action_noise_std`。
+
+    Why: B2b scalar=0.40 让腿部动起来但 r_arm absmax 仍 17~20（晃动倒下）。
+    extract_sonic_action_std.py 提取 ckpt 真实 std (29,)：
+      index 0-11 (legs) ≈ 0.30~0.40, 12-14 (waist) ≈ 0.42, 15-21 (l_arm) ≈ 0.31~0.41,
+      22-24 (r_arm 前 3) ≈ 0.35~0.42, 25-28 (r_arm 末端 4) = 0.50（训练未有效更新，保持初始化）
+    r_arm 末端 std 0.50 > scalar 0.40 → scalar 加得不够，per-joint 应能进一步压制 OOD。
+
+    生产路径：source/isaaclab_tasks/.../pick_place/data/sonic_action_std_29d.npy"""
