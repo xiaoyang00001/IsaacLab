@@ -3,7 +3,7 @@
 > **进度：阶段 A 收尾（actuator + obs + mocap 50fps 全部对齐）；外部对齐路径已穷尽，反馈循环仍存（2026-05-25，分支 gr00t-sonic-actuator-match）**
 > A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / reset 同步 / 时间窗 / FK / mocap 50fps SLERP。仅 actuator 在 step 1-5 显著改善（-42%~-47%，GUI 看到早期腿部有动作），其余项都是"对齐 spec 但闭环数值无实质改善"。**结论**：反馈循环根因不在 A 路径范围。剩余真正可能：B（PyTorch ckpt vs ONNX 差异 / obs normalization / encoder mode / 训练 noise vs 推理无 noise）。本分支 A 路径收尾，后续走 B。详见"阶段 A 总结"。
 >
-> **B 决定性探针（2026-05-25）**：force_zero_decoder_history 实测 step 1-250 absmax 完全 flat=2.7717 → 反馈循环 100% 来自 decoder history 与训练分布不匹配。**B1 obs noise 注入失败**（数值仅 ±20% 波动，joint_pos 仍撞 3.08）。下一步走 **B2 PyTorch ckpt** 验证 ONNX export 是否漏 obs_normalization。
+> **B 决定性探针（2026-05-25）**：force_zero_decoder_history 实测 step 1-250 absmax 完全 flat=2.7717 → 反馈循环 100% 来自 decoder history 与训练分布不匹配。**B1 obs noise 注入失败**（数值仅 ±20% 波动，joint_pos 仍撞 3.08）。**B2 PyTorch ckpt 加载成功推翻 obs_normalization 假设**（actor_sd 无 RMS 层）+ 发现 trainable `std (29,) ∈ [0.30, 0.50]`，**新假设 B2b**：训练时 obs 含 sampled action（带 noise），推理含 deterministic mean，noise gap 累积 OOD。下一步注入 `Normal(0, std)` 到 ONNX 输出。
 
 探针测试分支：`gr00t-sonic-bodypos-probe`（本分支）用于 encoder mode / body_pos 清零隔离实验。
 
@@ -1250,6 +1250,31 @@ A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / re
 - **B2 PyTorch ckpt 直接推理**：用 `sonic_release/last.pt` 替换 ONNX，验证 ONNX export 是否漏了 actor module 内的 `running_mean_std` 归一化层（[actor_critic_modules.py:219](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/trl/modules/actor_critic_modules.py#L219)）
 - **B3 motion_lib reset 随机**：reset 时设 robot 到 mocap[t_random]
 - **B4 接受 ckpt 训练 task 不匹配**（`TRL_G1_Track` tracking ≠ walking）：要解决必须微调（C 路径）
+
+### 阶段 B2: PyTorch ckpt 加载验证（2026-05-25，commit fd8cef87a）
+
+[scripts/tools/compare_pytorch_vs_onnx.py](../scripts/tools/compare_pytorch_vs_onnx.py) 用 `torch.load(..., pickle_module=<wrapper>)` + 自定义 `_GEARUnpickler.find_class` 把 ckpt 里的 `trl.foo` / `groot.rl.foo` 重映射到部署包 `gear_sonic.trl.foo` / `gear_sonic.foo`，成功加载 `sonic_release/last.pt`。装包：`accelerate==1.13.0`、`trl==0.28.0`（>=0.27 才有 `trl.experimental`）。
+
+**两个关键发现**（推翻 B2 主假设 + 浮出 B2b 新假设）：
+
+1. **actor_sd 55 个 key 完全没有 `running_mean_std` / `obs_rms` 归一化层**
+   → 推翻"ONNX export 漏了 obs 归一化"假设
+   → ONNX encoder 直接吃 raw obs，与 PyTorch 一致，B2 主假设 **作废**
+
+2. **发现 `std: (29,)` trainable，值范围 0.30~0.50**
+   → 训练时 actor 输出 = `Normal(mean, std).sample()`（stochastic policy）
+   → 推理 ONNX 只取 `mean`（deterministic）
+   → 新假设：训练时 obs 的 last_action 是 sampled action（带 noise），推理时是 deterministic mean。这个 noise gap 在 10-frame history 里累积放大，导致 decoder OOD。
+
+**actor 网络结构（55 keys 摘要）**：
+- encoders: `g1: 640→...→64`、`teleop: 267→...→64`、`smpl: 840→...→64`（multi-mode 多入口）
+- decoders: `g1_dyn: 994→...→29`（dynamics policy）、`g1_kin: 64→...→640`（aux kinematic head）
+
+### 阶段 B2b: action noise 注入实验（计划）
+
+实现：[action_cfg.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/configs/action_cfg.py) 加 `action_noise_enabled: bool = False` + `action_noise_std: float = 0.40`（取 ckpt 中位数），[actions.py _run_sonic](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py) 在 ONNX raw 输出后、`_processed_actions` 写入前加 `np.random.normal(0, std, action.shape)`。
+
+验收：250 step headless，`action absmax` 若收敛到 5 以下 + `joint_pos` 不再撞 3.08 限位 → noise gap 假设成立；否则 → B3 / B4。
 
 ### 阶段 3.4 决策：选 C 收尾（2026-05-24）
 
