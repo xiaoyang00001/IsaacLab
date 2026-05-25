@@ -13,10 +13,22 @@ Usage:
 
 import sys
 import os
+import types
 import numpy as np
 
 GR00T_ROOT = "D:/src/Isaac/GR00T-WholeBodyControl"
 sys.path.insert(0, GR00T_ROOT)
+
+# open3d stub: gear_sonic 多个模块顶部 `import open3d`，但 ckpt 推理不需要 mesh I/O
+# 沿用 F4 precompute_mocap_body_pos.py 的策略，避免装 500MB open3d
+if "open3d" not in sys.modules:
+    _o3d_stub = types.ModuleType("open3d")
+    _o3d_io = types.ModuleType("open3d.io")
+    _o3d_io.read_triangle_mesh = lambda *a, **kw: None
+    _o3d_io.write_triangle_mesh = lambda *a, **kw: None
+    _o3d_stub.io = _o3d_io
+    sys.modules["open3d"] = _o3d_stub
+    sys.modules["open3d.io"] = _o3d_io
 
 # ---------------------------------------------------------------------------
 # Config
@@ -60,73 +72,61 @@ def onnx_dual_pass(enc_obs: np.ndarray, dec_full_994: np.ndarray):
 # PyTorch checkpoint loader (needs accelerate + IsaacLab, may fail standalone)
 # ---------------------------------------------------------------------------
 def try_load_pytorch_actor():
-    """Try to load the actor (UniversalTokenModule) from PyTorch checkpoint.
+    """Load PyTorch ckpt via torch.load(..., pickle_module=<wrapper>).
 
-    Requires: gear_sonic[training] extras (accelerate, trl, smpl_sim, etc.)
-    If this fails, it means the full training env isn't set up — which is fine.
+    ckpt 内 class 路径用 trl.foo / groot.rl.foo（训练时的 namespace），但 deploy
+    包里只有 gear_sonic.trl.foo / gear_sonic.foo。用 pickle_module wrapper 注入
+    自定义 Unpickler.find_class 拦截并重映射模块名。
     """
-    try:
-        import pickle
-        import types
+    import importlib
+    import pickle
+    import torch as _torch
 
-        class GEARUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                module = module.replace("trl.", "gear_sonic.trl.")
-                module = module.replace("groot.rl.", "gear_sonic.")
-                return super().find_class(module, name)
+    # 触发 gear_sonic 子模块 import，确保 Unpickler 能 resolve 它们
+    importlib.import_module("gear_sonic.trl.trainer.ppo_trainer")
+    importlib.import_module("gear_sonic.trl.modules.actor_critic_modules")
+    importlib.import_module("gear_sonic.trl.modules.base_module")
+    importlib.import_module("gear_sonic.trl.modules.universal_token_modules")
+    importlib.import_module("gear_sonic.envs.manager_env")
 
-        # Import required gear_sonic submodules
-        import gear_sonic.trl.trainer.ppo_trainer as _gs_pt
-        import gear_sonic.trl.modules.actor_critic_modules as _gs_ac
-        import gear_sonic.trl.modules.base_module as _gs_bm
-        import gear_sonic.trl.modules.universal_token_modules as _gs_ut
-        import gear_sonic.trl.callbacks.model_save_callback as _gs_msc
-        import gear_sonic.trl.callbacks.wandb_callback as _gs_wc
-        import gear_sonic.trl.callbacks.im_eval_callback as _gs_ie
-        import gear_sonic.trl.callbacks.im_resample_callback as _gs_ir
-        import gear_sonic.trl.callbacks.read_eval_callback as _gs_re
-        import gear_sonic.trl.utils.common as _gs_uc
-        import gear_sonic.trl.utils.scheduler as _gs_sched
-        import gear_sonic.trl.losses.token_losses as _gs_tl
-        import gear_sonic.envs.manager_env as _gs_me
+    class _GEARUnpickler(pickle.Unpickler):
+        # ckpt 内引用的 module 名 → 实际 deploy 包名
+        _PREFIX_MAP = (
+            ("trl.trainer.", "gear_sonic.trl.trainer."),
+            ("trl.modules.", "gear_sonic.trl.modules."),
+            ("trl.callbacks.", "gear_sonic.trl.callbacks."),
+            ("trl.utils.", "gear_sonic.trl.utils."),
+            ("trl.losses.", "gear_sonic.trl.losses."),
+            ("groot.rl.envs.manager_env", "gear_sonic.envs.manager_env"),
+            ("groot.rl.envs.", "gear_sonic.envs."),
+            ("groot.rl.", "gear_sonic."),
+        )
 
-        # Map namespace: trl.* -> gear_sonic.trl.*
-        sys.modules["trl.trainer"] = _gs_pt
-        sys.modules["trl.trainer.ppo_trainer"] = _gs_pt
-        sys.modules["trl.modules"] = _gs_ac
-        sys.modules["trl.modules.actor_critic_modules"] = _gs_ac
-        sys.modules["trl.modules.base_module"] = _gs_bm
-        sys.modules["trl.modules.universal_token_modules"] = _gs_ut
-        sys.modules["trl.callbacks"] = types.ModuleType("trl.callbacks")
-        sys.modules["trl.callbacks.model_save_callback"] = _gs_msc
-        sys.modules["trl.callbacks.wandb_callback"] = _gs_wc
-        sys.modules["trl.callbacks.im_eval_callback"] = _gs_ie
-        sys.modules["trl.callbacks.im_resample_callback"] = _gs_ir
-        sys.modules["trl.callbacks.read_eval_callback"] = _gs_re
-        sys.modules["trl.utils"] = types.ModuleType("trl.utils")
-        sys.modules["trl.utils.common"] = _gs_uc
-        sys.modules["trl.utils.scheduler"] = _gs_sched
-        sys.modules["trl.losses"] = types.ModuleType("trl.losses")
-        sys.modules["trl.losses.token_losses"] = _gs_tl
+        def find_class(self, module, name):
+            # 先试 gear_sonic 重定向，失败 fallback 到原 module（真 trl / 真 groot 包）
+            for src, dst in self._PREFIX_MAP:
+                if module.startswith(src):
+                    mapped = dst + module[len(src):]
+                    try:
+                        return super().find_class(mapped, name)
+                    except (ImportError, AttributeError, ModuleNotFoundError):
+                        break  # 用原 module
+            return super().find_class(module, name)
 
-        # Map namespace: groot.rl.* -> gear_sonic.*
-        sys.modules["groot"] = types.ModuleType("groot")
-        sys.modules["groot.rl"] = types.ModuleType("groot.rl")
-        sys.modules["groot.rl.envs"] = types.ModuleType("groot.rl.envs")
-        sys.modules["groot.rl.envs.manager_env"] = _gs_me
+    class _PickleModule:
+        Unpickler = _GEARUnpickler
 
-        # Load checkpoint
-        with open(PYTORCH_CKPT, "rb") as f:
-            unpickler = GEARUnpickler(f)
-            ckpt = unpickler.load()
+    ckpt = _torch.load(
+        PYTORCH_CKPT, map_location="cpu", weights_only=False, pickle_module=_PickleModule
+    )
 
-        actor_sd = ckpt.get("actor_model_state_dict", None)
-        if actor_sd is None:
-            actor_sd = ckpt.get("policy_state_dict", None)
-        return ckpt, actor_sd
-
-    except Exception as e:
-        return None, None
+    actor_sd = None
+    if isinstance(ckpt, dict):
+        for key in ("actor_model_state_dict", "policy_state_dict", "model_state_dict", "actor", "policy"):
+            if key in ckpt:
+                actor_sd = ckpt[key]
+                break
+    return ckpt, actor_sd
 
 
 # ---------------------------------------------------------------------------
