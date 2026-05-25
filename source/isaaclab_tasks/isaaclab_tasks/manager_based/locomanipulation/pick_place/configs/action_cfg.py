@@ -139,3 +139,28 @@ class SONICWholeBodyActionCfg(ActionTermCfg):
     """探针：强制 decoder 输入的全部 history (offset 64:994，含 base_ang_vel /
     joint_pos / joint_vel / last_actions / gravity_dir) 清零，
     仅保留 token_state (offset 0:64)。如果还爆，说明根因在 encoder token 本身。"""
+
+    obs_noise_enabled: bool = False
+    """B1: 推理时给 obs history 注入 AdditiveUniformNoise，匹配训练时分布。
+
+    训练 sonic_release/config.yaml policy obs 配置：
+      - joint_pos:    n_min=-0.01,  n_max=0.01
+      - joint_vel:    n_min=-0.5,   n_max=0.5
+      - base_ang_vel: n_min=-0.2,   n_max=0.2
+      - gravity_dir:  n_min=-0.05,  n_max=0.05
+      - last_action:  无 noise
+
+    推理无 noise 时 obs 比训练分布更"干净"，SONIC 学到"对 noise robust 的特征"
+    在无 noise 输入上反 OOD，可能是 closed-loop 反馈循环根因之一。"""
+
+    obs_noise_joint_pos: float = 0.01
+    """joint_pos history noise 半幅 (rad)。"""
+
+    obs_noise_joint_vel: float = 0.5
+    """joint_vel history noise 半幅 (rad/s)。"""
+
+    obs_noise_base_ang_vel: float = 0.2
+    """base_ang_vel history noise 半幅 (rad/s)。"""
+
+    obs_noise_gravity_dir: float = 0.05
+    """gravity_dir history noise 半幅 (单位向量)。"""

@@ -2,6 +2,8 @@
 
 > **进度：阶段 A 收尾（actuator + obs + mocap 50fps 全部对齐）；外部对齐路径已穷尽，反馈循环仍存（2026-05-25，分支 gr00t-sonic-actuator-match）**
 > A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / reset 同步 / 时间窗 / FK / mocap 50fps SLERP。仅 actuator 在 step 1-5 显著改善（-42%~-47%，GUI 看到早期腿部有动作），其余项都是"对齐 spec 但闭环数值无实质改善"。**结论**：反馈循环根因不在 A 路径范围。剩余真正可能：B（PyTorch ckpt vs ONNX 差异 / obs normalization / encoder mode / 训练 noise vs 推理无 noise）。本分支 A 路径收尾，后续走 B。详见"阶段 A 总结"。
+>
+> **B 决定性探针（2026-05-25）**：force_zero_decoder_history 实测 step 1-250 absmax 完全 flat=2.7717 → 反馈循环 100% 来自 decoder history 与训练分布不匹配。**B1 obs noise 注入失败**（数值仅 ±20% 波动，joint_pos 仍撞 3.08）。下一步走 **B2 PyTorch ckpt** 验证 ONNX export 是否漏 obs_normalization。
 
 探针测试分支：`gr00t-sonic-bodypos-probe`（本分支）用于 encoder mode / body_pos 清零隔离实验。
 
@@ -1225,6 +1227,29 @@ A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / re
 - 装 `gear_sonic[training]` extras → 用 PyTorch ckpt 直接推理（绕开 ONNX）
 - 加 obs noise 推理（最快测试，30 分钟）
 - 完整接 motion_lib（reset 时同步 robot 到 mocap[t_random]）
+
+### 阶段 B1: obs noise 注入实验失败（2026-05-25）
+
+实施 [action_cfg.py:144-166](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/configs/action_cfg.py#L144-L166) + [actions.py:_push_history](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py)：`_push_history` 每帧加 AdditiveUniformNoise（与训练 sonic_release/config.yaml policy obs 一致）：
+- joint_pos ±0.01 rad、joint_vel ±0.5 rad/s
+- base_ang_vel ±0.2 rad/s、gravity_dir ±0.05
+
+**实测对照**（250 step headless）：
+
+| step | 基线 | B1 obs noise | 变化 |
+|---|---|---|---|
+| 50 | 14.48 | 11.65 | -19% |
+| 100 | 10.53 | 15.89 | +51% |
+| 150 | 14.99 | 11.71 | -22% |
+| 200 | 16.73 | 13.30 | -21% |
+| 250 | 16.49 | 10.94 | -34% |
+
+**结论：noise 不是核心 OOD 来源**。数值仅 ±20% 波动，`joint_pos absmax` 仍撞 3.08 限位（与基线同），反馈循环未消除。
+
+**下一候选**（按代价递增）：
+- **B2 PyTorch ckpt 直接推理**：用 `sonic_release/last.pt` 替换 ONNX，验证 ONNX export 是否漏了 actor module 内的 `running_mean_std` 归一化层（[actor_critic_modules.py:219](D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic/trl/modules/actor_critic_modules.py#L219)）
+- **B3 motion_lib reset 随机**：reset 时设 robot 到 mocap[t_random]
+- **B4 接受 ckpt 训练 task 不匹配**（`TRL_G1_Track` tracking ≠ walking）：要解决必须微调（C 路径）
 
 ### 阶段 3.4 决策：选 C 收尾（2026-05-24）
 

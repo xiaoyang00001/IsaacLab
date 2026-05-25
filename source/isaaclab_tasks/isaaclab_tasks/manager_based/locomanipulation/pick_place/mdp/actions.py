@@ -777,6 +777,19 @@ class SONICWholeBodyAction(ActionTerm):
         self._hist_last_actions = torch.roll(self._hist_last_actions, shifts=-1, dims=1)
         self._hist_gravity_dir = torch.roll(self._hist_gravity_dir, shifts=-1, dims=1)
 
+        # B1：可选 obs noise 注入，匹配训练 AdditiveUniformNoise 分布
+        # 训练时 obs term 加 noise，SONIC 学到"对 noise robust 的特征"，推理无 noise
+        # 反 OOD —— 是 decoder history 反馈循环的候选根因之一
+        if self.cfg.obs_noise_enabled:
+            n_jp = self.cfg.obs_noise_joint_pos
+            n_jv = self.cfg.obs_noise_joint_vel
+            n_av = self.cfg.obs_noise_base_ang_vel
+            n_g = self.cfg.obs_noise_gravity_dir
+            ang_vel = ang_vel + (torch.rand_like(ang_vel) * 2.0 - 1.0) * n_av
+            jp = jp + (torch.rand_like(jp) * 2.0 - 1.0) * n_jp
+            jv = jv + (torch.rand_like(jv) * 2.0 - 1.0) * n_jv
+            gravity = gravity + (torch.rand_like(gravity) * 2.0 - 1.0) * n_g
+
         self._hist_base_ang_vel[:, -1, :] = ang_vel
         self._hist_joint_pos[:, -1, :] = jp
         self._hist_joint_vel[:, -1, :] = jv

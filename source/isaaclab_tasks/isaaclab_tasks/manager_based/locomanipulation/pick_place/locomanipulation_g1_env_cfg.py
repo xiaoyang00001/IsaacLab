@@ -451,6 +451,12 @@ class ActionsCfg:
         # - force_zero_decoder_history: 屏蔽全部 history (offset 64:994)，仅留 token
         #   实测 step 1-250 absmax 完全 flat=2.7717（精确到小数 4 位），证明 decoder
         #   history 是反馈循环唯一驱动 — SONIC ONNX 完全依赖 history 训练分布
+        # B1 obs noise 注入实验结果（2026-05-25）：失败
+        #   step 50/100/150/200/250 absmax 11.6/15.9/11.7/13.3/10.9，joint_pos 仍撞 3.08
+        #   noise 注入只让数值波动 ±20%，未消除反馈循环爆炸
+        # → 推翻"noise 是核心 OOD 来源"假设；候选根因转 ONNX export 漏 obs_normalization /
+        #   ckpt 训练 task 不是 walking（TRL_G1_Track tracking）→ 需走 B2 PyTorch ckpt
+        # obs_noise_enabled=True,
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
