@@ -1192,6 +1192,7 @@ A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / re
 - **body_pos 探针测试**：分支 `gr00t-sonic-bodypos-probe` 已实现 `force_zero_body_pos=True` 探针，可隔离 body_pos 对 absmax 的贡献
   - 对比 `zero body_pos` vs `mocap body_pos` 的 step 1 absmax（基线 2.56）
   - 运行：`python ...sonic_verify.py --num_envs 1 --headless` 观察 `[SONIC PROBE]` 输出
+  - **结果（2026-05-25）**：step1 zero_body=1.97 vs mocap=2.56（降 23%），但 step3+ 仍爆炸到 22+ —— **body_pos 不是根因**，反馈循环在别处
 - 其他保留在 [阶段 3.4 决策：选 C 收尾](#阶段-34-决策选-c-收尾2026-05-24) 的 C/D 项
 
 ### 阶段 3.4 决策：选 C 收尾（2026-05-24）
