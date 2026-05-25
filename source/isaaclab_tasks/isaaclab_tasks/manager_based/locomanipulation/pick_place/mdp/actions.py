@@ -903,6 +903,17 @@ class SONICWholeBodyAction(ActionTerm):
         self._last_action = action_rel
 
         self._debug_counter += 1
+        # B path: dump step 1 obs to CSV for PyTorch vs ONNX comparison
+        if self._debug_counter == 1:
+            for i in range(self.num_envs):
+                enc_in = self._build_encoder_input(env_idx=i)
+                dec_in = self._build_decoder_input(
+                    self._encoder.run([self._enc_output_name], {self._enc_input_name: enc_in})[0],
+                    env_idx=i,
+                )
+                np.savetxt("enc_obs_step1.csv", enc_in.reshape(-1), delimiter=",", fmt="%.8f")
+                np.savetxt("dec_obs_step1.csv", dec_in.reshape(-1), delimiter=",", fmt="%.8f")
+                print(f"[SONIC DUMP] step=1 obs saved: enc={enc_in.shape} dec={dec_in.shape}")
         if self._debug_counter % 50 == 0:
             a = action_rel[0].detach().cpu()
             jp = self._hist_joint_pos[0, -1].detach().cpu()

@@ -159,8 +159,16 @@ def main():
     enc_in = _parse_csv_envvar("ENC_1762", 1762)
     dec_full_994 = _parse_csv_envvar("DEC_994", 994)  # full decoder input = token(64) + history(930)
 
+    # Also try loading from CSV files if they exist
+    if enc_in is None and os.path.exists("enc_obs_step1.csv"):
+        enc_in = np.loadtxt("enc_obs_step1.csv", delimiter=",").reshape(1, 1762)
+        print(f"\n[LOAD] Loaded enc from enc_obs_step1.csv")
+    if dec_full_994 is None and os.path.exists("dec_obs_step1.csv"):
+        dec_full_994 = np.loadtxt("dec_obs_step1.csv", delimiter=",").reshape(1, 994)
+        print(f"\n[LOAD] Loaded dec from dec_obs_step1.csv")
+
     if enc_in is not None and dec_full_994 is not None:
-        print("\n[MODE] Real observations from environment (ENC_1762 + DEC_994)")
+        print("\n[MODE] Real observations from environment (ENC_1762/DEC_994 or CSV file)")
     else:
         print("\n[MODE] Zero-fill baseline")
         if enc_in is None:
@@ -198,6 +206,19 @@ def main():
     state = ckpt.get("state")
     if state is not None:
         print(f"  state type: {type(state).__name__}")
+
+    # If we received real obs, save them to CSV for replay
+    if os.environ.get("ENC_1762") or os.environ.get("DEC_994"):
+        enc_csv = "enc_obs_step1.csv"
+        dec_csv = "dec_obs_step1.csv"
+        np.savetxt(enc_csv, enc_in.reshape(-1), delimiter=",", fmt="%.8f")
+        np.savetxt(dec_csv, dec_full_994.reshape(-1), delimiter=",", fmt="%.8f")
+        print(f"\n[REPLAY] Saved real obs to:")
+        print(f"  {enc_csv}  ({enc_in.size} values)")
+        print(f"  {dec_csv}  ({dec_full_994.size} values)")
+        print(f"\nNext time, run without env vars to use saved CSV:")
+        print(f"  cp enc_obs_step1.csv ..\\docs\\")
+        print(f"  cp dec_obs_step1.csv ..\\docs\\")
 
 
 if __name__ == "__main__":
