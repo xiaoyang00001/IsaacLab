@@ -1188,7 +1188,7 @@ A 路径累计对齐 7 项：actuator / sim_dt / obs 字段 / joint mapping / re
 ### 阶段 A 后续 TODO（不在本分支执行）
 
 - **B（接 motion_lib + PyTorch ckpt + obs normalization 验证）**：3-4 小时，最有可能解决残余反馈循环
-- **encoder mode 切换验证**：试 mode_id=1/2 看是否数值层面变化
+- **encoder mode 切换验证**（下一步探针）：试 mode_id=1（teleop）/2（smpl），最快排除法。g1=0 baseline absmax step1=2.56，zero_body=1.97
 - **body_pos 探针测试**：分支 `gr00t-sonic-bodypos-probe` 已实现 `force_zero_body_pos=True` 探针，可隔离 body_pos 对 absmax 的贡献
   - 对比 `zero body_pos` vs `mocap body_pos` 的 step 1 absmax（基线 2.56）
   - 运行：`python ...sonic_verify.py --num_envs 1 --headless` 观察 `[SONIC PROBE]` 输出
