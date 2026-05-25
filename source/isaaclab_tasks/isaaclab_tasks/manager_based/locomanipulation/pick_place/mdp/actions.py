@@ -597,20 +597,45 @@ class SONICWholeBodyAction(ActionTerm):
         # 顶层是 {motion_name: motion_dict}
         motion_name = next(iter(raw.keys()))
         motion = raw[motion_name]
-        root_rot_xyzw = motion["root_rot"]  # (F, 4) xyzw 顺序（mocap 标准）
-        # 转 IsaacLab wxyz: [3, 0, 1, 2]
-        root_rot_wxyz = root_rot_xyzw[:, [3, 0, 1, 2]]
-        self._mocap_root_rot_wxyz = torch.from_numpy(root_rot_wxyz).to(self.device).float()
-        self._mocap_num_frames = self._mocap_root_rot_wxyz.shape[0]
-        self._mocap_fps = float(motion.get("fps", 30))
+        src_fps = float(motion.get("fps", 30))
+        target_fps = 50.0  # 与 SONIC 训练 motion_lib.target_fps=50 对齐
 
-        # 缓存 dof + root_trans，给 reset() 同步 robot 初始姿态到 mocap 第 0 帧用
-        # （下游修复 2：避免 reset 时 robot 站立 + mocap walking 起步 → 反馈循环爆炸）
-        # mocap dof 顺序与 SONIC_G1_29DOF_JOINT_ORDER 完全一致（MJCF actuator order）
-        self._mocap_dof = torch.from_numpy(motion["dof"]).to(self.device).float()  # (T, 29)
-        self._mocap_root_trans = (
-            torch.from_numpy(motion["root_trans_offset"]).to(self.device).float()  # (T, 3)
+        # 50fps 重采样（与训练 motion_lib 行为一致）
+        # - root_rot 用 SLERP
+        # - dof / root_trans 用线性插值
+        # 重采样后 _mocap_num_frames = round(T_src × 50/30) ≈ 2003，与 F4 .npy 帧数对齐
+        from scipy.spatial.transform import Rotation as _SR
+        from scipy.spatial.transform import Slerp as _Slerp
+        T_src = motion["root_rot"].shape[0]
+        # 与 Humanoid_Batch.interploate_pose 完全一致：duration = (T_src-1)/src_fps，
+        # 时间戳 arange(0, duration, 1/target_fps)（不含 duration 端点）
+        duration = (T_src - 1) / src_fps  # 秒
+        t_src = np.arange(T_src) / src_fps  # (T_src,) 源时间戳
+        t_out = np.arange(0.0, duration, 1.0 / target_fps)  # (n_out,) 50fps 时间戳
+        n_out = t_out.shape[0]
+
+        # root_rot SLERP（mocap PKL 是 xyzw 顺序，scipy 也是 xyzw）
+        root_rot_xyzw_src = motion["root_rot"]  # (T_src, 4)
+        slerp = _Slerp(t_src, _SR.from_quat(root_rot_xyzw_src))
+        root_rot_xyzw_out = slerp(t_out).as_quat()  # (n_out, 4) xyzw
+        # 转 IsaacLab wxyz
+        root_rot_wxyz_out = root_rot_xyzw_out[:, [3, 0, 1, 2]]
+        self._mocap_root_rot_wxyz = (
+            torch.from_numpy(root_rot_wxyz_out).to(self.device).float()
         )
+        self._mocap_num_frames = self._mocap_root_rot_wxyz.shape[0]
+        self._mocap_fps = target_fps
+
+        # dof + root_trans 线性插值（关节角是连续函数，root_trans 是位置）
+        def _interp(arr_src: np.ndarray) -> torch.Tensor:
+            # arr_src: (T_src, D) → (n_out, D)
+            out = np.empty((n_out, arr_src.shape[1]), dtype=np.float32)
+            for d in range(arr_src.shape[1]):
+                out[:, d] = np.interp(t_out, t_src, arr_src[:, d])
+            return torch.from_numpy(out).to(self.device).float()
+
+        self._mocap_dof = _interp(motion["dof"])  # (n_out, 29)
+        self._mocap_root_trans = _interp(motion["root_trans_offset"])  # (n_out, 3)
 
         # 消掉 mocap 第 0 帧的全局 yaw，让 robot 从 identity 朝向开始（reset 时 robot
         # 也设 identity，避免 root_pos 不动 + 大 yaw 导致初始侧站不稳）。
@@ -635,14 +660,10 @@ class SONICWholeBodyAction(ActionTerm):
         # 训练 (sonic_release/config.yaml commands.motion):
         #   target_fps=50, dt_future_ref_frames=0.1s, num_future_frames=10
         # → 取未来 10 帧、相邻帧间隔 0.1s（在 50Hz 训练时 = 5 sim steps）
-        # 我们 mocap PKL 是 30fps（sample_data，没过 motion_lib target_fps=50 重采样），
-        # 所以 0.1s 间隔对应 mocap 帧数 = round(0.1 × 30) = 3，而非原硬编码的 5。
-        # 错用 5 会导致 dt_future=0.167s（67% 偏差），future ref 跨度 1.67s 而非训练的 1.0s。
-        self._mocap_step = max(1, round(0.1 * self._mocap_fps))
-        # 每 sim step（50Hz 默认）推进的 mocap 帧数 = mocap_fps / sim_fps
-        # 错用 1.0 会让 mocap 播放 1.67× 慢（30fps mocap 当 50fps 播 → robot 跟不上速度）
+        # 重采样到 50fps 后，0.1s 间隔 = 5 mocap-50fps 帧，advance = 1 frame/sim step
+        self._mocap_step = max(1, round(0.1 * self._mocap_fps))  # 5
         self._sim_fps = 50.0
-        self._mocap_advance_per_step = self._mocap_fps / self._sim_fps
+        self._mocap_advance_per_step = self._mocap_fps / self._sim_fps  # 1.0
         self._mocap_frame = 0
         self._mocap_frame_f = 0.0
 

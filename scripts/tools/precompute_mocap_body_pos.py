@@ -98,9 +98,14 @@ def _process_pkl(pkl_path: Path, hb, sonic_idx: list[int]) -> np.ndarray:
         pose = torch.from_numpy(pose_aa).float().unsqueeze(0)  # (1, T, 30, 3)
         trans = torch.from_numpy(root_trans).float().unsqueeze(0)  # (1, T, 3)
         fps = int(motion.get("fps", 30))
+        target_fps = 50  # 与 SONIC 训练 motion_lib.target_fps=50 对齐
 
+        # 用 fk_batch 的 interpolate_data=True 让 Humanoid_Batch.interploate_pose 做 SLERP+线性
+        # 重采样到 50fps，再 FK，得到 (1, T_50, N, 3) 世界坐标
         with torch.no_grad():
-            fk_res = hb.fk_batch(pose, trans, fps=fps, interpolate_data=False)
+            fk_res = hb.fk_batch(
+                pose, trans, fps=fps, target_fps=target_fps, interpolate_data=(fps != target_fps)
+            )
 
         # fk_batch return: EasyDict with global_translation + global_rotation_mat
         # body_pos in pelvis local frame = R_pelvis_world.T @ (body_world - pelvis_world)
@@ -130,7 +135,7 @@ def _process_pkl(pkl_path: Path, hb, sonic_idx: list[int]) -> np.ndarray:
         absmax_w = float(np.abs(rel_w).max())
         absmax_b = float(np.abs(rel_b).max())
         print(
-            f"  [{name}] T={T} fps={fps} "
+            f"  [{name}] T_src={T}@{fps}fps → T_out={rel_b.shape[0]}@{target_fps}fps "
             f"world-rel absmax={absmax_w:.4f} → pelvis-local absmax={absmax_b:.4f}"
         )
         out_per_motion.append(rel_b.astype(np.float32))
