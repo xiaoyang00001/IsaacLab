@@ -457,6 +457,13 @@ class ActionsCfg:
         # → 推翻"noise 是核心 OOD 来源"假设；候选根因转 ONNX export 漏 obs_normalization /
         #   ckpt 训练 task 不是 walking（TRL_G1_Track tracking）→ 需走 B2 PyTorch ckpt
         # obs_noise_enabled=True,
+        # B2 PyTorch ckpt 加载（2026-05-25，commit fd8cef87a）：
+        #   推翻 obs_normalization 假设（actor_sd 55 keys 无 running_mean_std 层）
+        #   发现 trainable `std: (29,) ∈ [0.30, 0.50]` → 训练 actor 是 Normal(mean, std).sample()
+        #   推理 ONNX 只取 mean → obs.last_action 训练含 noise / 推理 deterministic → noise gap 累积
+        # B2b: 把 noise 加回 raw action（用 std 中位数 0.40），看反馈循环是否消除
+        action_noise_enabled=True,
+        action_noise_std=0.40,
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）

@@ -929,6 +929,12 @@ class SONICWholeBodyAction(ActionTerm):
                 f"action_absmax={absmax:.4f} mean={out.mean():.4f} std={out.std():.4f}"
             )
 
+        # B2b: 训练 actor 是 Normal(mean, std).sample()，ONNX 只导出 mean。
+        # 给推理 action 叠加 noise，匹配训练时的 stochastic policy 分布
+        if self.cfg.action_noise_enabled:
+            noise = np.random.normal(0.0, self.cfg.action_noise_std, out.shape).astype(np.float32)
+            out = out + noise
+
         return torch.from_numpy(out).to(device=self.device, dtype=torch.float32)
 
     def process_actions(self, actions: torch.Tensor):

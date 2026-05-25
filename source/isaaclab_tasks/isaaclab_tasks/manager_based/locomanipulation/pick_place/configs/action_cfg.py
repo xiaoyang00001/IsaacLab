@@ -164,3 +164,20 @@ class SONICWholeBodyActionCfg(ActionTermCfg):
 
     obs_noise_gravity_dir: float = 0.05
     """gravity_dir history noise 半幅 (单位向量)。"""
+
+    action_noise_enabled: bool = False
+    """B2b: 在 ONNX raw action 上叠加 Normal(0, action_noise_std) 噪声后写关节。
+
+    Why: B2 PyTorch ckpt 加载（commit fd8cef87a）发现 actor `std (29,)` trainable，
+    值范围 0.30~0.50。训练 actor 输出 = Normal(mean, std).sample()（stochastic），
+    推理 ONNX 只取 mean（deterministic）。obs.last_action 历史在训练时含 sampled
+    action（带 noise），推理时含 deterministic mean，noise gap 在 10-frame history
+    累积放大 → decoder OOD → 反馈循环爆炸。
+
+    本字段开启后，每步给 raw 29D action 加噪声，模拟训练时的 stochastic policy。"""
+
+    action_noise_std: float = 0.40
+    """B2b: action noise 标准差。
+
+    取 ckpt 中 `std: (29,)` 中位数 ≈ 0.40。生产微调时可以读 ckpt 真实 per-joint std，
+    最小验证用单一 scalar 简化实现。"""
