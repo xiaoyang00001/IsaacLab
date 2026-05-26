@@ -408,9 +408,9 @@ class EventsCfg:
         params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
     )
 
-    # 方案E：滚轮角速度驱动（替代 PhysxSurfaceVelocityAPI，兼容 CUDA 管道）
-    # 每个滚轮 mesh 作为独立 kinematic rigid body，interval 事件旋转产生表面速度。
-    # 注意：使用 RigidBodyView Tensor API 替代 USD xformOp，确保 Fabric 启用时 PhysX 能感知旋转。
+    # 保留 setup_conveyor_belt_physics 仅为滚轮设置碰撞体（不旋转），
+    # 箱子依靠 drive_object_on_conveyor 的速度覆写驱动（兼容 GPU 管道）。
+    # 不再使用 rotate_conveyor_rollers：移除每步 117 次 USD xformOp 写入以大幅提升 FPS。
     setup_conveyor_belt_physics = EventTerm(
         func=locomanip_mdp.setup_conveyor_belt_physics,
         mode="prestartup",
@@ -423,31 +423,20 @@ class EventsCfg:
         },
     )
 
-    # startup 事件：验证滚轮旋转数据就绪（kinematic xformOp 已在 prestartup 添加）
-    init_roller_rigid_body_view = EventTerm(
-        func=locomanip_mdp.init_roller_rigid_body_view,
-        mode="startup",
-    )
-
-    # 每物理步旋转所有滚轮（USD xformOp 写入，视觉旋转效果）
-    rotate_conveyor_rollers = EventTerm(
-        func=locomanip_mdp.rotate_conveyor_rollers,
-        mode="interval",
-        interval_range_s=(0.005, 0.005),
-    )
-
-    # 直接覆写箱子世界速度，兼容 GPU pipeline（friction-based 滚轮驱动在 GPU 下不可靠）
+    # 状态感知速度覆写：仅在箱子处于传送带范围内时驱动，
+    # 离带后（被提起/掉落/移出）自动停止，不再对抗机器人抓取力。
+    # 传送带参考位置由 drive_object_on_conveyor 首次调用时自动记录，无需硬编码。
     drive_test_box = EventTerm(
         func=locomanip_mdp.drive_object_on_conveyor,
         mode="interval",
-        interval_range_s=(0.005, 0.005),
+        interval_range_s=(0.01, 0.01),
         params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
     )
 
     drive_test_box1 = EventTerm(
         func=locomanip_mdp.drive_object_on_conveyor,
         mode="interval",
-        interval_range_s=(0.005, 0.005),
+        interval_range_s=(0.01, 0.01),
         params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
     )
 
@@ -494,11 +483,11 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 4
+        self.decimation = 2
         self.episode_length_s = 20.0
         # simulation settings
-        self.sim.dt = 1 / 200  # 200Hz
-        self.sim.render_interval = 4
+        self.sim.dt = 1 / 100  # 100Hz（从 200Hz 降低以提升 FPS，遥操作场景足够）
+        self.sim.render_interval = 2  # 每 2 步渲染一次 → 50 FPS 视觉刷新
 
         # Set the URDF and mesh paths for the IK controller
         urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501

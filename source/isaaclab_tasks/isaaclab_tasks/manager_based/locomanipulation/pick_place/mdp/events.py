@@ -383,6 +383,16 @@ def place_test_boxes_from_conveyor_bbox(
     test_box.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
     test_box1.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
 
+    # 清除旧的传送带参考位置，让 drive 函数在箱子重新稳定后自动重新记录
+    for name in (test_box_name, test_box1_name):
+        ref_key = f"_conveyor_ref_{name}"
+        if hasattr(env, ref_key):
+            delattr(env, ref_key)
+        for suffix in ("min_z", "init_z", "stable_count", "timeout"):
+            attr = f"_conveyor_{suffix}_{name}"
+            if hasattr(env, attr):
+                delattr(env, attr)
+
 
 def align_viewer_to_conveyor_bbox(
     env: ManagerBasedEnv,
@@ -588,13 +598,13 @@ def drive_object_on_conveyor(
     velocity_x: float = 0.0,
     velocity_y: float = 0.0,
 ):
-    """Maintain constant linear velocity on an object to simulate conveyor belt motion.
+    """仅在箱子处于传送带范围时施加恒定速度，离带后自动停止。
 
-    Called on an interval; overrides x/y velocity each tick so friction cannot slow
-    the object down.  z and angular velocities are left unchanged (z) or zeroed (angular).
-
-    Deprecated: Use setup_conveyor_belt_physics (PhysxSurfaceVelocityAPI) instead,
-    which drives objects through contact forces rather than direct velocity override.
+    三维边界均基于箱子自身的初始位置（首次调用时自动记录）计算，不依赖硬编码坐标：
+    - Z 检测：相对于初始高度 ±15cm（箱子被提起或掉落时停止驱动）
+    - X 检测：相对于初始 X ±1.0m（箱子横向移出传送带时停止驱动）
+    - Y 检测：沿传送带方向（-Y）最多移动 3.0m（防止滑出末端后悬空平移）
+    - 保留角速度：不再强制清零，机器人抓取旋转箱子时不被对抗
     """
     obj = env.scene[object_name]
     device = obj.device
@@ -602,11 +612,87 @@ def drive_object_on_conveyor(
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=device, dtype=torch.long)
 
-    vel = obj.data.root_vel_w[env_ids].clone()  # (N, 6) [lin_xyz, ang_xyz]
+    if len(env_ids) == 0:
+        return
+
+    # 读取箱子当前位置（世界坐标系）
+    root_pos = obj.data.root_pos_w[env_ids]  # (N, 3)
+
+    # ── 自适应沉降检测 ──
+    # 箱子初始可能偏离实际带面，通过追踪最低 Z 连续多步不再下降来判断是否已稳定在传送带上。
+    # 适配任何下落高度，不需要配置固定预热步数。
+    ref_key = f"_conveyor_ref_{object_name}"
+    if not hasattr(env, ref_key):
+        min_z_key = f"_conveyor_min_z_{object_name}"
+        init_z_key = f"_conveyor_init_z_{object_name}"
+        count_key = f"_conveyor_stable_count_{object_name}"
+        timeout_key = f"_conveyor_timeout_{object_name}"
+
+        if not hasattr(env, min_z_key):
+            # 首次调用：初始化追踪状态，不下发速度
+            setattr(env, min_z_key, root_pos[:, 2].clone())
+            setattr(env, init_z_key, root_pos[:, 2].clone())
+            setattr(env, count_key, 0)
+            _diag_print(
+                f"[drive_conveyor] {object_name}: settling detect from "
+                f"z={root_pos[0, 2].item():.3f}"
+            )
+            return
+
+        prev_min_z = getattr(env, min_z_key)
+        new_min_z = torch.min(prev_min_z, root_pos[:, 2])
+        setattr(env, min_z_key, new_min_z)
+        initial_z = getattr(env, init_z_key)
+
+        if new_min_z[0] < prev_min_z[0]:
+            # 箱子还在下落（新低点），复位稳定计数器
+            setattr(env, count_key, 0)
+        else:
+            # 最低 Z 没有下降 → 可能已稳定在传送带表面
+            count = getattr(env, count_key, 0) + 1
+            setattr(env, count_key, count)
+            if count >= 3 and (initial_z[0] - new_min_z[0]) >= 0.03:
+                setattr(env, ref_key, root_pos.clone())
+                _diag_print(
+                    f"[drive_conveyor] {object_name}: settled at conveyor reference: "
+                    f"z={root_pos[0, 2].item():.3f}, "
+                    f"fall={initial_z[0].item() - new_min_z[0].item():.3f}m"
+                )
+
+        # 安全超时：最多等 100 步，防止箱子已在正确高度时永不触发
+        timeout = getattr(env, timeout_key, 0) + 1
+        setattr(env, timeout_key, timeout)
+        if timeout > 100:
+            setattr(env, ref_key, root_pos.clone())
+            _diag_print(
+                f"[drive_conveyor] {object_name}: timeout forcing reference at "
+                f"z={root_pos[0, 2].item():.3f}"
+            )
+        return
+
+    ref_pos = getattr(env, ref_key)  # (N, 3)
+
+    # ── 三维边界判定（均相对于参考位置） ──
+    # Z ±0.15m：箱子被提起或掉落时停止（主安全检测）
+    # X ±2.0m：覆盖传送带路径弧度（3条A08首尾相连可能有弯道）
+    # Y ≥ ref_y - 9.0：覆盖3条串联传送带全长（A08单条约2.5-3m）
+    z_on_belt = (root_pos[:, 2] >= ref_pos[:, 2] - 0.15) & (root_pos[:, 2] <= ref_pos[:, 2] + 0.15)
+    x_on_belt = (root_pos[:, 0] >= ref_pos[:, 0] - 2.0) & (root_pos[:, 0] <= ref_pos[:, 0] + 2.0)
+    y_on_belt = root_pos[:, 1] >= ref_pos[:, 1] - 9.0
+
+    on_belt = z_on_belt & x_on_belt & y_on_belt
+
+    if not on_belt.any():
+        return
+
+    # ── 对仍在传送带上的箱子施加速度 ──
+    env_ids_to_drive = env_ids[on_belt]
+    vel = obj.data.root_vel_w[env_ids_to_drive].clone()  # (N, 6) [lin_xyz, ang_xyz]
     vel[:, 0] = velocity_x
     vel[:, 1] = velocity_y
-    vel[:, 3:] = 0.0          # 清零角速度，防止滚动
-    obj.write_root_velocity_to_sim(vel, env_ids=env_ids)
+    # 保留 Z 轴速度和角速度（不再强制清零角速度），
+    # 这样机器人抓取旋转箱子时不会受到对抗力。
+    obj.write_root_velocity_to_sim(vel, env_ids=env_ids_to_drive)
 
 def setup_conveyor_belt_physics(
     env: ManagerBasedEnv,
