@@ -46,7 +46,12 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as loco
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_robot_sync import ZmqRobotSyncActionCfg
 
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+    AgileBasedLowerBodyActionCfg,
+    AutoWalkActionCfg,
+    SONICWholeBodyActionCfg,
+)
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import SONIC_G1_29DOF_JOINT_ORDER
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
     AgileTeacherPolicyObservationsCfg,
 )
@@ -62,6 +67,204 @@ FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
 REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
+
+# 第三个机器人（自动行走）：解除根节点固定，启用物理行走
+WALKER_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+WALKER_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
+WALKER_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
+WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
+WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+
+# 第四个机器人：GEAR-SONIC ONNX 驱动（阶段 3.1：真实 decoder obs + encoder zero-fill）
+# init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
+# X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
+#
+# 阶段 3.3 E3 D：mocap anchor 时变信号已接，解 fix_root_link 再次物理验证
+# 对比 3.1 初次物理验证（立刻摔倒），看 mocap motion 信号是否提供有意义的平衡反馈
+#
+# 阶段 A（gr00t-sonic-actuator-match 分支）：用 SONIC 训练同款 ImplicitActuator + PD 配方
+# 替换默认 G1_29DOF_CFG 的 DCMotor。参考 gear_sonic/envs/manager_env/robots/g1.py:10-358
+# （来自 BeyondMimic / whole_body_tracking）。NATURAL_FREQ=10Hz、DAMPING_RATIO=2.0，
+# 各 actuator armature 配 stiffness=armature×NATURAL_FREQ²、damping=2×DAMPING_RATIO×armature×NATURAL_FREQ。
+# 注意：不动 G1_29DOF_CFG（robot / walker_robot / remote_robot 仍用 IsaacLab DCMotor）。
+from isaaclab.actuators import ImplicitActuatorCfg as _SonicImplicitActuatorCfg
+
+_SONIC_ARMATURE_5020 = 0.003609725
+_SONIC_ARMATURE_7520_14 = 0.010177520
+_SONIC_ARMATURE_7520_22 = 0.025101925
+_SONIC_ARMATURE_4010 = 0.00425
+_SONIC_NATURAL_FREQ = 10.0 * 2.0 * 3.1415926535  # 10Hz
+_SONIC_DAMPING_RATIO = 2.0
+
+_S_5020 = _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ**2
+_S_7520_14 = _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ**2
+_S_7520_22 = _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ**2
+_S_4010 = _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ**2
+
+_D_5020 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ
+_D_7520_14 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ
+_D_7520_22 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ
+_D_4010 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ
+
+SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
+SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+# 整体替换 actuators，与 SONIC 训练完全对齐
+SONIC_G1_29DOF_CFG.actuators = {
+    "legs": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_hip_yaw_joint",
+            ".*_hip_roll_joint",
+            ".*_hip_pitch_joint",
+            ".*_knee_joint",
+        ],
+        effort_limit_sim={
+            ".*_hip_yaw_joint": 88.0,
+            ".*_hip_roll_joint": 139.0,
+            ".*_hip_pitch_joint": 139.0,
+            ".*_knee_joint": 139.0,
+        },
+        velocity_limit_sim={
+            ".*_hip_yaw_joint": 32.0,
+            ".*_hip_roll_joint": 20.0,
+            ".*_hip_pitch_joint": 20.0,
+            ".*_knee_joint": 20.0,
+        },
+        stiffness={
+            ".*_hip_pitch_joint": _S_7520_22,
+            ".*_hip_roll_joint": _S_7520_22,
+            ".*_hip_yaw_joint": _S_7520_14,
+            ".*_knee_joint": _S_7520_22,
+        },
+        damping={
+            ".*_hip_pitch_joint": _D_7520_22,
+            ".*_hip_roll_joint": _D_7520_22,
+            ".*_hip_yaw_joint": _D_7520_14,
+            ".*_knee_joint": _D_7520_22,
+        },
+        armature={
+            ".*_hip_pitch_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_roll_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_yaw_joint": _SONIC_ARMATURE_7520_14,
+            ".*_knee_joint": _SONIC_ARMATURE_7520_22,
+        },
+    ),
+    "feet": _SonicImplicitActuatorCfg(
+        joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_roll_joint", "waist_pitch_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist_yaw": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_yaw_joint"],
+        effort_limit_sim=88.0,
+        velocity_limit_sim=32.0,
+        stiffness=_S_7520_14,
+        damping=_D_7520_14,
+        armature=_SONIC_ARMATURE_7520_14,
+    ),
+    "arms": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_shoulder_pitch_joint",
+            ".*_shoulder_roll_joint",
+            ".*_shoulder_yaw_joint",
+            ".*_elbow_joint",
+            ".*_wrist_roll_joint",
+            ".*_wrist_pitch_joint",
+            ".*_wrist_yaw_joint",
+        ],
+        effort_limit_sim={
+            ".*_shoulder_pitch_joint": 25.0,
+            ".*_shoulder_roll_joint": 25.0,
+            ".*_shoulder_yaw_joint": 25.0,
+            ".*_elbow_joint": 25.0,
+            ".*_wrist_roll_joint": 25.0,
+            ".*_wrist_pitch_joint": 5.0,
+            ".*_wrist_yaw_joint": 5.0,
+        },
+        velocity_limit_sim={
+            ".*_shoulder_pitch_joint": 37.0,
+            ".*_shoulder_roll_joint": 37.0,
+            ".*_shoulder_yaw_joint": 37.0,
+            ".*_elbow_joint": 37.0,
+            ".*_wrist_roll_joint": 37.0,
+            ".*_wrist_pitch_joint": 22.0,
+            ".*_wrist_yaw_joint": 22.0,
+        },
+        stiffness={
+            ".*_shoulder_pitch_joint": _S_5020,
+            ".*_shoulder_roll_joint": _S_5020,
+            ".*_shoulder_yaw_joint": _S_5020,
+            ".*_elbow_joint": _S_5020,
+            ".*_wrist_roll_joint": _S_5020,
+            ".*_wrist_pitch_joint": _S_4010,
+            ".*_wrist_yaw_joint": _S_4010,
+        },
+        damping={
+            ".*_shoulder_pitch_joint": _D_5020,
+            ".*_shoulder_roll_joint": _D_5020,
+            ".*_shoulder_yaw_joint": _D_5020,
+            ".*_elbow_joint": _D_5020,
+            ".*_wrist_roll_joint": _D_5020,
+            ".*_wrist_pitch_joint": _D_4010,
+            ".*_wrist_yaw_joint": _D_4010,
+        },
+        armature={
+            ".*_shoulder_pitch_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_yaw_joint": _SONIC_ARMATURE_5020,
+            ".*_elbow_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_pitch_joint": _SONIC_ARMATURE_4010,
+            ".*_wrist_yaw_joint": _SONIC_ARMATURE_4010,
+        },
+    ),
+}
+
+# SONIC ONNX 模型路径（由 download_from_hf.py 下载，详见 docs/GR00T_WholeBodyControl_集成计划.md）
+SONIC_ENCODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
+SONIC_DECODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
+# Walking mocap (4MB sample，由 download_from_hf.py --sample 下载)
+SONIC_MOCAP_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/sample_data/robot_filtered/210531/walk_forward_amateur_001__A001.pkl"
+# B2b-iter: per-joint action noise std (29,) 从 sonic_release/last.pt 提取（scripts/tools/extract_sonic_action_std.py）
+SONIC_ACTION_STD_PATH = os.path.join(os.path.dirname(__file__), "data", "sonic_action_std_29d.npy")
+
+# 模拟骨骼数据驱动的全身关节列表（缺失关节会被 AutoWalkAction 自动跳过）
+WALKER_WHOLE_BODY_JOINTS = [
+    # ── 腿部（12） ───────────────────────────────────────
+    "left_hip_yaw_joint", "left_hip_roll_joint", "left_hip_pitch_joint",
+    "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    "right_hip_yaw_joint", "right_hip_roll_joint", "right_hip_pitch_joint",
+    "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+    # ── 腰部（3） ────────────────────────────────────────
+    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+    # ── 手臂（14） ───────────────────────────────────────
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+    # ── 手部（最多 14，若 USD 中缺失会被自动跳过） ─────────
+    "left_hand_index_0_joint", "left_hand_index_1_joint",
+    "left_hand_middle_0_joint", "left_hand_middle_1_joint",
+    "left_hand_thumb_0_joint", "left_hand_thumb_1_joint", "left_hand_thumb_2_joint",
+    "right_hand_index_0_joint", "right_hand_index_1_joint",
+    "right_hand_middle_0_joint", "right_hand_middle_1_joint",
+    "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
+]
 
 RUNTIME_NET_CFG = build_dual_machine_runtime_cfg()
 
@@ -201,6 +404,19 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
     )
+
+    # SONIC 物理验证障碍物：默认放到远处，sonic_verify.py --sonic_obstacle 时再移动到行走路径。
+    sonic_obstacle = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/SONICObstacle",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[1000.0, 1000.0, -10.0], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=sim_utils.CuboidCfg(
+            size=(0.25, 0.90, 0.22),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.12, 0.02), roughness=0.85),
+        ),
+    )
+
     # 本地仓库背景
     background = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Background",
@@ -213,6 +429,12 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = FIXED_G1_29DOF_CFG
 
     remote_robot: ArticulationCfg = REMOTE_FIXED_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/RemoteRobot")
+
+    # 第三个机器人：点击 Play 后自动行走
+    walker_robot: ArticulationCfg = WALKER_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/WalkerRobot")
+
+    # 第四个机器人：GEAR-SONIC ONNX 驱动（最小骨架，仅验证 pipeline）
+    sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/SONICRobot")
 
     # Ground plane
     # ground = AssetBaseCfg(
@@ -232,6 +454,69 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
+
+    # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理
+    # reset 时把 robot 同步到 mocap 第 0 帧，并用该姿态预热 10 帧 history。
+    # action_scale 是部署 per-joint scale 外层的全局倍率，默认保持 1.0。
+    sonic_wholebody = SONICWholeBodyActionCfg(
+        asset_name="sonic_robot",
+        encoder_path=SONIC_ENCODER_PATH,
+        decoder_path=SONIC_DECODER_PATH,
+        joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+        action_scale=1.0,
+        mocap_path=SONIC_MOCAP_PATH,
+        # 探针字段（默认 False，按需开启验证反馈循环驱动）：
+        # - force_zero_last_action_history: 屏蔽 his_last_actions (offset 674:964)
+        #   实测 step 250 absmax 2-8 (vs 基线 16+)，证明 _last_action 是主反馈驱动
+        # - force_zero_decoder_history: 屏蔽全部 history (offset 64:994)，仅留 token
+        #   实测 step 1-250 absmax 完全 flat=2.7717（精确到小数 4 位），证明 decoder
+        #   history 是反馈循环唯一驱动 — SONIC ONNX 完全依赖 history 训练分布
+        # B1 obs noise 注入实验结果（2026-05-25）：失败
+        #   step 50/100/150/200/250 absmax 11.6/15.9/11.7/13.3/10.9，joint_pos 仍撞 3.08
+        #   noise 注入只让数值波动 ±20%，未消除反馈循环爆炸
+        # → 推翻"noise 是核心 OOD 来源"假设；候选根因转 ONNX export 漏 obs_normalization /
+        #   ckpt 训练 task 不是 walking（TRL_G1_Track tracking）→ 需走 B2 PyTorch ckpt
+        # obs_noise_enabled=True,
+        # B2 PyTorch ckpt 加载（2026-05-25，commit fd8cef87a）：
+        #   推翻 obs_normalization 假设（actor_sd 55 keys 无 running_mean_std 层）
+        #   发现 trainable `std: (29,) ∈ [0.30, 0.50]` → 训练 actor 是 Normal(mean, std).sample()
+        #   推理 ONNX 只取 mean → obs.last_action 训练含 noise / 推理 deterministic → noise gap 累积
+        # 部署路径使用 ONNX deterministic mean。action_noise 是探针开关，会直接造成关节目标抖动。
+        action_noise_enabled=False,
+        action_noise_std=0.40,  # scalar fallback (path 不存在时启用)
+        action_noise_std_path=SONIC_ACTION_STD_PATH,
+        # 先固定 mocap 起点，把观测/动作链路调通；随机 reset 后续再作为鲁棒性实验打开。
+        reset_to_random_mocap_frame=False,
+        reset_mocap_frame=0,
+        seed_history_from_reset_pose=True,
+        align_root_height_to_mocap=True,
+        # 输出层稳定器：主链路已打通后，仅用于压制上肢启动瞬态和 wrist 末端甩动。
+        startup_blend_steps=25,
+        upper_body_target_rate_limit_rad_per_step=0.06,
+        wrist_target_rate_limit_rad_per_step=0.04,
+        # 实验开关：上肢直接贴 mocap 能小幅降低 wrist 峰值，但会轻微影响 root/feet，默认关闭。
+        upper_body_mocap_target_blend=0.0,
+        wrist_mocap_target_blend=0.0,
+    )
+
+    # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
+    # forward_speed 已在 v3 物理驱动后废弃（脚地接触自然推进），不再传入
+    walker_skeletal_walk = AutoWalkActionCfg(
+        asset_name="walker_robot",
+        joint_names=WALKER_WHOLE_BODY_JOINTS,
+        walk_frequency=0.8,
+        # 腿部
+        hip_pitch_amplitude=0.25,
+        knee_amplitude=0.30,
+        ankle_pitch_amplitude=0.12,
+        # 手臂摆动
+        arm_swing_amplitude=0.35,
+        elbow_bend_amplitude=0.15,
+        # 腰部
+        waist_yaw_amplitude=0.06,
+        # 手部
+        hand_curl_amount=0.10,
+    )
 
     publish_robot_state = ZmqRobotSyncActionCfg(
         asset_name="robot",
@@ -388,8 +673,10 @@ class EventsCfg:
         mode="startup",
         params={
             "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_viewer_eye": (4.0, 0.0, 1.55),
+            "reference_viewer_lookat": (0.0, 0.0, 0.9),
             "viewer_origin_type": "asset_root",
-            "viewer_asset_name": "robot",
+            "viewer_asset_name": "sonic_robot",
             "viewer_body_name": None,
             "reference_viewer_target_xy": (0.0, 0.0),
             "lock_viewer_to_asset": False,
@@ -408,9 +695,54 @@ class EventsCfg:
         params={"conveyor_prim_name": "ConveyorBelt_A08_06"},
     )
 
-    # 保留 setup_conveyor_belt_physics 仅为滚轮设置碰撞体（不旋转），
-    # 箱子依靠 drive_object_on_conveyor 的速度覆写驱动（兼容 GPU 管道）。
-    # 不再使用 rotate_conveyor_rollers：移除每步 117 次 USD xformOp 写入以大幅提升 FPS。
+    # Walker 机器人：放在 robot1 正后方 3.5m，朝向传送带（+Y）
+    align_walker_startup = EventTerm(
+        func=locomanip_mdp.align_walker_robot_to_conveyor,
+        mode="startup",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "walker_robot_name": "walker_robot",
+            "walker_y_behind": 3.5,
+        },
+    )
+
+    align_walker_reset = EventTerm(
+        func=locomanip_mdp.align_walker_robot_to_conveyor,
+        mode="reset",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "walker_robot_name": "walker_robot",
+            "walker_y_behind": 3.5,
+        },
+    )
+
+    # SONIC 机器人：复用 walker 对齐逻辑，放在 walker 旁边作为全身追踪验证对象
+    align_sonic_startup = EventTerm(
+        func=locomanip_mdp.align_walker_robot_to_conveyor,
+        mode="startup",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "walker_robot_name": "sonic_robot",
+            "walker_x_offset": 3.0,
+            "walker_y_behind": 3.5,
+        },
+    )
+
+    align_sonic_reset = EventTerm(
+        func=locomanip_mdp.align_walker_robot_to_conveyor,
+        mode="reset",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "walker_robot_name": "sonic_robot",
+            "walker_x_offset": 3.0,
+            "walker_y_behind": 3.5,
+        },
+    )
+
     setup_conveyor_belt_physics = EventTerm(
         func=locomanip_mdp.setup_conveyor_belt_physics,
         mode="prestartup",
