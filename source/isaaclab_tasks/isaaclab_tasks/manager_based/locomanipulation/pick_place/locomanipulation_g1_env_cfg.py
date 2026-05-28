@@ -321,6 +321,9 @@ ROBOT_B_INIT_ROT = (0.0, 0.0, 0.0, 1.0)
 
 ROBOT_A_REFERENCE_XY = (0.0, 0.0)
 ROBOT_B_REFERENCE_XY = (1.25, 0.0)
+# SONIC/walker 是本地诊断展示对象，固定在原先跑通的 B 侧参考位，
+# 避免修改联机 local_player_id 后演示机器人和相机横向翻转。
+SONIC_REFERENCE_XY = ROBOT_B_REFERENCE_XY
 
 if RUNTIME_NET_CFG.local_player_id == 1:
     FIXED_G1_29DOF_CFG.init_state.pos = ROBOT_A_INIT_POS
@@ -668,21 +671,6 @@ class EventsCfg:
         },
     )
 
-    align_viewer_to_conveyor_startup = EventTerm(
-        func=locomanip_mdp.align_viewer_to_conveyor_bbox,
-        mode="startup",
-        params={
-            "conveyor_prim_name": "ConveyorBelt_A08_06",
-            "reference_viewer_eye": (4.0, 0.0, 1.55),
-            "reference_viewer_lookat": (0.0, 0.0, 0.9),
-            "viewer_origin_type": "asset_root",
-            "viewer_asset_name": "sonic_robot",
-            "viewer_body_name": None,
-            "reference_viewer_target_xy": (0.0, 0.0),
-            "lock_viewer_to_asset": False,
-        },
-    )
-
     align_test_boxes_to_conveyor_startup = EventTerm(
         func=locomanip_mdp.place_test_boxes_from_conveyor_bbox,
         mode="startup",
@@ -701,7 +689,7 @@ class EventsCfg:
         mode="startup",
         params={
             "conveyor_prim_name": "ConveyorBelt_A08_06",
-            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "reference_robot1_xy": SONIC_REFERENCE_XY,
             "walker_robot_name": "walker_robot",
             "walker_y_behind": 3.5,
         },
@@ -712,7 +700,7 @@ class EventsCfg:
         mode="reset",
         params={
             "conveyor_prim_name": "ConveyorBelt_A08_06",
-            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "reference_robot1_xy": SONIC_REFERENCE_XY,
             "walker_robot_name": "walker_robot",
             "walker_y_behind": 3.5,
         },
@@ -724,7 +712,7 @@ class EventsCfg:
         mode="startup",
         params={
             "conveyor_prim_name": "ConveyorBelt_A08_06",
-            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "reference_robot1_xy": SONIC_REFERENCE_XY,
             "walker_robot_name": "sonic_robot",
             "walker_x_offset": 3.0,
             "walker_y_behind": 3.5,
@@ -736,10 +724,26 @@ class EventsCfg:
         mode="reset",
         params={
             "conveyor_prim_name": "ConveyorBelt_A08_06",
-            "reference_robot1_xy": LOCAL_ROBOT_REFERENCE_XY,
+            "reference_robot1_xy": SONIC_REFERENCE_XY,
             "walker_robot_name": "sonic_robot",
             "walker_x_offset": 3.0,
             "walker_y_behind": 3.5,
+        },
+    )
+
+    # Viewer 必须在 sonic_robot 对齐后再设置，否则 asset_root 会读到 spawn 默认位置。
+    align_viewer_to_conveyor_startup = EventTerm(
+        func=locomanip_mdp.align_viewer_to_conveyor_bbox,
+        mode="startup",
+        params={
+            "conveyor_prim_name": "ConveyorBelt_A08_06",
+            "reference_viewer_eye": (4.0, 0.0, 1.55),
+            "reference_viewer_lookat": (0.0, 0.0, 0.9),
+            "viewer_origin_type": "asset_root",
+            "viewer_asset_name": "sonic_robot",
+            "viewer_body_name": None,
+            "reference_viewer_target_xy": (0.0, 0.0),
+            "lock_viewer_to_asset": False,
         },
     )
 
