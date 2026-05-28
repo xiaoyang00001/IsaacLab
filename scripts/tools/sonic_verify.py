@@ -591,6 +591,8 @@ def main():
             "setup_test_box1_physics",
             "align_test_boxes_to_conveyor_startup",
             "align_test_boxes_to_conveyor_reset",
+            "drive_test_box",
+            "drive_test_box1",
         ):
             if hasattr(env_cfg.events, name):
                 setattr(env_cfg.events, name, None)
