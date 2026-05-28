@@ -1,0 +1,4 @@
+信息: 用提供的模式无法找到文件。
+C:\Users\nolovr\AppData\Local\Microsoft\WindowsApps\python.exe
+python.bat
+python.bat

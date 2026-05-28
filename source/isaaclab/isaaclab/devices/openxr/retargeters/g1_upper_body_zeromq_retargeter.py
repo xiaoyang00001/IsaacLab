@@ -41,6 +41,7 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
         self._use_hand_tracking_if_available = cfg.use_hand_tracking_if_available
         self._enable_wrist_pose_retargeting = cfg.enable_wrist_pose_retargeting
         self._enable_visualization = cfg.enable_visualization
+        self._wrist_position_offset = torch.tensor(cfg.wrist_position_offset, dtype=torch.float32)
         if cfg.hand_joint_names is None:
             raise ValueError("hand_joint_names must be provided")
         # Initialize visualization if enabled
@@ -197,6 +198,7 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
         transform_pose = PoseUtils.make_pose(torch.zeros(3), PoseUtils.matrix_from_quat(combined_quat))
         result_pose = PoseUtils.pose_in_A_to_pose_in_B(transform_pose, openxr_pose)
         pos, rot_mat = PoseUtils.unmake_pose(result_pose)
+        pos = pos + self._wrist_position_offset
         quat = PoseUtils.quat_from_matrix(rot_mat)
         return np.concatenate([pos.numpy(), quat.numpy()]).astype(np.float32)
 
@@ -208,5 +210,5 @@ class G1TriHandUpperBodyZeroMqRetargeterCfg(RetargeterCfg):
     hand_joint_names: list[str] | None = None
     use_hand_tracking_if_available: bool = False
     enable_wrist_pose_retargeting: bool = True
-    wrist_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    wrist_position_offset: tuple[float, float, float] = (-0.16, 0.0, 0.0)
     retargeter_type: type[RetargeterBase] = G1TriHandUpperBodyZeroMqRetargeter

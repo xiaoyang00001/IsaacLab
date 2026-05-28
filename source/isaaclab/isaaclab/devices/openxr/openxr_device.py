@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -26,6 +26,7 @@ from isaaclab.devices.retargeter_base import RetargeterBase
 from ..device_base import DeviceBase, DeviceCfg
 from .xr_anchor_utils import XrAnchorSynchronizer
 from .xr_cfg import XrCfg
+from .network_runtime_cfg import build_dual_machine_runtime_cfg
 from .zeromq_game_client import ZeroMqGameClient
 
 # For testing purposes, we need to mock the XRCore, XRPoseValidityFlags classes
@@ -81,7 +82,6 @@ class OpenXRDevice(DeviceBase):
             retargeters: List of retargeter instances to use for transforming raw tracking data.
         """
         super().__init__(retargeters)
-        self._cfg = cfg
         self._xr_cfg = cfg.xr_cfg or XrCfg()
         self._additional_callbacks = dict()
         self._xr_core = XRCore.get_singleton() if XRCore is not None else None
@@ -150,11 +150,16 @@ class OpenXRDevice(DeviceBase):
                 "isaaclab_right_a",
                 lambda ev: self._toggle_anchor_rotation(),
             )
-        
-        # Initialize ZeroMQ Game Client
+
+        # Initialize the optional MGXR relay client from the machine-role config.
         try:
-            ZeroMqGameClient.get_instance().init(self._cfg.zmq_game_server_endpoint, self._cfg.zmq_player_id)
+            self._network_runtime_cfg = build_dual_machine_runtime_cfg()
+            ZeroMqGameClient.get_instance().init(
+                self._network_runtime_cfg.tracking_send_endpoint,
+                self._network_runtime_cfg.local_player_id,
+            )
         except Exception as e:
+            self._network_runtime_cfg = None
             logger.warning(f"Failed to initialize ZeroMqGameClient: {e}")
             
     def __del__(self):
@@ -269,6 +274,10 @@ class OpenXRDevice(DeviceBase):
 
         if RetargeterBase.Requirement.HEAD_TRACKING in self._required_features:
             data[DeviceBase.TrackingTarget.HEAD] = self._calculate_headpose()
+            try:
+                ZeroMqGameClient.get_instance().send_head_tracking(data[DeviceBase.TrackingTarget.HEAD].tolist())
+            except Exception as e:
+                logger.warning(f"Failed to send head tracking via ZMQ: {e}")
 
         if RetargeterBase.Requirement.MOTION_CONTROLLER in self._required_features:
             # Optionally include motion controller pose+inputs if devices are available
@@ -549,36 +558,9 @@ class OpenXRDevice(DeviceBase):
             self.reset()
 
 
-def _try_get_network_cfg():
-    """延迟导入 NETWORK_CFG，避免循环导入。实例化时调用，此时所有模块已加载。"""
-    try:
-        from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.network_cfg import NETWORK_CFG as cfg
-        return cfg
-    except ImportError:
-        return None
-
-
 @dataclass
 class OpenXRDeviceCfg(DeviceCfg):
     """Configuration for OpenXR devices."""
 
     xr_cfg: XrCfg | None = None
     class_type: type[DeviceBase] = OpenXRDevice
-
-    zmq_game_server_endpoint: str = field(
-        default_factory=lambda: (
-            _try_get_network_cfg().zmq_game_server_endpoint
-            if _try_get_network_cfg() is not None
-            else "tcp://127.0.0.1:14026"
-        )
-    )
-    """ZeroMQ game server endpoint for motion controller data publishing."""
-
-    zmq_player_id: int = field(
-        default_factory=lambda: (
-            _try_get_network_cfg().zmq_player_id
-            if _try_get_network_cfg() is not None
-            else 1
-        )
-    )
-    """Player ID for the ZeroMQ game client."""

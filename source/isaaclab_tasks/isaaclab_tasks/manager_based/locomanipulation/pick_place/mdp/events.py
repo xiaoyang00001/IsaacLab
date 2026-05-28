@@ -26,6 +26,79 @@ def _find_named_prim_under_background(stage: Usd.Stage, env_id: int, prim_name: 
     return None
 
 
+def _set_or_create_translate_op(xformable: UsdGeom.Xformable, value: Gf.Vec3d):
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            op.Set(value)
+            return
+    xformable.AddTranslateOp().Set(value)
+
+
+def _set_or_create_orient_op(xformable: UsdGeom.Xformable, value: Gf.Quatd):
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeOrient:
+            op.Set(value)
+            return
+    xformable.AddOrientOp().Set(value)
+
+
+def place_fixed_robot_prims(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    local_player_id: int = 1,
+    robot_a_pos: tuple[float, float, float] = (0.0, 0.0, 0.75),
+    robot_a_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
+    robot_b_pos: tuple[float, float, float] = (1.25, 0.0, 0.75),
+    robot_b_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+    robot1_name: str = "Robot",
+    robot2_name: str = "RemoteRobot",
+):
+    """Place fixed-root robot prims by editing USD xform ops before physics starts."""
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    if int(local_player_id) == 1:
+        local_pos, local_rot = robot_a_pos, robot_a_rot
+        remote_pos, remote_rot = robot_b_pos, robot_b_rot
+    else:
+        local_pos, local_rot = robot_b_pos, robot_b_rot
+        remote_pos, remote_rot = robot_a_pos, robot_a_rot
+
+    for i, env_id in enumerate(env_ids.tolist()):
+        local_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/{robot1_name}")
+        remote_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/{robot2_name}")
+        if not (local_prim and local_prim.IsValid() and remote_prim and remote_prim.IsValid()):
+            print(
+                f"[locomanip_event] place_fixed_robot_prims: missing prim(s) for env_{env_id}: "
+                f"{local_prim.GetPath() if local_prim and local_prim.IsValid() else 'local_missing'}, "
+                f"{remote_prim.GetPath() if remote_prim and remote_prim.IsValid() else 'remote_missing'}"
+            )
+            continue
+
+        local_xf = UsdGeom.Xformable(local_prim)
+        remote_xf = UsdGeom.Xformable(remote_prim)
+
+        _set_or_create_translate_op(local_xf, Gf.Vec3d(*[float(v) for v in local_pos]))
+        _set_or_create_translate_op(remote_xf, Gf.Vec3d(*[float(v) for v in remote_pos]))
+
+        local_quat = Gf.Quatd(float(local_rot[0]), Gf.Vec3d(float(local_rot[1]), float(local_rot[2]), float(local_rot[3])))
+        remote_quat = Gf.Quatd(float(remote_rot[0]), Gf.Vec3d(float(remote_rot[1]), float(remote_rot[2]), float(remote_rot[3])))
+        _set_or_create_orient_op(local_xf, local_quat)
+        _set_or_create_orient_op(remote_xf, remote_quat)
+
+        if i == 0:
+            print(
+                f"[locomanip_event] placed fixed robot prims: "
+                f"local_player_id={local_player_id}, "
+                f"local_robot={robot1_name}@({local_pos[0]:.4f}, {local_pos[1]:.4f}, {local_pos[2]:.4f}), "
+                f"remote_robot={robot2_name}@({remote_pos[0]:.4f}, {remote_pos[1]:.4f}, {remote_pos[2]:.4f})"
+            )
+
+
 def setup_usd_rigid_object_physics(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
@@ -206,12 +279,14 @@ def place_robots_from_conveyor_bbox(
     conveyor_prim_name: str = "ConveyorBelt_A08_06",
     robot1_name: str = "robot",
     robot2_name: str = "remote_robot",
+    local_player_id: int = 1,
     reference_conveyor_center_x: float = 0.62,
     reference_conveyor_min_y: float = 0.98,
-    reference_robot1_xy: tuple[float, float] = (0.0, 0.0),
-    reference_robot2_xy: tuple[float, float] = (1.25, 0.0),
+    publisher_robot_reference_xy: tuple[float, float] = (0.0, 0.0),
+    subscriber_robot_reference_xy: tuple[float, float] = (1.25, 0.0),
+    side_clearance_x: float = 0.055,
 ):
-    """Place the two robots using change6-relative offsets from the conveyor bbox."""
+    """Place local/remote robots on publisher/subscriber sides of the conveyor."""
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
 
@@ -225,10 +300,8 @@ def place_robots_from_conveyor_bbox(
     robot1_state = robot1.data.default_root_state[env_ids].clone()
     robot2_state = robot2.data.default_root_state[env_ids].clone()
 
-    robot1_center_x_offset = reference_robot1_xy[0] - reference_conveyor_center_x
-    robot2_center_x_offset = reference_robot2_xy[0] - reference_conveyor_center_x
-    robot1_min_y_offset = reference_robot1_xy[1] - reference_conveyor_min_y
-    robot2_min_y_offset = reference_robot2_xy[1] - reference_conveyor_min_y
+    publisher_min_y_offset = publisher_robot_reference_xy[1] - reference_conveyor_min_y
+    subscriber_min_y_offset = subscriber_robot_reference_xy[1] - reference_conveyor_min_y
 
     bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
     for i, env_id in enumerate(env_ids.tolist()):
@@ -241,20 +314,35 @@ def place_robots_from_conveyor_bbox(
         aligned_box = world_bound.ComputeAlignedBox()
         min_pt = aligned_box.GetMin()
         max_pt = aligned_box.GetMax()
-        center_x = 0.5 * (min_pt[0] + max_pt[0])
+        publisher_x = min_pt[0] - abs(side_clearance_x)
+        publisher_y = min_pt[1] + publisher_min_y_offset
+        subscriber_x = max_pt[0] + abs(side_clearance_x)
+        subscriber_y = min_pt[1] + subscriber_min_y_offset
 
-        robot1_state[i, 0] = center_x + robot1_center_x_offset
-        robot1_state[i, 1] = min_pt[1] + robot1_min_y_offset
-        robot2_state[i, 0] = center_x + robot2_center_x_offset
-        robot2_state[i, 1] = min_pt[1] + robot2_min_y_offset
+        if int(local_player_id) == 1:
+            local_x, local_y = publisher_x, publisher_y
+            remote_x, remote_y = subscriber_x, subscriber_y
+            local_side = "publisher"
+        else:
+            local_x, local_y = subscriber_x, subscriber_y
+            remote_x, remote_y = publisher_x, publisher_y
+            local_side = "subscriber"
+
+        robot1_state[i, 0] = local_x
+        robot1_state[i, 1] = local_y
+        robot2_state[i, 0] = remote_x
+        robot2_state[i, 1] = remote_y
 
         if i == 0:
             print(
                 f"[locomanip_event] aligned robots from {conveyor_prim_name}: "
                 f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
                 f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
-                f"robot0=({robot1_state[i, 0]:.4f}, {robot1_state[i, 1]:.4f}, {robot1_state[i, 2]:.4f}), "
-                f"robot1=({robot2_state[i, 0]:.4f}, {robot2_state[i, 1]:.4f}, {robot2_state[i, 2]:.4f})"
+                f"local_player_id={local_player_id}, local_side={local_side}, "
+                f"publisher=({publisher_x:.4f}, {publisher_y:.4f}), "
+                f"subscriber=({subscriber_x:.4f}, {subscriber_y:.4f}), "
+                f"local_robot=({robot1_state[i, 0]:.4f}, {robot1_state[i, 1]:.4f}, {robot1_state[i, 2]:.4f}), "
+                f"remote_robot=({robot2_state[i, 0]:.4f}, {robot2_state[i, 1]:.4f}, {robot2_state[i, 2]:.4f})"
             )
 
     robot1.write_root_pose_to_sim(robot1_state[:, :7], env_ids=env_ids)
@@ -263,12 +351,43 @@ def place_robots_from_conveyor_bbox(
     robot2.write_root_velocity_to_sim(robot2_state[:, 7:], env_ids=env_ids)
 
 
+def log_robot_root_states(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    robot_name: str = "robot",
+    remote_robot_name: str = "remote_robot",
+):
+    """Log current/default root states for the two robot articulations."""
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+    if len(env_ids) == 0:
+        return
+
+    env_id = int(env_ids[0].item())
+    robot = env.scene[robot_name]
+    remote_robot = env.scene[remote_robot_name]
+
+    robot_root = robot.data.root_pos_w[env_id].detach().cpu().tolist()
+    remote_root = remote_robot.data.root_pos_w[env_id].detach().cpu().tolist()
+    robot_default = robot.data.default_root_state[env_id, :3].detach().cpu().tolist()
+    remote_default = remote_robot.data.default_root_state[env_id, :3].detach().cpu().tolist()
+
+    print(
+        "[locomanip_event] startup robot roots: "
+        f"robot_root=({robot_root[0]:.4f}, {robot_root[1]:.4f}, {robot_root[2]:.4f}), "
+        f"remote_root=({remote_root[0]:.4f}, {remote_root[1]:.4f}, {remote_root[2]:.4f}), "
+        f"robot_default=({robot_default[0]:.4f}, {robot_default[1]:.4f}, {robot_default[2]:.4f}), "
+        f"remote_default=({remote_default[0]:.4f}, {remote_default[1]:.4f}, {remote_default[2]:.4f})"
+    )
+
+
 def place_test_boxes_from_conveyor_bbox(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
     conveyor_prim_name: str = "ConveyorBelt_A08_06",
     test_box_name: str = "test_box",
     test_box1_name: str = "test_box1",
+    local_player_id: int = 1,
     reference_conveyor_center_x: float = 0.62,
     reference_conveyor_min_y: float = 0.98,
     reference_test_box_xy: tuple[float, float] = (0.78886, 1.17033),
@@ -315,12 +434,16 @@ def place_test_boxes_from_conveyor_bbox(
         center_x = 0.5 * (min_pt[0] + max_pt[0])
         spawn_z = max_pt[2] + box_half_height
 
+        # Match the initial runnable version and xinjie behavior here: keep the
+        # conveyor-relative world spawn identical on both machines. The local
+        # robot role swap plus XR anchoring already provide the subjective
+        # mirror. Mirroring boxes again here flips left/right from the operator's
+        # perspective on player 2.
         test_box_pose[i, 0] = center_x + test_box_center_x_offset
-        test_box_pose[i, 1] = min_pt[1] + test_box_min_y_offset
-        test_box_pose[i, 2] = spawn_z
-
         test_box1_pose[i, 0] = center_x + test_box1_center_x_offset
+        test_box_pose[i, 1] = min_pt[1] + test_box_min_y_offset
         test_box1_pose[i, 1] = min_pt[1] + test_box1_min_y_offset
+        test_box_pose[i, 2] = spawn_z
         test_box1_pose[i, 2] = spawn_z
 
         if i == 0:
@@ -328,6 +451,7 @@ def place_test_boxes_from_conveyor_bbox(
                 f"[locomanip_event] aligned boxes from {conveyor_prim_name}: "
                 f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
                 f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
+                f"local_player_id={local_player_id}, "
                 f"box0=({test_box_pose[i, 0]:.4f}, {test_box_pose[i, 1]:.4f}, {test_box_pose[i, 2]:.4f}), "
                 f"box1=({test_box1_pose[i, 0]:.4f}, {test_box1_pose[i, 1]:.4f}, {test_box1_pose[i, 2]:.4f})"
             )
@@ -634,5 +758,3 @@ def setup_conveyor_belt_physics(
                 f"[locomanip_event]  Rollers SurfaceVelocity "
                 f"vel={velocity} -> {str(rollers_prim.GetPath())}"
             )
-
-

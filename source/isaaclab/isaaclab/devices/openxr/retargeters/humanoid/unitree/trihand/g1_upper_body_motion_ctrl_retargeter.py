@@ -32,8 +32,6 @@ class G1TriHandUpperBodyMotionControllerRetargeter(RetargeterBase):
         self._sim_device = cfg.sim_device
         self._hand_joint_names = cfg.hand_joint_names
         self._enable_visualization = cfg.enable_visualization
-        self._wrist_position_offset = torch.tensor(cfg.wrist_position_offset, dtype=torch.float32)
-
         if cfg.hand_joint_names is None:
             raise ValueError("hand_joint_names must be provided")
 
@@ -218,7 +216,6 @@ class G1TriHandUpperBodyMotionControllerRetargeter(RetargeterBase):
 
         result_pose = PoseUtils.pose_in_A_to_pose_in_B(transform_pose, openxr_pose)
         pos, rot_mat = PoseUtils.unmake_pose(result_pose)
-        pos = pos + self._wrist_position_offset
         quat = PoseUtils.quat_from_matrix(rot_mat)
 
         return np.concatenate([pos.numpy(), quat.numpy()])
@@ -230,5 +227,5 @@ class G1TriHandUpperBodyMotionControllerRetargeterCfg(RetargeterCfg):
 
     enable_visualization: bool = False
     hand_joint_names: list[str] | None = None  # List of robot hand joint names
-    wrist_position_offset: tuple[float, float, float] = (-0.16, 0.0, 0.0)
+    wrist_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     retargeter_type: type[RetargeterBase] = G1TriHandUpperBodyMotionControllerRetargeter
