@@ -731,19 +731,32 @@ class EventsCfg:
         },
     )
 
-    # Viewer 必须在 sonic_robot 对齐后再设置，否则 asset_root 会读到 spawn 默认位置。
-    align_viewer_to_conveyor_startup = EventTerm(
-        func=locomanip_mdp.align_viewer_to_conveyor_bbox,
+    # Viewer 放在 sonic_robot 当前朝向的正前方；interval 会在 mocap reset 改变 root yaw 后再校正。
+    align_viewer_to_sonic_front_startup = EventTerm(
+        func=locomanip_mdp.align_viewer_to_asset_front,
         mode="startup",
         params={
-            "conveyor_prim_name": "ConveyorBelt_A08_06",
-            "reference_viewer_eye": (4.0, 0.0, 1.55),
-            "reference_viewer_lookat": (0.0, 0.0, 0.9),
-            "viewer_origin_type": "asset_root",
             "viewer_asset_name": "sonic_robot",
-            "viewer_body_name": None,
-            "reference_viewer_target_xy": (0.0, 0.0),
-            "lock_viewer_to_asset": False,
+            "front_axis": "+x",
+            "distance": 4.0,
+            "eye_height": 1.55,
+            "lookat_height": 0.9,
+            "track_asset_position": True,
+        },
+    )
+
+    align_viewer_to_sonic_front_interval = EventTerm(
+        func=locomanip_mdp.align_viewer_to_asset_front,
+        mode="interval",
+        interval_range_s=(0.1, 0.1),
+        params={
+            "viewer_asset_name": "sonic_robot",
+            "front_axis": "+x",
+            "distance": 4.0,
+            "eye_height": 1.55,
+            "lookat_height": 0.9,
+            "track_asset_position": True,
+            "log_viewer": False,
         },
     )
 

@@ -589,6 +589,94 @@ def align_viewer_to_conveyor_bbox(
     )
 
 
+def align_viewer_to_asset_front(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    viewer_asset_name: str = "sonic_robot",
+    front_axis: str = "+x",
+    distance: float = 4.0,
+    eye_height: float = 1.55,
+    lookat_height: float = 0.9,
+    lookat_forward_offset: float = 0.0,
+    track_asset_position: bool = True,
+    log_viewer: bool = True,
+):
+    """Place the viewport directly in front of an asset, using its current yaw."""
+    if not env.sim.has_gui():
+        return
+
+    env_id = int(env_ids[0]) if env_ids is not None and len(env_ids) > 0 else 0
+    asset = env.scene[viewer_asset_name]
+    root_pos = asset.data.root_pos_w[env_id]
+    root_quat = asset.data.root_quat_w[env_id].view(1, 4)
+
+    axis = front_axis.strip().lower()
+    axis_vectors = {
+        "x": (1.0, 0.0, 0.0),
+        "+x": (1.0, 0.0, 0.0),
+        "-x": (-1.0, 0.0, 0.0),
+        "y": (0.0, 1.0, 0.0),
+        "+y": (0.0, 1.0, 0.0),
+        "-y": (0.0, -1.0, 0.0),
+    }
+    if axis not in axis_vectors:
+        raise ValueError(f"Unsupported front_axis={front_axis!r}; expected one of {sorted(axis_vectors)}")
+
+    front_b = torch.tensor(axis_vectors[axis], device=root_pos.device, dtype=root_pos.dtype).view(1, 3)
+    front_w = math_utils.quat_apply_yaw(root_quat, front_b)[0]
+    front_xy_norm = torch.linalg.norm(front_w[:2])
+    if front_xy_norm > 1e-6:
+        front_w = front_w / front_xy_norm
+
+    rel_eye = (
+        float(front_w[0].item() * distance),
+        float(front_w[1].item() * distance),
+        float(eye_height),
+    )
+    rel_lookat = (
+        float(front_w[0].item() * lookat_forward_offset),
+        float(front_w[1].item() * lookat_forward_offset),
+        float(lookat_height),
+    )
+
+    if track_asset_position and env.viewport_camera_controller is not None:
+        env.viewport_camera_controller.update_view_to_asset_root(viewer_asset_name)
+        env.cfg.viewer.origin_type = "asset_root"
+        env.cfg.viewer.asset_name = viewer_asset_name
+        env.cfg.viewer.body_name = None
+        env.cfg.viewer.eye = rel_eye
+        env.cfg.viewer.lookat = rel_lookat
+        env.viewport_camera_controller.update_view_location(eye=rel_eye, lookat=rel_lookat)
+    else:
+        world_eye = (
+            float(root_pos[0].item() + rel_eye[0]),
+            float(root_pos[1].item() + rel_eye[1]),
+            float(eye_height),
+        )
+        world_lookat = (
+            float(root_pos[0].item() + rel_lookat[0]),
+            float(root_pos[1].item() + rel_lookat[1]),
+            float(lookat_height),
+        )
+        env.cfg.viewer.origin_type = "world"
+        env.cfg.viewer.asset_name = None
+        env.cfg.viewer.body_name = None
+        env.cfg.viewer.eye = world_eye
+        env.cfg.viewer.lookat = world_lookat
+        if env.viewport_camera_controller is not None:
+            env.viewport_camera_controller.update_view_location(eye=world_eye, lookat=world_lookat)
+        else:
+            env.sim.set_camera_view(eye=world_eye, target=world_lookat)
+
+    if log_viewer:
+        _diag_print(
+            f"[locomanip_event] viewer front of {viewer_asset_name}: axis={front_axis}, "
+            f"distance={distance:.2f}, track_position={track_asset_position}, "
+            f"eye=({env.cfg.viewer.eye[0]:.4f}, {env.cfg.viewer.eye[1]:.4f}, {env.cfg.viewer.eye[2]:.4f}), "
+            f"lookat=({env.cfg.viewer.lookat[0]:.4f}, {env.cfg.viewer.lookat[1]:.4f}, {env.cfg.viewer.lookat[2]:.4f})"
+        )
+
+
 def init_roller_rigid_body_view(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
