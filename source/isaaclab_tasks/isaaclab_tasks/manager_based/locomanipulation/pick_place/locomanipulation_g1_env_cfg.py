@@ -237,7 +237,7 @@ SONIC_G1_29DOF_CFG.actuators = {
 SONIC_ENCODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
 SONIC_DECODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_decoder.onnx"
 # Walking mocap (4MB sample，由 download_from_hf.py --sample 下载)
-SONIC_MOCAP_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/sample_data/robot_filtered/210531/walk_forward_amateur_001__A001.pkl"
+SONIC_MOCAP_PATH = r"D:/src/Isaac/xiaoyangIssacLab/BVH/RAYNOS_Motion1.pkl"
 # B2b-iter: per-joint action noise std (29,) 从 sonic_release/last.pt 提取（scripts/tools/extract_sonic_action_std.py）
 SONIC_ACTION_STD_PATH = os.path.join(os.path.dirname(__file__), "data", "sonic_action_std_29d.npy")
 
