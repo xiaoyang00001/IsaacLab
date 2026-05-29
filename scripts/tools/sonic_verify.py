@@ -108,6 +108,16 @@ def _get_sonic_term(env):
         return None
 
 
+def _resolve_mocap_frame(term, frame: int) -> int:
+    mocap_frames = int(getattr(term, "_mocap_num_frames", 0))
+    if mocap_frames <= 0:
+        return 0
+    loop_mocap = bool(getattr(getattr(term, "cfg", None), "loop_mocap", False))
+    if loop_mocap:
+        return int(frame) % mocap_frames
+    return max(0, min(int(frame), mocap_frames - 1))
+
+
 def _compute_sonic_forward_xy(term, device: torch.device) -> torch.Tensor:
     forward_xy = torch.tensor([1.0, 0.0], device=device)
     mocap_root = getattr(term, "_mocap_root_trans", None)
@@ -115,7 +125,7 @@ def _compute_sonic_forward_xy(term, device: torch.device) -> torch.Tensor:
     if mocap_root is None or mocap_frames <= 2:
         return forward_xy
 
-    frame0 = int(getattr(term, "_mocap_frame", 0)) % mocap_frames
+    frame0 = _resolve_mocap_frame(term, int(getattr(term, "_mocap_frame", 0)))
     frame1 = min(frame0 + max(1, int(round(getattr(term, "_mocap_fps", 50.0)))), mocap_frames - 1)
     delta_xy = mocap_root[frame1, :2].to(device=device) - mocap_root[frame0, :2].to(device=device)
     delta_norm = torch.linalg.norm(delta_xy)
@@ -259,12 +269,12 @@ def _print_mocap_root_report(env) -> None:
         return
 
     n = int(getattr(term, "_mocap_num_frames", 0))
-    frame0 = int(getattr(term, "_mocap_frame", 0)) % n
+    frame0 = _resolve_mocap_frame(term, int(getattr(term, "_mocap_frame", 0)))
     base = mocap_root[frame0]
     probe_frames = [1, 50, 100, 250, 500, 1000, 1500, 2000]
     parts = []
     for offset in probe_frames:
-        frame = (frame0 + offset) % n
+        frame = _resolve_mocap_frame(term, frame0 + offset)
         delta = mocap_root[frame] - base
         parts.append(
             f"+{offset}:xy=({delta[0].item():+.3f},{delta[1].item():+.3f}) z={delta[2].item():+.3f}"
@@ -299,7 +309,7 @@ def _compute_sonic_metrics(env, step: int) -> dict[str, float | str] | None:
     mocap_body = getattr(term, "_mocap_body_pos_b", None)
     mocap_frames = int(getattr(term, "_mocap_num_frames", 0))
     if mocap_body is not None and mocap_frames > 0:
-        frame = int(term._mocap_frame) % mocap_frames  # noqa: SLF001
+        frame = _resolve_mocap_frame(term, int(term._mocap_frame))  # noqa: SLF001
         body_err = torch.linalg.norm(body_pos_b - mocap_body[frame], dim=-1)
         max_body_idx = int(torch.argmax(body_err).item())
         max_body_name = str(asset.data.body_names[term._sonic_body_ids[max_body_idx]])  # noqa: SLF001

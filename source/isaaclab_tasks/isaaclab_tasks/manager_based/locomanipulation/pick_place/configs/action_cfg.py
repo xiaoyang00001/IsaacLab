@@ -200,6 +200,13 @@ class SONICWholeBodyActionCfg(ActionTermCfg):
     reset_mocap_frame: int = 0
     """确定性 reset 使用的 mocap 帧。`reset_to_random_mocap_frame=True` 时会忽略此值。"""
 
+    loop_mocap: bool = False
+    """是否把 mocap 当成首尾无缝循环片段播放。
+
+    BVH/RAYNOS 这类离线转换片段通常不是 seamless loop，尾帧接第 0 帧会产生 root/reference
+    突变，导致 SONIC reference 相位跳变后摔倒；默认按 finite clip clamp 到末尾。
+    """
+
     seed_history_from_reset_pose: bool = True
     """reset 后用当前 mocap 姿态预热 decoder 10 帧 history。
 

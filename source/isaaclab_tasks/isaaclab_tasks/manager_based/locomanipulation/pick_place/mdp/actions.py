@@ -925,7 +925,7 @@ class SONICWholeBodyAction(ActionTerm):
         if self._mocap_target_blend.max().item() <= 0.0:
             return sonic_target
 
-        frame = int(self._mocap_frame) % self._mocap_num_frames
+        frame = self._resolve_mocap_frame(self._mocap_frame)
         mocap_target = self._mocap_dof[frame, : sonic_target.shape[1]].unsqueeze(0).expand_as(sonic_target)
         blend = self._mocap_target_blend[:, : sonic_target.shape[1]]
         return torch.lerp(sonic_target, mocap_target, blend)
@@ -1058,7 +1058,7 @@ class SONICWholeBodyAction(ActionTerm):
 
         if self._mocap_dof is not None and self._mocap_num_frames > 0:
             n = self._mocap_num_frames
-            indices = (self._mocap_frame + torch.arange(10, device=self.device) * self._mocap_step) % n
+            indices = self._mocap_future_indices(10)
 
             # [4:294] motion_joint_positions_10frame_step5 = mocap.dof[future 10 frames]
             mocap_jp = self._mocap_dof[indices]  # (10, 29)
@@ -1066,7 +1066,7 @@ class SONICWholeBodyAction(ActionTerm):
 
             # [294:584] motion_joint_velocities_10frame_step5 = finite diff on mocap.dof
             # dt = 1 mocap frame interval = 1 / mocap_fps (e.g., 1/50 = 0.02s)
-            idx_next = (indices + 1) % n
+            idx_next = (indices + 1) % n if self.cfg.loop_mocap else torch.clamp(indices + 1, max=n - 1)
             dt = 1.0 / self._mocap_fps
             mocap_jv = (self._mocap_dof[idx_next] - self._mocap_dof[indices]) / dt  # (10, 29)
             enc[0, 294:584] = mocap_jv.flatten().cpu().numpy()
@@ -1090,6 +1090,21 @@ class SONICWholeBodyAction(ActionTerm):
 
         return enc
 
+    def _resolve_mocap_frame(self, frame: int | float) -> int:
+        if self._mocap_num_frames <= 0:
+            return 0
+        frame_i = int(frame)
+        if self.cfg.loop_mocap:
+            return frame_i % self._mocap_num_frames
+        return max(0, min(frame_i, self._mocap_num_frames - 1))
+
+    def _mocap_future_indices(self, count: int) -> torch.Tensor:
+        n = self._mocap_num_frames
+        indices = self._mocap_frame + torch.arange(count, device=self.device, dtype=torch.long) * self._mocap_step
+        if self.cfg.loop_mocap:
+            return indices % n
+        return torch.clamp(indices, max=n - 1)
+
     def _advance_mocap(self):
         """每个 sim step 推进 mocap_fps/sim_fps 帧，使 mocap 真实速度与 sim 时钟同步。
 
@@ -1099,7 +1114,11 @@ class SONICWholeBodyAction(ActionTerm):
         if self._mocap_root_rot_wxyz is None:
             return
         self._mocap_frame_f += self._mocap_advance_per_step
-        self._mocap_frame = int(self._mocap_frame_f) % self._mocap_num_frames
+        if self.cfg.loop_mocap:
+            self._mocap_frame = int(self._mocap_frame_f) % self._mocap_num_frames
+        else:
+            self._mocap_frame = max(0, min(int(self._mocap_frame_f), self._mocap_num_frames - 1))
+            self._mocap_frame_f = float(self._mocap_frame)
 
     def _apply_mocap_root_follow(self):
         """Diagnostic root follower for visualizing mocap trajectory tracking."""
@@ -1108,7 +1127,7 @@ class SONICWholeBodyAction(ActionTerm):
         if self._mocap_num_frames <= 0:
             return
 
-        frame = int(self._mocap_frame) % self._mocap_num_frames
+        frame = self._resolve_mocap_frame(self._mocap_frame)
         current_pos = self._asset.data.root_pos_w.clone()
         current_quat = self._asset.data.root_quat_w.clone()
         next_pos = current_pos.clone()
@@ -1259,9 +1278,14 @@ class SONICWholeBodyAction(ActionTerm):
             self.cfg.reset_to_random_mocap_frame
             and getattr(self, "_mocap_num_frames", 0) > 0
         ):
-            frame_idx = int(np.random.randint(0, self._mocap_num_frames))
+            max_start = self._mocap_num_frames - 1
+            if not self.cfg.loop_mocap:
+                max_start = max(0, max_start - 9 * int(getattr(self, "_mocap_step", 1)))
+            frame_idx = int(np.random.randint(0, max_start + 1))
         else:
             frame_idx = max(0, int(self.cfg.reset_mocap_frame))
+            if getattr(self, "_mocap_num_frames", 0) > 0:
+                frame_idx = self._resolve_mocap_frame(frame_idx)
 
         all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         if env_ids is None or isinstance(env_ids, slice):
