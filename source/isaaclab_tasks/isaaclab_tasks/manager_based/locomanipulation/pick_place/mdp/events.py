@@ -600,9 +600,12 @@ def align_viewer_to_asset_front(
     lookat_forward_offset: float = 0.0,
     track_asset_position: bool = True,
     log_viewer: bool = True,
+    once_key: str | None = None,
 ):
     """Place the viewport directly in front of an asset, using its current yaw."""
     if not env.sim.has_gui():
+        return
+    if once_key is not None and getattr(env, once_key, False):
         return
 
     env_id = int(env_ids[0]) if env_ids is not None and len(env_ids) > 0 else 0
@@ -668,6 +671,9 @@ def align_viewer_to_asset_front(
         else:
             env.sim.set_camera_view(eye=world_eye, target=world_lookat)
 
+    if once_key is not None:
+        setattr(env, once_key, True)
+
     if log_viewer:
         _diag_print(
             f"[locomanip_event] viewer front of {viewer_asset_name}: axis={front_axis}, "
@@ -675,6 +681,16 @@ def align_viewer_to_asset_front(
             f"eye=({env.cfg.viewer.eye[0]:.4f}, {env.cfg.viewer.eye[1]:.4f}, {env.cfg.viewer.eye[2]:.4f}), "
             f"lookat=({env.cfg.viewer.lookat[0]:.4f}, {env.cfg.viewer.lookat[1]:.4f}, {env.cfg.viewer.lookat[2]:.4f})"
         )
+
+
+def clear_viewer_alignment_once_flag(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    once_key: str,
+):
+    """Allow one-shot viewer alignment to run again after reset."""
+    if hasattr(env, once_key):
+        delattr(env, once_key)
 
 
 def init_roller_rigid_body_view(

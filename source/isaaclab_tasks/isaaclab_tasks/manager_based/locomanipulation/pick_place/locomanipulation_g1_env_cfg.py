@@ -731,7 +731,8 @@ class EventsCfg:
         },
     )
 
-    # Viewer 放在 sonic_robot 当前朝向的正前方；interval 会在 mocap reset 改变 root yaw 后再校正。
+    # Viewer 放在 sonic_robot 当前朝向的正前方。startup 先给初始位置，interval 只在 reset 后
+    # 校正一次，避免持续覆盖鼠标中键/滚轮操作。
     align_viewer_to_sonic_front_startup = EventTerm(
         func=locomanip_mdp.align_viewer_to_asset_front,
         mode="startup",
@@ -741,7 +742,15 @@ class EventsCfg:
             "distance": 4.0,
             "eye_height": 1.55,
             "lookat_height": 0.9,
-            "track_asset_position": True,
+            "track_asset_position": False,
+        },
+    )
+
+    clear_viewer_front_once_flag_reset = EventTerm(
+        func=locomanip_mdp.clear_viewer_alignment_once_flag,
+        mode="reset",
+        params={
+            "once_key": "_sonic_front_viewer_aligned",
         },
     )
 
@@ -755,8 +764,9 @@ class EventsCfg:
             "distance": 4.0,
             "eye_height": 1.55,
             "lookat_height": 0.9,
-            "track_asset_position": True,
+            "track_asset_position": False,
             "log_viewer": False,
+            "once_key": "_sonic_front_viewer_aligned",
         },
     )
 
