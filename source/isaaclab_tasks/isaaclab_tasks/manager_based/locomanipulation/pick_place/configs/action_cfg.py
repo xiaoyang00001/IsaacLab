@@ -13,22 +13,22 @@ from ..mdp.actions import AgileBasedLowerBodyAction
 
 @configclass
 class AgileBasedLowerBodyActionCfg(ActionTermCfg):
-    """Configuration for the lower body action term used by robot A walking."""
+    """Configuration for the lower body action term that is based on Agile lower body RL policy."""
 
     class_type: type[ActionTerm] = AgileBasedLowerBodyAction
+    """The class type for the lower body action term."""
+
     joint_names: list[str] = MISSING
+    """The names of the joints to control."""
+
     obs_group_name: str = MISSING
+    """The name of the observation group to use."""
+
     policy_path: str = MISSING
-    hip_height: float = 0.72
+    """The path to the policy model."""
+
     policy_output_offset: float = 0.0
-    policy_output_scale: float = 0.5
-    action_smoothing: float = 0.2
-    command_scale: float = 0.4
-    stand_command_deadzone: float = 0.035
-    enable_policy_when_moving: bool = False
-    root_motion_deadzone: float = 0.01
-    root_motion_scale: float = 1.0
-    root_motion_smoothing: float = 0.25
-    stabilize_root_pose: bool = True
-    root_anchor_pos: tuple[float, float, float] = (0.0, 0.0, 0.75)
-    root_anchor_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    """Offsets the output of the policy."""
+
+    policy_output_scale: float = 1.0
+    """Scales the output of the policy."""

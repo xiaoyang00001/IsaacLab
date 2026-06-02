@@ -19,7 +19,6 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 # This import exception is suppressed because g1_dex_retargeting_utils depends
 # on pinocchio which is not available on Windows.
-G1TriHandDexRetargeting = None
 with contextlib.suppress(Exception):
     from .g1_dex_retargeting_utils import G1TriHandDexRetargeting
 
@@ -48,12 +47,11 @@ class G1TriHandUpperBodyRetargeter(RetargeterBase):
         self._hand_joint_names = cfg.hand_joint_names
 
         # Initialize the hands controller
-        if cfg.hand_joint_names is not None and G1TriHandDexRetargeting is not None:
+        if cfg.hand_joint_names is not None:
             self._hands_controller = G1TriHandDexRetargeting(cfg.hand_joint_names)
-        elif cfg.hand_joint_names is not None:
-            self._hands_controller = None
         else:
             raise ValueError("hand_joint_names must be provided in configuration")
+
         # Initialize visualization if enabled
         self._enable_visualization = cfg.enable_visualization
         self._num_open_xr_hand_joints = cfg.num_open_xr_hand_joints
@@ -101,25 +99,24 @@ class G1TriHandUpperBodyRetargeter(RetargeterBase):
 
         # Visualization if enabled
         if self._enable_visualization:
-            left_positions = np.array([pose[:3] for pose in left_hand_poses.values()], dtype=np.float32)
-            right_positions = np.array([pose[:3] for pose in right_hand_poses.values()], dtype=np.float32)
-            if left_positions.size or right_positions.size:
-                joints_position = np.concatenate((left_positions, right_positions), axis=0)
-                self._markers.visualize(translations=torch.tensor(joints_position, device=self._sim_device))
+            joints_position = np.zeros((self._num_open_xr_hand_joints, 3))
+            joints_position[::2] = np.array([pose[:3] for pose in left_hand_poses.values()])
+            joints_position[1::2] = np.array([pose[:3] for pose in right_hand_poses.values()])
+            self._markers.visualize(translations=torch.tensor(joints_position, device=self._sim_device))
 
-        if self._hands_controller is not None:
-            left_hands_pos = self._hands_controller.compute_left(left_hand_poses)
-            indexes = [self._hand_joint_names.index(name) for name in self._hands_controller.get_left_joint_names()]
-            left_retargeted_hand_joints = np.zeros(len(self._hands_controller.get_joint_names()))
-            left_retargeted_hand_joints[indexes] = left_hands_pos
+        # Compute retargeted hand joints
+        left_hands_pos = self._hands_controller.compute_left(left_hand_poses)
+        indexes = [self._hand_joint_names.index(name) for name in self._hands_controller.get_left_joint_names()]
+        left_retargeted_hand_joints = np.zeros(len(self._hands_controller.get_joint_names()))
+        left_retargeted_hand_joints[indexes] = left_hands_pos
+        left_hand_joints = left_retargeted_hand_joints
 
-            right_hands_pos = self._hands_controller.compute_right(right_hand_poses)
-            indexes = [self._hand_joint_names.index(name) for name in self._hands_controller.get_right_joint_names()]
-            right_retargeted_hand_joints = np.zeros(len(self._hands_controller.get_joint_names()))
-            right_retargeted_hand_joints[indexes] = right_hands_pos
-            retargeted_hand_joints = left_retargeted_hand_joints + right_retargeted_hand_joints
-        else:
-            retargeted_hand_joints = np.zeros(len(self._hand_joint_names), dtype=np.float32)
+        right_hands_pos = self._hands_controller.compute_right(right_hand_poses)
+        indexes = [self._hand_joint_names.index(name) for name in self._hands_controller.get_right_joint_names()]
+        right_retargeted_hand_joints = np.zeros(len(self._hands_controller.get_joint_names()))
+        right_retargeted_hand_joints[indexes] = right_hands_pos
+        right_hand_joints = right_retargeted_hand_joints
+        retargeted_hand_joints = left_hand_joints + right_hand_joints
 
         # Convert numpy arrays to tensors and store in command buffer
         left_wrist_tensor = torch.tensor(
@@ -173,5 +170,4 @@ class G1TriHandUpperBodyRetargeterCfg(RetargeterCfg):
     enable_visualization: bool = False
     num_open_xr_hand_joints: int = 100
     hand_joint_names: list[str] | None = None  # List of robot hand joint names
-    wrist_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     retargeter_type: type[RetargeterBase] = G1TriHandUpperBodyRetargeter

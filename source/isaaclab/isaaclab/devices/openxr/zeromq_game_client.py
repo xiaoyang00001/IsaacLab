@@ -2,7 +2,6 @@ import struct
 import threading
 from collections import deque
 import logging
-import time
 
 try:
     import zmq
@@ -43,7 +42,6 @@ class ZeroMqGameClient:
         self._send_queue = deque(maxlen=256)
         self._send_queue_lock = threading.Condition()
         self._send_thread = None
-        self._last_send_error_log_ts = 0.0
 
     def init(self, endpoint="tcp://127.0.0.1:5556", player_id=0):
         if zmq is None:
@@ -86,10 +84,7 @@ class ZeroMqGameClient:
                 try:
                     self._zmq_dealer_socket.send(packet, zmq.DONTWAIT)
                 except zmq.ZMQError as e:
-                    now = time.monotonic()
-                    if now - self._last_send_error_log_ts >= 2.0:
-                        logger.warning(f"ZeroMqGameClient send failed: {e}")
-                        self._last_send_error_log_ts = now
+                    logger.error(f"ZeroMqGameClient send failed: {e}")
 
     def enqueue_send_packet(self, packet: bytes):
         with self._send_queue_lock:
@@ -133,30 +128,6 @@ class ZeroMqGameClient:
             self._player_id,
             MGXR_MSG_TYPE_MOTION_CONTROLLER_TRACKING_INFO,
             len(payload)
-        )
-
-        self.enqueue_send_packet(header + payload)
-
-    def send_head_tracking(self, head_pose):
-        """Send headset tracking pose.
-
-        Args:
-            head_pose: ``[px, py, pz, qw, qx, qy, qz]``.
-        """
-        if head_pose is None or len(head_pose) == 0:
-            return
-
-        px, py, pz, qw, qx, qy, qz = head_pose
-        pose_bytes = _POSE_STRUCT.pack(px, py, pz, qx, qy, qz, qw)
-        payload_type_bytes = struct.pack("<I", MGXR_MSG_TYPE_HEAD_TRACKING_INFO)
-        payload = payload_type_bytes + pose_bytes
-
-        header = _HEADER_STRUCT.pack(
-            MGXR_MAGIC,
-            MGXR_VERSION,
-            self._player_id,
-            MGXR_MSG_TYPE_HEAD_TRACKING_INFO,
-            len(payload),
         )
 
         self.enqueue_send_packet(header + payload)

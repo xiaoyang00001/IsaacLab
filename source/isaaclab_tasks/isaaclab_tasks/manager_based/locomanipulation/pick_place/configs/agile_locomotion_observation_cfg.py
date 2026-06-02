@@ -9,46 +9,25 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
-WHOLE_BODY_POLICY_JOINT_NAMES = [
-    "left_shoulder_pitch_joint",
-    "left_shoulder_roll_joint",
-    "left_shoulder_yaw_joint",
-    "left_elbow_joint",
-    "left_wrist_roll_joint",
-    "left_wrist_pitch_joint",
-    "left_wrist_yaw_joint",
-    "right_shoulder_pitch_joint",
-    "right_shoulder_roll_joint",
-    "right_shoulder_yaw_joint",
-    "right_elbow_joint",
-    "right_wrist_roll_joint",
-    "right_wrist_pitch_joint",
-    "right_wrist_yaw_joint",
-    "left_hip_pitch_joint",
-    "left_hip_roll_joint",
-    "left_hip_yaw_joint",
-    "left_knee_joint",
-    "left_ankle_pitch_joint",
-    "left_ankle_roll_joint",
-    "right_hip_pitch_joint",
-    "right_hip_roll_joint",
-    "right_hip_yaw_joint",
-    "right_knee_joint",
-    "right_ankle_pitch_joint",
-    "right_ankle_roll_joint",
-    "waist_yaw_joint",
-    "waist_roll_joint",
-    "waist_pitch_joint",
-]
-
 
 @configclass
 class AgileTeacherPolicyObservationsCfg(ObsGroup):
-    """Observation specification aligned with the Unitree whole-body walking policy.
+    """Observation specifications for the Agile lower body policy.
 
-    The ONNX policy expects 14 frames of 65-d observations:
-    56 dims from repeated [vx, vy, yaw, height] commands plus 14 frames of 61-d robot state.
+    Note: This configuration defines only part of the observation input to the Agile lower body policy.
+    The lower body command portion is appended to the observation tensor in the action term, as that
+    is where the environment has access to those commands.
     """
+
+    base_lin_vel = ObsTerm(
+        func=mdp.base_lin_vel,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    base_ang_vel = ObsTerm(
+        func=mdp.base_ang_vel,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
 
     projected_gravity = ObsTerm(
         func=mdp.projected_gravity,
@@ -60,7 +39,15 @@ class AgileTeacherPolicyObservationsCfg(ObsGroup):
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot",
-                joint_names=WHOLE_BODY_POLICY_JOINT_NAMES,
+                joint_names=[
+                    ".*_shoulder_.*_joint",
+                    ".*_elbow_joint",
+                    ".*_wrist_.*_joint",
+                    ".*_hip_.*_joint",
+                    ".*_knee_joint",
+                    ".*_ankle_.*_joint",
+                    "waist_.*_joint",
+                ],
             ),
         },
     )
@@ -71,12 +58,27 @@ class AgileTeacherPolicyObservationsCfg(ObsGroup):
         params={
             "asset_cfg": SceneEntityCfg(
                 "robot",
-                joint_names=WHOLE_BODY_POLICY_JOINT_NAMES,
+                joint_names=[
+                    ".*_shoulder_.*_joint",
+                    ".*_elbow_joint",
+                    ".*_wrist_.*_joint",
+                    ".*_hip_.*_joint",
+                    ".*_knee_joint",
+                    ".*_ankle_.*_joint",
+                    "waist_.*_joint",
+                ],
             ),
+        },
+    )
+
+    actions = ObsTerm(
+        func=mdp.last_action,
+        scale=1.0,
+        params={
+            "action_name": "lower_body_joint_pos",
         },
     )
 
     def __post_init__(self):
         self.enable_corruption = False
         self.concatenate_terms = True
-        self.history_length = 14

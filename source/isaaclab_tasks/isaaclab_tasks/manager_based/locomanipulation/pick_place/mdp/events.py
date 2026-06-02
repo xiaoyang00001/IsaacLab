@@ -9,94 +9,10 @@ from typing import TYPE_CHECKING
 
 import torch
 from isaacsim.core.utils.stage import get_current_stage
-from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
+from pxr import Gf,PhysxSchema, Usd, UsdGeom, UsdPhysics
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
-
-
-def _find_named_prim_under_background(stage: Usd.Stage, env_id: int, prim_name: str) -> Usd.Prim | None:
-    """Find the first prim with the given name under /Background for an environment."""
-    bg_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/Background")
-    if not (bg_prim and bg_prim.IsValid()):
-        return None
-    for prim in Usd.PrimRange(bg_prim):
-        if prim.GetName() == prim_name:
-            return prim
-    return None
-
-
-def _set_or_create_translate_op(xformable: UsdGeom.Xformable, value: Gf.Vec3d):
-    for op in xformable.GetOrderedXformOps():
-        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-            op.Set(value)
-            return
-    xformable.AddTranslateOp().Set(value)
-
-
-def _set_or_create_orient_op(xformable: UsdGeom.Xformable, value: Gf.Quatd):
-    for op in xformable.GetOrderedXformOps():
-        if op.GetOpType() == UsdGeom.XformOp.TypeOrient:
-            op.Set(value)
-            return
-    xformable.AddOrientOp().Set(value)
-
-
-def place_fixed_robot_prims(
-    env: ManagerBasedEnv,
-    env_ids: torch.Tensor | None,
-    local_player_id: int = 1,
-    robot_a_pos: tuple[float, float, float] = (0.0, 0.0, 0.75),
-    robot_a_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
-    robot_b_pos: tuple[float, float, float] = (1.25, 0.0, 0.75),
-    robot_b_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
-    robot1_name: str = "Robot",
-    robot2_name: str = "RemoteRobot",
-):
-    """Place fixed-root robot prims by editing USD xform ops before physics starts."""
-    stage = get_current_stage()
-    if stage is None:
-        return
-
-    if env_ids is None:
-        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
-
-    if int(local_player_id) == 1:
-        local_pos, local_rot = robot_a_pos, robot_a_rot
-        remote_pos, remote_rot = robot_b_pos, robot_b_rot
-    else:
-        local_pos, local_rot = robot_b_pos, robot_b_rot
-        remote_pos, remote_rot = robot_a_pos, robot_a_rot
-
-    for i, env_id in enumerate(env_ids.tolist()):
-        local_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/{robot1_name}")
-        remote_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/{robot2_name}")
-        if not (local_prim and local_prim.IsValid() and remote_prim and remote_prim.IsValid()):
-            print(
-                f"[locomanip_event] place_fixed_robot_prims: missing prim(s) for env_{env_id}: "
-                f"{local_prim.GetPath() if local_prim and local_prim.IsValid() else 'local_missing'}, "
-                f"{remote_prim.GetPath() if remote_prim and remote_prim.IsValid() else 'remote_missing'}"
-            )
-            continue
-
-        local_xf = UsdGeom.Xformable(local_prim)
-        remote_xf = UsdGeom.Xformable(remote_prim)
-
-        _set_or_create_translate_op(local_xf, Gf.Vec3d(*[float(v) for v in local_pos]))
-        _set_or_create_translate_op(remote_xf, Gf.Vec3d(*[float(v) for v in remote_pos]))
-
-        local_quat = Gf.Quatd(float(local_rot[0]), Gf.Vec3d(float(local_rot[1]), float(local_rot[2]), float(local_rot[3])))
-        remote_quat = Gf.Quatd(float(remote_rot[0]), Gf.Vec3d(float(remote_rot[1]), float(remote_rot[2]), float(remote_rot[3])))
-        _set_or_create_orient_op(local_xf, local_quat)
-        _set_or_create_orient_op(remote_xf, remote_quat)
-
-        if i == 0:
-            print(
-                f"[locomanip_event] placed fixed robot prims: "
-                f"local_player_id={local_player_id}, "
-                f"local_robot={robot1_name}@({local_pos[0]:.4f}, {local_pos[1]:.4f}, {local_pos[2]:.4f}), "
-                f"remote_robot={robot2_name}@({remote_pos[0]:.4f}, {remote_pos[1]:.4f}, {remote_pos[2]:.4f})"
-            )
 
 
 def setup_usd_rigid_object_physics(
@@ -105,7 +21,7 @@ def setup_usd_rigid_object_physics(
     prim_path_template: str = "/World/envs/env_{}/TestBox",
     mass: float = 0.5,
     linear_damping: float = 0.1,
-    angular_damping: float = 0.1,
+    angular_damping: float = 1000.0,
     mesh_approximation: str = "convexHull",
 ):
     """Ensure the target USD prim has rigid-body APIs defined before simulation starts."""
@@ -140,16 +56,8 @@ def setup_usd_rigid_object_physics(
         physx_api = PhysxSchema.PhysxRigidBodyAPI.Get(stage, prim.GetPath())
         if not physx_api:
             physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
-        # 注意：CreateLinearDampingAttr(value) 在属性已存在时不更新值，
-        # 必须通过 GetXAttr().Set() 确保值写入生效。
-        lin_damping = physx_api.GetLinearDampingAttr()
-        if not lin_damping:
-            lin_damping = physx_api.CreateLinearDampingAttr()
-        lin_damping.Set(float(linear_damping))
-        ang_damping = physx_api.GetAngularDampingAttr()
-        if not ang_damping:
-            ang_damping = physx_api.CreateAngularDampingAttr()
-        ang_damping.Set(float(angular_damping))
+        physx_api.CreateLinearDampingAttr(float(linear_damping))
+        physx_api.CreateAngularDampingAttr(float(angular_damping))
 
         # For dynamic rigid bodies, triangle mesh collision is not supported.
         # Force mesh collision approximation on the root prim and all child mesh prims.
@@ -172,6 +80,55 @@ def setup_usd_rigid_object_physics(
             f"[locomanip_event] setup_usd_rigid_object_physics applied on {prim_path} "
             f"(mass={mass}, lin_damp={linear_damping}, ang_damp={angular_damping}, mesh={mesh_approximation})"
         )
+
+def stop_box_motion_after_leaving_conveyor(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    object_name: str = "test_box",
+    conveyor_prim_name: str = "ConveyorBelt_A08_06",
+    xy_margin: float = 0.02,
+):
+    obj = env.scene[object_name]
+    device = obj.device
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=device, dtype=torch.long)
+
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    bbox_cache = UsdGeom.BBoxCache(
+        0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy]
+    )
+
+    pos = obj.data.root_pos_w[env_ids].clone()
+    vel = obj.data.root_vel_w[env_ids].clone()
+
+    for i, env_id in enumerate(env_ids.tolist()):
+        prim_path = f"/World/envs/env_{env_id}/Background/{conveyor_prim_name}"
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            continue
+
+        world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(prim).GetPrim())
+        box = world_bound.ComputeAlignedBox()
+        mn, mx = box.GetMin(), box.GetMax()
+
+        x = pos[i, 0].item()
+        y = pos[i, 1].item()
+
+        on_conveyor_xy = (
+            (mn[0] - xy_margin) <= x <= (mx[0] + xy_margin)
+            and (mn[1] - xy_margin) <= y <= (mx[1] + xy_margin)
+        )
+
+        if not on_conveyor_xy:
+            vel[i, 0] = 0.0
+            vel[i, 1] = 0.0
+            vel[i, 3:] = 0.0
+
+    obj.write_root_velocity_to_sim(vel, env_ids=env_ids)
 
 
 def drop_two_balls_with_random_colors(
@@ -273,20 +230,13 @@ def drop_two_balls_with_random_colors(
     # 说明：这里不做运行时材质/颜色修改，避免触发某些版本下的图执行不稳定。
 
 
-def place_robots_from_conveyor_bbox(
+def align_robots_to_conveyor_center_x(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
-    conveyor_prim_name: str = "ConveyorBelt_A08_06",
     robot1_name: str = "robot",
-    robot2_name: str = "remote_robot",
-    local_player_id: int = 1,
-    reference_conveyor_center_x: float = 0.62,
-    reference_conveyor_min_y: float = 0.98,
-    publisher_robot_reference_xy: tuple[float, float] = (0.0, 0.0),
-    subscriber_robot_reference_xy: tuple[float, float] = (1.25, 0.0),
-    side_clearance_x: float = 0.055,
+    robot2_name: str = "robot2",
 ):
-    """Place local/remote robots on publisher/subscriber sides of the conveyor."""
+    """Align both robots' x position to conveyor bbox center x on reset."""
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
 
@@ -297,298 +247,31 @@ def place_robots_from_conveyor_bbox(
     robot1 = env.scene[robot1_name]
     robot2 = env.scene[robot2_name]
 
-    robot1_state = robot1.data.default_root_state[env_ids].clone()
-    robot2_state = robot2.data.default_root_state[env_ids].clone()
-
-    publisher_min_y_offset = publisher_robot_reference_xy[1] - reference_conveyor_min_y
-    subscriber_min_y_offset = subscriber_robot_reference_xy[1] - reference_conveyor_min_y
+    robot1_pose = robot1.data.root_state_w[env_ids, :7].clone()
+    robot2_pose = robot2.data.root_state_w[env_ids, :7].clone()
 
     bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
     for i, env_id in enumerate(env_ids.tolist()):
-        conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
-        if conveyor_prim is None or not conveyor_prim.IsValid():
-            print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
+        conveyor_prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/ConveyorTrack")
+        if not conveyor_prim or not conveyor_prim.IsValid():
             continue
-
-        world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
-        aligned_box = world_bound.ComputeAlignedBox()
-        min_pt = aligned_box.GetMin()
-        max_pt = aligned_box.GetMax()
-        publisher_x = min_pt[0] - abs(side_clearance_x)
-        publisher_y = min_pt[1] + publisher_min_y_offset
-        subscriber_x = max_pt[0] + abs(side_clearance_x)
-        subscriber_y = min_pt[1] + subscriber_min_y_offset
-
-        if int(local_player_id) == 1:
-            local_x, local_y = publisher_x, publisher_y
-            remote_x, remote_y = subscriber_x, subscriber_y
-            local_side = "publisher"
-        else:
-            local_x, local_y = subscriber_x, subscriber_y
-            remote_x, remote_y = publisher_x, publisher_y
-            local_side = "subscriber"
-
-        robot1_state[i, 0] = local_x
-        robot1_state[i, 1] = local_y
-        robot2_state[i, 0] = remote_x
-        robot2_state[i, 1] = remote_y
-
-        if i == 0:
-            print(
-                f"[locomanip_event] aligned robots from {conveyor_prim_name}: "
-                f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
-                f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
-                f"local_player_id={local_player_id}, local_side={local_side}, "
-                f"publisher=({publisher_x:.4f}, {publisher_y:.4f}), "
-                f"subscriber=({subscriber_x:.4f}, {subscriber_y:.4f}), "
-                f"local_robot=({robot1_state[i, 0]:.4f}, {robot1_state[i, 1]:.4f}, {robot1_state[i, 2]:.4f}), "
-                f"remote_robot=({robot2_state[i, 0]:.4f}, {robot2_state[i, 1]:.4f}, {robot2_state[i, 2]:.4f})"
-            )
-
-    robot1.write_root_pose_to_sim(robot1_state[:, :7], env_ids=env_ids)
-    robot2.write_root_pose_to_sim(robot2_state[:, :7], env_ids=env_ids)
-    robot1.write_root_velocity_to_sim(robot1_state[:, 7:], env_ids=env_ids)
-    robot2.write_root_velocity_to_sim(robot2_state[:, 7:], env_ids=env_ids)
-
-
-def log_robot_root_states(
-    env: ManagerBasedEnv,
-    env_ids: torch.Tensor | None,
-    robot_name: str = "robot",
-    remote_robot_name: str = "remote_robot",
-):
-    """Log current/default root states for the two robot articulations."""
-    if env_ids is None:
-        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
-    if len(env_ids) == 0:
-        return
-
-    env_id = int(env_ids[0].item())
-    robot = env.scene[robot_name]
-    remote_robot = env.scene[remote_robot_name]
-
-    robot_root = robot.data.root_pos_w[env_id].detach().cpu().tolist()
-    remote_root = remote_robot.data.root_pos_w[env_id].detach().cpu().tolist()
-    robot_default = robot.data.default_root_state[env_id, :3].detach().cpu().tolist()
-    remote_default = remote_robot.data.default_root_state[env_id, :3].detach().cpu().tolist()
-
-    print(
-        "[locomanip_event] startup robot roots: "
-        f"robot_root=({robot_root[0]:.4f}, {robot_root[1]:.4f}, {robot_root[2]:.4f}), "
-        f"remote_root=({remote_root[0]:.4f}, {remote_root[1]:.4f}, {remote_root[2]:.4f}), "
-        f"robot_default=({robot_default[0]:.4f}, {robot_default[1]:.4f}, {robot_default[2]:.4f}), "
-        f"remote_default=({remote_default[0]:.4f}, {remote_default[1]:.4f}, {remote_default[2]:.4f})"
-    )
-
-
-def place_test_boxes_from_conveyor_bbox(
-    env: ManagerBasedEnv,
-    env_ids: torch.Tensor | None,
-    conveyor_prim_name: str = "ConveyorBelt_A08_06",
-    test_box_name: str = "test_box",
-    test_box1_name: str = "test_box1",
-    local_player_id: int = 1,
-    reference_conveyor_center_x: float = 0.62,
-    reference_conveyor_min_y: float = 0.98,
-    reference_test_box_xy: tuple[float, float] = (0.78886, 1.17033),
-    reference_test_box1_xy: tuple[float, float] = (0.42787, 1.67696),
-    box_half_height: float = 0.1,
-):
-    """Place the two test boxes using change6-relative offsets from the conveyor bbox.
-
-    The old hard-coded box poses were calibrated against change6. This event preserves the
-    same relative placement by anchoring each box to the live conveyor bbox instead of the
-    world frame, so simple7 can reuse the same intent even if the conveyor moved.
-    """
-    if env_ids is None:
-        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
-
-    stage = get_current_stage()
-    if stage is None:
-        return
-
-    test_box = env.scene[test_box_name]
-    test_box1 = env.scene[test_box1_name]
-    device = test_box.device
-
-    test_box_pose = test_box.data.default_root_state[env_ids, :7].clone()
-    test_box1_pose = test_box1.data.default_root_state[env_ids, :7].clone()
-    zero_vel = torch.zeros((len(env_ids), 6), device=device)
-
-    test_box_center_x_offset = reference_test_box_xy[0] - reference_conveyor_center_x
-    test_box1_center_x_offset = reference_test_box1_xy[0] - reference_conveyor_center_x
-    test_box_min_y_offset = reference_test_box_xy[1] - reference_conveyor_min_y
-    test_box1_min_y_offset = reference_test_box1_xy[1] - reference_conveyor_min_y
-
-    bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
-    for i, env_id in enumerate(env_ids.tolist()):
-        conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
-        if conveyor_prim is None or not conveyor_prim.IsValid():
-            print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
-            continue
-
-        world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
+        conveyor_geom = UsdGeom.Imageable(conveyor_prim)
+        world_bound = bbox_cache.ComputeWorldBound(conveyor_geom.GetPrim())
         aligned_box = world_bound.ComputeAlignedBox()
         min_pt = aligned_box.GetMin()
         max_pt = aligned_box.GetMax()
         center_x = 0.5 * (min_pt[0] + max_pt[0])
-        spawn_z = max_pt[2] + box_half_height
-
-        # Match the initial runnable version and xinjie behavior here: keep the
-        # conveyor-relative world spawn identical on both machines. The local
-        # robot role swap plus XR anchoring already provide the subjective
-        # mirror. Mirroring boxes again here flips left/right from the operator's
-        # perspective on player 2.
-        test_box_pose[i, 0] = center_x + test_box_center_x_offset
-        test_box1_pose[i, 0] = center_x + test_box1_center_x_offset
-        test_box_pose[i, 1] = min_pt[1] + test_box_min_y_offset
-        test_box1_pose[i, 1] = min_pt[1] + test_box1_min_y_offset
-        test_box_pose[i, 2] = spawn_z
-        test_box1_pose[i, 2] = spawn_z
-
         if i == 0:
             print(
-                f"[locomanip_event] aligned boxes from {conveyor_prim_name}: "
-                f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
-                f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
-                f"local_player_id={local_player_id}, "
-                f"box0=({test_box_pose[i, 0]:.4f}, {test_box_pose[i, 1]:.4f}, {test_box_pose[i, 2]:.4f}), "
-                f"box1=({test_box1_pose[i, 0]:.4f}, {test_box1_pose[i, 1]:.4f}, {test_box1_pose[i, 2]:.4f})"
+                f"[locomanip_event] conveyor x-range=({min_pt[0]:.4f}, {max_pt[0]:.4f}), "
+                f"length={max_pt[0] - min_pt[0]:.4f}, center_x={center_x:.4f}"
             )
 
-    test_box.write_root_pose_to_sim(test_box_pose, env_ids=env_ids)
-    test_box1.write_root_pose_to_sim(test_box1_pose, env_ids=env_ids)
-    test_box.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
-    test_box1.write_root_velocity_to_sim(zero_vel, env_ids=env_ids)
+        robot1_pose[i, 0] = center_x
+        robot2_pose[i, 0] = center_x
 
-
-def align_viewer_to_conveyor_bbox(
-    env: ManagerBasedEnv,
-    env_ids: torch.Tensor | None,
-    conveyor_prim_name: str = "ConveyorBelt_A08_06",
-    reference_conveyor_center_x: float = 0.62,
-    reference_conveyor_min_y: float = 0.98,
-    reference_viewer_eye: tuple[float, float, float] = (7.5, 7.5, 7.5),
-    reference_viewer_lookat: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    viewer_origin_type: str | None = None,
-    viewer_asset_name: str | None = None,
-    viewer_body_name: str | None = None,
-    reference_viewer_target_xy: tuple[float, float] | None = None,
-    lock_viewer_to_asset: bool = False,
-):
-    """Align the initial viewport camera to preserve the change6 first view."""
-    if not env.sim.has_gui():
-        return
-
-    stage = get_current_stage()
-    if stage is None:
-        return
-
-    env_id = int(env_ids[0]) if env_ids is not None and len(env_ids) > 0 else 0
-    conveyor_prim = _find_named_prim_under_background(stage, env_id, conveyor_prim_name)
-    if conveyor_prim is None or not conveyor_prim.IsValid():
-        print(f"[locomanip_event] conveyor prim '{conveyor_prim_name}' not found for env_{env_id}")
-        return
-
-    bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
-    world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(conveyor_prim).GetPrim())
-    aligned_box = world_bound.ComputeAlignedBox()
-    min_pt = aligned_box.GetMin()
-    max_pt = aligned_box.GetMax()
-    center_x = 0.5 * (min_pt[0] + max_pt[0])
-
-    eye = (
-        center_x + (reference_viewer_eye[0] - reference_conveyor_center_x),
-        min_pt[1] + (reference_viewer_eye[1] - reference_conveyor_min_y),
-        float(reference_viewer_eye[2]),
-    )
-    lookat = (
-        center_x + (reference_viewer_lookat[0] - reference_conveyor_center_x),
-        min_pt[1] + (reference_viewer_lookat[1] - reference_conveyor_min_y),
-        float(reference_viewer_lookat[2]),
-    )
-
-    world_eye = tuple(float(value) for value in eye)
-    world_lookat = tuple(float(value) for value in lookat)
-
-    if viewer_asset_name is not None and reference_viewer_target_xy is not None:
-        if viewer_origin_type == "asset_body":
-            if viewer_body_name is None:
-                raise ValueError("viewer_body_name must be provided when viewer_origin_type='asset_body'.")
-            asset = env.scene[viewer_asset_name]
-            body_id, _ = asset.find_bodies(viewer_body_name)
-            viewer_origin = asset.data.body_pos_w[env_id, body_id].view(3)
-        else:
-            viewer_origin = env.scene[viewer_asset_name].data.root_pos_w[env_id]
-
-        eye_xy_offset = (
-            float(reference_viewer_eye[0] - reference_viewer_target_xy[0]),
-            float(reference_viewer_eye[1] - reference_viewer_target_xy[1]),
-        )
-        lookat_xy_offset = (
-            float(reference_viewer_lookat[0] - reference_viewer_target_xy[0]),
-            float(reference_viewer_lookat[1] - reference_viewer_target_xy[1]),
-        )
-
-        world_eye = (
-            float(viewer_origin[0].item() + eye_xy_offset[0]),
-            float(viewer_origin[1].item() + eye_xy_offset[1]),
-            float(reference_viewer_eye[2]),
-        )
-        world_lookat = (
-            float(viewer_origin[0].item() + lookat_xy_offset[0]),
-            float(viewer_origin[1].item() + lookat_xy_offset[1]),
-            float(reference_viewer_lookat[2]),
-        )
-
-    env.cfg.viewer.origin_type = "world"
-    env.cfg.viewer.asset_name = None
-    env.cfg.viewer.body_name = None
-    env.cfg.viewer.eye = world_eye
-    env.cfg.viewer.lookat = world_lookat
-
-    if (
-        lock_viewer_to_asset
-        and viewer_asset_name is not None
-        and env.viewport_camera_controller is not None
-        and viewer_origin_type in ("asset_root", "asset_body")
-    ):
-        viewer_origin = None
-        if viewer_origin_type == "asset_body":
-            if viewer_body_name is None:
-                raise ValueError("viewer_body_name must be provided when viewer_origin_type='asset_body'.")
-            asset = env.scene[viewer_asset_name]
-            body_id, _ = asset.find_bodies(viewer_body_name)
-            viewer_origin = asset.data.body_pos_w[env_id, body_id].view(3)
-            env.viewport_camera_controller.update_view_to_asset_body(viewer_asset_name, viewer_body_name)
-            env.cfg.viewer.body_name = viewer_body_name
-        else:
-            viewer_origin = env.scene[viewer_asset_name].data.root_pos_w[env_id]
-            env.viewport_camera_controller.update_view_to_asset_root(viewer_asset_name)
-
-        rel_eye = tuple(float(world_eye[i] - viewer_origin[i].item()) for i in range(3))
-        rel_lookat = tuple(float(world_lookat[i] - viewer_origin[i].item()) for i in range(3))
-
-        env.cfg.viewer.origin_type = viewer_origin_type
-        env.cfg.viewer.asset_name = viewer_asset_name
-        env.cfg.viewer.eye = rel_eye
-        env.cfg.viewer.lookat = rel_lookat
-        env.viewport_camera_controller.update_view_location(eye=env.cfg.viewer.eye, lookat=env.cfg.viewer.lookat)
-    elif env.viewport_camera_controller is not None:
-        env.viewport_camera_controller.update_view_location(eye=env.cfg.viewer.eye, lookat=env.cfg.viewer.lookat)
-    else:
-        env.sim.set_camera_view(eye=env.cfg.viewer.eye, target=env.cfg.viewer.lookat)
-
-    print(
-        f"[locomanip_event] aligned viewer from {conveyor_prim_name}: "
-        f"bbox_min=({min_pt[0]:.4f}, {min_pt[1]:.4f}, {min_pt[2]:.4f}), "
-        f"bbox_max=({max_pt[0]:.4f}, {max_pt[1]:.4f}, {max_pt[2]:.4f}), "
-        f"lock_to_asset={lock_viewer_to_asset}, "
-        f"origin_type={env.cfg.viewer.origin_type}, "
-        f"asset={env.cfg.viewer.asset_name}, "
-        f"eye=({env.cfg.viewer.eye[0]:.4f}, {env.cfg.viewer.eye[1]:.4f}, {env.cfg.viewer.eye[2]:.4f}), "
-        f"lookat=({env.cfg.viewer.lookat[0]:.4f}, {env.cfg.viewer.lookat[1]:.4f}, {env.cfg.viewer.lookat[2]:.4f})"
-    )
+    robot1.write_root_pose_to_sim(robot1_pose, env_ids=env_ids)
+    robot2.write_root_pose_to_sim(robot2_pose, env_ids=env_ids)
 
 
 def print_conveyor_world_bbox(
@@ -607,9 +290,10 @@ def print_conveyor_world_bbox(
 
     bbox_cache = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy])
     for env_id in (env_ids.tolist() if env_ids is not None else [0]):
-        prim = _find_named_prim_under_background(stage, env_id, prim_name)
-        if prim is None or not prim.IsValid():
-            print(f"[conveyor_bbox] prim '{prim_name}' not found under Background for env_{env_id}")
+        prim_path = f"/World/envs/env_{env_id}/Background/{prim_name}"
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            print(f"[conveyor_bbox] prim not found: {prim_path}")
             continue
         try:
             world_bound = bbox_cache.ComputeWorldBound(UsdGeom.Imageable(prim).GetPrim())
@@ -627,7 +311,7 @@ def print_conveyor_world_bbox(
                 f"  box_spawn_z (0.1m box half-height)={mx[2]+0.1:.4f}"
             )
         except Exception as e:
-            print(f"[conveyor_bbox] Error computing bbox for {prim.GetPath()}: {e}")
+            print(f"[conveyor_bbox] Error computing bbox for {prim_path}: {e}")
         break  # 只打印第一个 env
 
 
@@ -642,9 +326,6 @@ def drive_object_on_conveyor(
 
     Called on an interval; overrides x/y velocity each tick so friction cannot slow
     the object down.  z and angular velocities are left unchanged (z) or zeroed (angular).
-
-    Deprecated: Use setup_conveyor_belt_physics (PhysxSurfaceVelocityAPI) instead,
-    which drives objects through contact forces rather than direct velocity override.
     """
     obj = env.scene[object_name]
     device = obj.device
@@ -658,7 +339,6 @@ def drive_object_on_conveyor(
     vel[:, 3:] = 0.0          # 清零角速度，防止滚动
     obj.write_root_velocity_to_sim(vel, env_ids=env_ids)
 
-
 def setup_conveyor_belt_physics(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
@@ -666,21 +346,14 @@ def setup_conveyor_belt_physics(
     prim_name_patterns: tuple[str, ...] = ("ConveyorBelt",),
     rollers_name: str = "Rollers",
 ):
-    """对匹配任意 prim_name_patterns 的 ConveyorBelt 的 Rollers 施加 PhysxSurfaceVelocityAPI。
-
-    ConveyorBelt_A08 是 ROLLER 类型——滚轮即承载面。
-    直接在 Rollers（已有 RigidBodyAPI + kinematic）上应用表面速度。
-    不修改根 Xform，避免层级冲突。
-
-    Args:
-        prim_name_patterns: 要匹配的 prim 名称模式列表（substring 匹配，任一匹配即生效）。
-    """
+    """Apply PhysxSurfaceVelocityAPI to conveyor rollers so boxes move by contact friction."""
     import math
+
     stage = get_current_stage()
     if stage is None:
         return
 
-    speed = math.sqrt(velocity[0]**2 + velocity[1]**2 + velocity[2]**2)
+    speed = math.sqrt(velocity[0] ** 2 + velocity[1] ** 2 + velocity[2] ** 2)
     if speed < 1e-8:
         print("[locomanip_event] setup_conveyor_belt_physics: zero velocity, skipping")
         return
@@ -689,9 +362,9 @@ def setup_conveyor_belt_physics(
         env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
 
     for env_id in env_ids.tolist():
-        # 递归遍历 env 和 Background，下兼容不同场景里传送带的层级差异。
         conveyor_roots = []
         seen_paths = set()
+
         for search_root_path in (
             f"/World/envs/env_{env_id}/Background",
             f"/World/envs/env_{env_id}",
@@ -699,24 +372,22 @@ def setup_conveyor_belt_physics(
             search_root = stage.GetPrimAtPath(search_root_path)
             if not (search_root and search_root.IsValid()):
                 continue
+
             for prim in Usd.PrimRange(search_root):
                 if prim == search_root:
                     continue
                 path_str = str(prim.GetPath())
                 if path_str in seen_paths:
                     continue
-                if any(p in prim.GetName() for p in prim_name_patterns):
+                if any(pattern in prim.GetName() for pattern in prim_name_patterns):
                     conveyor_roots.append(prim)
                     seen_paths.add(path_str)
 
         if not conveyor_roots:
-            print(f"[locomanip_event] No conveyor prims (patterns={prim_name_patterns}) found for env_{env_id}")
+            print(f"[locomanip_event] No conveyor prims found for env_{env_id}")
             continue
 
         for root_prim in conveyor_roots:
-            root_path = str(root_prim.GetPath())
-
-            # 递归找 Rollers，兼容引用资产内部层级变化。
             rollers_prim = None
             for descendant in Usd.PrimRange(root_prim):
                 if descendant == root_prim:
@@ -726,17 +397,15 @@ def setup_conveyor_belt_physics(
                     break
 
             if not rollers_prim or not rollers_prim.IsValid():
-                print(f"[locomanip_event]  Rollers prim not found under {root_path}")
+                print(f"[locomanip_event] Rollers prim not found under {str(root_prim.GetPath())}")
                 continue
 
-            # 确保 Rollers 有 RigidBodyAPI + kinematic（原始 USD 通常已有）
             if not rollers_prim.HasAPI(UsdPhysics.RigidBodyAPI):
                 UsdPhysics.RigidBodyAPI.Apply(rollers_prim)
             rigid_api = UsdPhysics.RigidBodyAPI(rollers_prim)
             rigid_api.GetKinematicEnabledAttr().Set(True)
             rigid_api.CreateRigidBodyEnabledAttr(True)
 
-            # 给 Rollers 下所有 Mesh 施加 CollisionAPI
             for mesh_child in Usd.PrimRange(rollers_prim):
                 if not mesh_child.IsA(UsdGeom.Mesh):
                     continue
@@ -745,16 +414,13 @@ def setup_conveyor_belt_physics(
                 if not mesh_child.HasAPI(UsdPhysics.CollisionAPI):
                     UsdPhysics.CollisionAPI.Apply(mesh_child)
 
-            # 施加 PhysxSurfaceVelocityAPI 到 Rollers
-            # 速度在 prim 局部空间。不需要 world→local 变换，
-            # 因为我们只驱动 Rollers，而 Rollers 局部轴与根一致（无中间旋转）。
             if not rollers_prim.HasAPI(PhysxSchema.PhysxSurfaceVelocityAPI):
                 PhysxSchema.PhysxSurfaceVelocityAPI.Apply(rollers_prim)
+
             surf_api = PhysxSchema.PhysxSurfaceVelocityAPI(rollers_prim)
             surf_api.GetSurfaceVelocityEnabledAttr().Set(True)
             surf_api.CreateSurfaceVelocityAttr().Set(Gf.Vec3d(*velocity))
 
             print(
-                f"[locomanip_event]  Rollers SurfaceVelocity "
-                f"vel={velocity} -> {str(rollers_prim.GetPath())}"
+                f"[locomanip_event] Rollers SurfaceVelocity vel={velocity} -> {str(rollers_prim.GetPath())}"
             )

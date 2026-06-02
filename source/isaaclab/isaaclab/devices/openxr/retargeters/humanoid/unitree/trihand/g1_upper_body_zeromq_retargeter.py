@@ -59,6 +59,8 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
     def retarget(self, data: dict) -> torch.Tensor:
         left_controller_data = data.get(DeviceBase.TrackingTarget.CONTROLLER_LEFT, np.array([]))
         right_controller_data = data.get(DeviceBase.TrackingTarget.CONTROLLER_RIGHT, np.array([]))
+        #print(f"[IsaacLab] [ZeroMQ] Left controller data: {left_controller_data}")
+        #print(f"[IsaacLab] [ZeroMQ] Right controller data: {right_controller_data}")
         default_wrist = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         left_wrist = self._extract_wrist_pose(left_controller_data, default_wrist)
         right_wrist = self._extract_wrist_pose(right_controller_data, default_wrist)
@@ -189,8 +191,6 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
         wrist_quat = torch.tensor(wrist[3:], dtype=torch.float32)
 
         # Combined -75 deg Y rotation + 90 deg Z rotation, quaternion in wxyz.
-        # Apply the configured wrist offset after the rotation transform so the
-        # offset direction stays aligned with the robot wrist control frame.
         combined_quat = torch.tensor([0.5358, -0.4619, 0.5358, 0.4619], dtype=torch.float32)
 
         openxr_pose = PoseUtils.make_pose(wrist_pos, PoseUtils.matrix_from_quat(wrist_quat))
@@ -208,5 +208,4 @@ class G1TriHandUpperBodyZeroMqRetargeterCfg(RetargeterCfg):
     hand_joint_names: list[str] | None = None
     use_hand_tracking_if_available: bool = False
     enable_wrist_pose_retargeting: bool = True
-    wrist_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     retargeter_type: type[RetargeterBase] = G1TriHandUpperBodyZeroMqRetargeter

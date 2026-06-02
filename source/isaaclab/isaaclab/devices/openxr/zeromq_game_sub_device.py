@@ -28,7 +28,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
@@ -131,15 +131,6 @@ def _zero_pose() -> np.ndarray:
     return np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 
-def _try_get_runtime_cfg():
-    try:
-        from .network_runtime_cfg import build_dual_machine_runtime_cfg
-
-        return build_dual_machine_runtime_cfg()
-    except Exception:
-        return None
-
-
 class ZeroMqGameSubDevice(DeviceBase):
     """Isaac Lab hardware device that consumes MGXR tracking packets over ZeroMQ."""
 
@@ -151,12 +142,6 @@ class ZeroMqGameSubDevice(DeviceBase):
             raise ModuleNotFoundError("pyzmq is required. Install it with `pip install pyzmq` in the Isaac Lab environment.")
 
         self._cfg = cfg
-        print(
-            "[ZeroMqGameSubDevice] INIT: "
-            f"endpoint={cfg.endpoint} topic={cfg.topic!r} "
-            f"local_id={cfg.local_player_id} target_id={cfg.target_remote_player_id}",
-            flush=True,
-        )
         self._additional_callbacks: dict[str, Callable] = {}
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -489,22 +474,10 @@ class ZeroMqGameSubDevice(DeviceBase):
 class ZeroMqGameSubDeviceCfg(DeviceCfg):
     """Configuration for the ZeroMQ MGXR Isaac Lab device."""
 
-    endpoint: str = field(
-        default_factory=lambda: (
-            _try_get_runtime_cfg().tracking_subscribe_endpoint
-            if _try_get_runtime_cfg() is not None
-            else "tcp://127.0.0.1:5555"
-        )
-    )
+    endpoint: str = "tcp://127.0.0.1:5555"
     topic: str = "state"
-    local_player_id: int = field(
-        default_factory=lambda: (_try_get_runtime_cfg().local_player_id if _try_get_runtime_cfg() is not None else 0)
-    )
-    target_remote_player_id: int | None = field(
-        default_factory=lambda: (
-            _try_get_runtime_cfg().remote_player_id if _try_get_runtime_cfg() is not None else None
-        )
-    )
+    local_player_id: int = 0
+    target_remote_player_id: int | None = None
     auto_start: bool = True
     receive_timeout_ms: int = 20
     receive_high_water_mark: int = 10
