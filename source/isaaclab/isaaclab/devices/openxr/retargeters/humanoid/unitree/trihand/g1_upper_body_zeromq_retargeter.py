@@ -22,6 +22,7 @@ from isaaclab.devices.device_base import DeviceBase
 from isaaclab.devices.retargeter_base import RetargeterBase, RetargeterCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
+
 class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
     """Map ZeroMQ MGXR controller/hand data to G1 upper-body teleop commands.
 
@@ -41,9 +42,9 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
         self._use_hand_tracking_if_available = cfg.use_hand_tracking_if_available
         self._enable_wrist_pose_retargeting = cfg.enable_wrist_pose_retargeting
         self._enable_visualization = cfg.enable_visualization
+        self._wrist_position_offset = torch.tensor(cfg.wrist_position_offset, dtype=torch.float32)
         if cfg.hand_joint_names is None:
             raise ValueError("hand_joint_names must be provided")
-        # Initialize visualization if enabled
         if self._enable_visualization:
             marker_cfg = VisualizationMarkersCfg(
                 prim_path="/Visuals/g1_controller_markers",
@@ -59,8 +60,8 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
     def retarget(self, data: dict) -> torch.Tensor:
         left_controller_data = data.get(DeviceBase.TrackingTarget.CONTROLLER_LEFT, np.array([]))
         right_controller_data = data.get(DeviceBase.TrackingTarget.CONTROLLER_RIGHT, np.array([]))
-        #print(f"[IsaacLab] [ZeroMQ] Left controller data: {left_controller_data}")
-        #print(f"[IsaacLab] [ZeroMQ] Right controller data: {right_controller_data}")
+        print(f"[IsaacLab] [ZeroMQ] Left controller data: {left_controller_data}")
+        print(f"[IsaacLab] [ZeroMQ] Right controller data: {right_controller_data}")
         default_wrist = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         left_wrist = self._extract_wrist_pose(left_controller_data, default_wrist)
         right_wrist = self._extract_wrist_pose(right_controller_data, default_wrist)
@@ -72,25 +73,24 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
             left_hand_joints = self._map_controller_to_hand_joints(left_controller_data, is_left=True)
             right_hand_joints = self._map_controller_to_hand_joints(right_controller_data, is_left=False)
 
-        # Preserve the mirroring behavior from the Isaac Lab reference retargeter.
         left_hand_joints = -left_hand_joints
 
         all_hand_joints = np.array(
             [
-                left_hand_joints[3],   # left_index_proximal
-                left_hand_joints[5],   # left_middle_proximal
-                left_hand_joints[0],   # left_thumb_base
-                right_hand_joints[3],  # right_index_proximal
-                right_hand_joints[5],  # right_middle_proximal
-                right_hand_joints[0],  # right_thumb_base
-                left_hand_joints[4],   # left_index_distal
-                left_hand_joints[6],   # left_middle_distal
-                left_hand_joints[1],   # left_thumb_middle
-                right_hand_joints[4],  # right_index_distal
-                right_hand_joints[6],  # right_middle_distal
-                right_hand_joints[1],  # right_thumb_middle
-                left_hand_joints[2],   # left_thumb_tip
-                right_hand_joints[2],  # right_thumb_tip
+                left_hand_joints[3],
+                left_hand_joints[5],
+                left_hand_joints[0],
+                right_hand_joints[3],
+                right_hand_joints[5],
+                right_hand_joints[0],
+                left_hand_joints[4],
+                left_hand_joints[6],
+                left_hand_joints[1],
+                right_hand_joints[4],
+                right_hand_joints[6],
+                right_hand_joints[1],
+                left_hand_joints[2],
+                right_hand_joints[2],
             ],
             dtype=np.float32,
         )
@@ -132,7 +132,6 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
         button_0 = float(inputs[DeviceBase.MotionControllerInputIndex.BUTTON_0.value])
         button_1 = float(inputs[DeviceBase.MotionControllerInputIndex.BUTTON_1.value])
 
-        # If the sender has no grip/squeeze analog value, use button_1 as a binary squeeze fallback.
         squeeze = max(squeeze, button_1)
         thumb_button = max(trigger, squeeze, button_0)
 
@@ -151,12 +150,6 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
         return hand_joints
 
     def _map_hand_tracking_to_hand_joints(self, data: dict, is_left: bool) -> np.ndarray:
-        """Map MGXR pinch/bend arrays to the 7 G1 hand joints.
-
-        MGXR bend order is thumb, index, middle, ring, little.  Pinch order is
-        thumb-index, thumb-middle, thumb-ring, thumb-little.  G1 TriHand only
-        has thumb, index, and middle, so ring/little are ignored here.
-        """
         hand_joints = np.zeros(7, dtype=np.float32)
         side = "left" if is_left else "right"
         bend = np.asarray(data.get(f"hand_{side}_bend", np.zeros(5, dtype=np.float32)), dtype=np.float32)
@@ -186,17 +179,16 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
         return hand_joints
 
     def _retarget_abs(self, wrist: np.ndarray, is_left: bool) -> np.ndarray:
-        """Apply the same OpenXR-to-G1 wrist-frame transform as the reference retargeter."""
         wrist_pos = torch.tensor(wrist[:3], dtype=torch.float32)
         wrist_quat = torch.tensor(wrist[3:], dtype=torch.float32)
 
-        # Combined -75 deg Y rotation + 90 deg Z rotation, quaternion in wxyz.
         combined_quat = torch.tensor([0.5358, -0.4619, 0.5358, 0.4619], dtype=torch.float32)
 
         openxr_pose = PoseUtils.make_pose(wrist_pos, PoseUtils.matrix_from_quat(wrist_quat))
         transform_pose = PoseUtils.make_pose(torch.zeros(3), PoseUtils.matrix_from_quat(combined_quat))
         result_pose = PoseUtils.pose_in_A_to_pose_in_B(transform_pose, openxr_pose)
         pos, rot_mat = PoseUtils.unmake_pose(result_pose)
+        pos = pos + self._wrist_position_offset
         quat = PoseUtils.quat_from_matrix(rot_mat)
         return np.concatenate([pos.numpy(), quat.numpy()]).astype(np.float32)
 
@@ -204,8 +196,10 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
 @dataclass
 class G1TriHandUpperBodyZeroMqRetargeterCfg(RetargeterCfg):
     """Configuration for the G1 ZeroMQ upper-body retargeter."""
+
     enable_visualization: bool = False
     hand_joint_names: list[str] | None = None
     use_hand_tracking_if_available: bool = False
     enable_wrist_pose_retargeting: bool = True
+    wrist_position_offset: tuple[float, float, float] = (-0.16, 0.0, 0.0)
     retargeter_type: type[RetargeterBase] = G1TriHandUpperBodyZeroMqRetargeter
