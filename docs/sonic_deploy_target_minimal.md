@@ -36,6 +36,21 @@ Pico / pose input
   -> GR00T deploy reads lowstate like a real/sim G1
 ```
 
+Native Windows IsaacLab cannot reliably install/use CycloneDDS. For that case,
+use the proxy path instead:
+
+```text
+Pico / pose input
+  -> GR00T-WholeBodyControl deploy
+  -> SONIC encoder + decoder
+  -> GR00T/Linux DDS rt/lowcmd
+  -> scripts/tools/sonic_unitree_dds_proxy.py
+       publishes fake rt/lowstate + rt/secondary_imu back to GR00T
+       forwards LowCmd.q as ZMQ g1_debug.body_q_target
+  -> Windows IsaacLab SonicDeployTargetAction
+  -> sonic_robot joint position targets
+```
+
 In this branch, IsaacLab does not run SONIC encoder/decoder in the DDS path. It only receives the final low-level command and publishes simulated state. That is the closest deployment shape to the future physical robot, because the GR00T side can later switch from IsaacLab DDS to the real Unitree DDS network without changing the policy boundary.
 
 ## Branch
@@ -71,6 +86,7 @@ Could not locate cyclonedds. Try to set CYCLONEDDS_HOME or CMAKE_PREFIX_PATH
 then the Python binding found no native CycloneDDS install. For the current two-machine bring-up, prefer one of these:
 
 - stay on direct ZMQ mode on native Windows;
+- run `scripts/tools/sonic_unitree_dds_proxy.py` on the GR00T/Linux machine and let Windows IsaacLab consume its ZMQ output;
 - run the IsaacLab DDS bridge from Linux/WSL2 where CycloneDDS builds and selects network interfaces reliably;
 - only use native Windows DDS after installing CycloneDDS C/C++ and exporting `CYCLONEDDS_HOME` or `CMAKE_PREFIX_PATH` before pip installing `unitree_sdk2_python`.
 
@@ -105,7 +121,34 @@ cd /path/to/GR00T-WholeBodyControl/gear_sonic_deploy
 
 Make sure the deploy output/debug ZMQ port is reachable by the IsaacLab machine and matches `SONIC_DEPLOY_ENDPOINT`.
 
-DDS mode runs GR00T deploy as if the robot were a simulator on the DDS network:
+Proxy mode is the recommended path when GR00T requires DDS but IsaacLab is on native Windows. Run this proxy on the GR00T/Linux machine in an environment where `unitree_sdk2py`, `pyzmq`, and `msgpack` are installed:
+
+```bash
+cd /path/to/IsaacLab
+python scripts/tools/sonic_unitree_dds_proxy.py \
+  --domain-id 0 \
+  --interface <gr00t_dds_network_interface> \
+  --zmq-bind tcp://*:5557 \
+  --zmq-topic g1_debug
+```
+
+Then run GR00T deploy normally in simulator mode so CRC checks are disabled:
+
+```bash
+cd /path/to/GR00T-WholeBodyControl/gear_sonic_deploy
+./deploy.sh sim --input-type zmq_manager --zmq-host <pico_or_pose_source_host>
+```
+
+On the Windows IsaacLab machine, consume the proxy ZMQ stream:
+
+```powershell
+$env:SONIC_DEPLOY_TRANSPORT="zmq"
+$env:SONIC_DEPLOY_ENDPOINT="tcp://<GR00T_MACHINE_IP>:5557"
+$env:SONIC_DEPLOY_TOPIC="g1_debug"
+.\isaaclab.bat -p scripts\environments\teleoperation\teleop_se3_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0
+```
+
+Pure DDS mode runs GR00T deploy as if IsaacLab itself were a simulator on the DDS network:
 
 ```bash
 cd /path/to/GR00T-WholeBodyControl/gear_sonic_deploy
