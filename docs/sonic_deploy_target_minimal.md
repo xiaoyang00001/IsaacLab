@@ -62,6 +62,18 @@ For DDS mode, also install Unitree SDK2 Python into the same environment. The GR
 .\isaaclab.bat -p -m pip install -e D:\src\Isaac\GR00T-WholeBodyControl\external_dependencies\unitree_sdk2_python
 ```
 
+If this fails on Windows with:
+
+```text
+Could not locate cyclonedds. Try to set CYCLONEDDS_HOME or CMAKE_PREFIX_PATH
+```
+
+then the Python binding found no native CycloneDDS install. For the current two-machine bring-up, prefer one of these:
+
+- stay on direct ZMQ mode on native Windows;
+- run the IsaacLab DDS bridge from Linux/WSL2 where CycloneDDS builds and selects network interfaces reliably;
+- only use native Windows DDS after installing CycloneDDS C/C++ and exporting `CYCLONEDDS_HOME` or `CMAKE_PREFIX_PATH` before pip installing `unitree_sdk2_python`.
+
 Direct ZMQ mode:
 
 ```powershell
