@@ -100,9 +100,13 @@ if "%CONDA_PREFIX%"=="" (
         set "CONDA_PREFIX=%DEFAULT_CONDA_PREFIX%"
     )
 )
-set "ISAAC_PATH=%ISAACLAB_PATH%\_isaac_sim"
-set "EXP_PATH=%ISAACLAB_PATH%\_isaac_sim\apps"
-set "CARB_APP_PATH=%ISAACLAB_PATH%\_isaac_sim\kit"
+rem Only override ISAAC_PATH/EXP_PATH/CARB_APP_PATH when the local _isaac_sim tree
+rem exists; otherwise leave them unset so isaacsim's pip-installed kit is used.
+if exist "%ISAACLAB_PATH%\_isaac_sim" (
+    set "ISAAC_PATH=%ISAACLAB_PATH%\_isaac_sim"
+    set "EXP_PATH=%ISAACLAB_PATH%\_isaac_sim\apps"
+    set "CARB_APP_PATH=%ISAACLAB_PATH%\_isaac_sim\kit"
+)
 set "RESOURCE_NAME=IsaacSim"
 if exist "%DEFAULT_USD_EXT%" (
     set "PYTHONPATH=%DEFAULT_USD_EXT%;%ISAACLAB_PATH%\_isaac_sim\site;%PYTHONPATH%"

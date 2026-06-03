@@ -50,6 +50,7 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
     AgileBasedLowerBodyActionCfg,
     AutoWalkActionCfg,
     SonicDeployTargetActionCfg,
+    UnitreeDdsLowCmdActionCfg,
 )
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import SONIC_G1_29DOF_JOINT_ORDER
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
@@ -458,19 +459,38 @@ class ActionsCfg:
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
-    # Minimal bridge: GR00T-WholeBodyControl runs deploy, IsaacLab only consumes
-    # its 29-DoF target stream and applies it to the SONIC-actuated robot.
-    sonic_wholebody = SonicDeployTargetActionCfg(
-        asset_name="sonic_robot",
-        joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-        endpoint=os.environ.get("SONIC_DEPLOY_ENDPOINT", "tcp://127.0.0.1:5557"),
-        topic=os.environ.get("SONIC_DEPLOY_TOPIC", "g1_debug"),
-        target_field="body_q_target",
-        target_order="mujoco",
-        target_rate_limit_rad_per_step=0.08,
-        stale_timeout_s=0.5,
-        debug_log_interval=50,
-    )
+    # Minimal bridge modes:
+    #   SONIC_DEPLOY_TRANSPORT=zmq (default): GR00T deploy publishes debug body_q_target over ZMQ.
+    #   SONIC_DEPLOY_TRANSPORT=dds: IsaacLab behaves like a virtual G1, subscribing rt/lowcmd
+    #                                  and publishing rt/lowstate for GR00T deploy.
+    if os.environ.get("SONIC_DEPLOY_TRANSPORT", "zmq").lower() == "dds":
+        sonic_wholebody = UnitreeDdsLowCmdActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            domain_id=int(os.environ.get("UNITREE_DDS_DOMAIN_ID", "0")),
+            network_interface=os.environ.get("UNITREE_DDS_INTERFACE", ""),
+            lowcmd_topic=os.environ.get("UNITREE_LOWCMD_TOPIC", "rt/lowcmd"),
+            lowstate_topic=os.environ.get("UNITREE_LOWSTATE_TOPIC", "rt/lowstate"),
+            secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
+            target_order="mujoco",
+            target_rate_limit_rad_per_step=0.08,
+            stale_timeout_s=0.5,
+            publish_lowstate_every_apply=True,
+            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
+            debug_log_interval=50,
+        )
+    else:
+        sonic_wholebody = SonicDeployTargetActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            endpoint=os.environ.get("SONIC_DEPLOY_ENDPOINT", "tcp://127.0.0.1:5557"),
+            topic=os.environ.get("SONIC_DEPLOY_TOPIC", "g1_debug"),
+            target_field="body_q_target",
+            target_order="mujoco",
+            target_rate_limit_rad_per_step=0.08,
+            stale_timeout_s=0.5,
+            debug_log_interval=50,
+        )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
     # forward_speed 已在 v3 物理驱动后废弃（脚地接触自然推进），不再传入

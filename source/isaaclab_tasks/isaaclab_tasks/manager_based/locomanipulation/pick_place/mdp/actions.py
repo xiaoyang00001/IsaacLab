@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         AutoWalkActionCfg,
         SonicDeployTargetActionCfg,
         SONICWholeBodyActionCfg,
+        UnitreeDdsLowCmdActionCfg,
     )
 
 
@@ -395,6 +397,262 @@ class SonicDeployTargetAction(ActionTerm):
 
     def apply_actions(self):
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._processed_actions.copy_(self._default_joint_pos)
+            self._last_target_step_delta_absmax.zero_()
+            return
+        self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
+        self._last_target_step_delta_absmax[env_ids] = 0.0
+
+
+class UnitreeDdsLowCmdAction(ActionTerm):
+    """Drive sonic_robot from Unitree DDS LowCmd and publish simulated LowState.
+
+    This makes IsaacLab behave like a virtual G1 for GR00T/SONIC deploy:
+    deploy publishes `rt/lowcmd`, while IsaacLab publishes `rt/lowstate`.
+    """
+
+    cfg: UnitreeDdsLowCmdActionCfg
+    _asset: Articulation
+
+    def __init__(self, cfg: UnitreeDdsLowCmdActionCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset = env.scene[cfg.asset_name]
+        self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        self._default_joint_pos = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
+        self._processed_actions = self._default_joint_pos.clone()
+        self._raw_actions = torch.zeros((self.num_envs, 0), device=self.device)
+        self._isaac_to_mujoco_index = torch.tensor(
+            SONIC_G1_ISAACLAB_TO_MUJOCO_DOF, device=self.device, dtype=torch.long
+        )
+        self._mujoco_to_isaac_index = torch.tensor(
+            SONIC_G1_MUJOCO_TO_ISAACLAB_DOF, device=self.device, dtype=torch.long
+        )
+        self._target_order = str(cfg.target_order).lower()
+        if self._target_order not in ("mujoco", "isaaclab"):
+            raise ValueError(f"target_order must be 'mujoco' or 'isaaclab', got {cfg.target_order!r}")
+
+        self._low_cmd = None
+        self._low_cmd_lock = threading.Lock()
+        self._new_low_cmd = False
+        self._lowcmd_count = 0
+        self._lowstate_count = 0
+        self._last_lowcmd_time = 0.0
+        self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        self._debug_counter = 0
+        self._first_lowcmd_logged = False
+        self._dds_ready = False
+        self._lowstate_msg = None
+        self._secondary_imu_msg = None
+        self._lowstate_publisher = None
+        self._secondary_imu_publisher = None
+        self._lowcmd_subscriber = None
+        self._connect_dds()
+        self._log_info(
+            f"asset={cfg.asset_name} domain_id={cfg.domain_id} "
+            f"interface={cfg.network_interface or '<auto>'} lowcmd={cfg.lowcmd_topic!r} "
+            f"lowstate={cfg.lowstate_topic!r} target_order={self._target_order} "
+            f"resolved={len(self._joint_ids)} joints dds_ready={self._dds_ready}"
+        )
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    @staticmethod
+    def _format_log_message(message: str) -> str:
+        return f"[UnitreeDdsLowCmd] {message}"
+
+    def _log_info(self, message: str) -> None:
+        formatted = self._format_log_message(message)
+        logger.info(formatted)
+        print(f"[IsaacLab] {formatted}")
+
+    def _log_warning(self, message: str) -> None:
+        formatted = self._format_log_message(f"WARNING {message}")
+        logger.warning(formatted)
+        print(f"[IsaacLab] {formatted}")
+
+    def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
+        resolved_ids: list[int] = []
+        resolved_names: list[str] = []
+        for joint_name in joint_names:
+            joint_ids, matched_names = self._asset.find_joints([f"^{joint_name}$"])
+            if len(joint_ids) != 1:
+                raise ValueError(
+                    f"Expected exactly one joint match for '{joint_name}' on asset '{self.cfg.asset_name}', "
+                    f"but got {len(joint_ids)} matches: {matched_names}"
+                )
+            resolved_ids.append(int(joint_ids[0]))
+            resolved_names.append(matched_names[0])
+        return resolved_ids, resolved_names
+
+    def _connect_dds(self) -> None:
+        try:
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
+            from unitree_sdk2py.idl.default import (
+                unitree_hg_msg_dds__IMUState_ as IMUStateDefault,
+                unitree_hg_msg_dds__LowState_ as LowStateDefault,
+            )
+            from unitree_sdk2py.idl.unitree_hg.msg.dds_ import IMUState_, LowCmd_, LowState_
+        except ModuleNotFoundError as exc:
+            self._log_warning(f"{exc.name} is not installed; holding sonic_robot default pose.")
+            return
+
+        try:
+            if self.cfg.network_interface:
+                ChannelFactoryInitialize(int(self.cfg.domain_id), self.cfg.network_interface)
+            else:
+                ChannelFactoryInitialize(int(self.cfg.domain_id))
+        except Exception as exc:
+            self._log_warning(f"ChannelFactoryInitialize failed: {exc}")
+            return
+
+        self._lowstate_msg = LowStateDefault()
+        self._secondary_imu_msg = IMUStateDefault()
+        self._lowstate_publisher = ChannelPublisher(self.cfg.lowstate_topic, LowState_)
+        self._lowstate_publisher.Init()
+        self._secondary_imu_publisher = ChannelPublisher(self.cfg.secondary_imu_topic, IMUState_)
+        self._secondary_imu_publisher.Init()
+        self._lowcmd_subscriber = ChannelSubscriber(self.cfg.lowcmd_topic, LowCmd_)
+        self._lowcmd_subscriber.Init(self._lowcmd_handler, 1)
+        self._dds_ready = True
+
+    def _lowcmd_handler(self, msg) -> None:
+        with self._low_cmd_lock:
+            self._low_cmd = msg
+            self._new_low_cmd = True
+            self._lowcmd_count += 1
+            self._last_lowcmd_time = time.monotonic()
+
+    def _take_latest_lowcmd(self):
+        with self._low_cmd_lock:
+            msg = self._low_cmd
+            is_new = self._new_low_cmd
+            self._new_low_cmd = False
+        return msg, is_new
+
+    def _extract_lowcmd_target(self, low_cmd) -> torch.Tensor | None:
+        try:
+            target_values = [float(low_cmd.motor_cmd[i].q) for i in range(len(SONIC_G1_29DOF_JOINT_ORDER))]
+        except Exception as exc:
+            self._log_warning(f"failed to read LowCmd motor_cmd q fields: {exc}")
+            return None
+
+        target = torch.tensor(target_values, device=self.device, dtype=torch.float32)
+        if self._target_order == "mujoco":
+            target = target[self._isaac_to_mujoco_index]
+        if not self._first_lowcmd_logged:
+            self._first_lowcmd_logged = True
+            target_cpu = target.detach().cpu()
+            self._log_info(
+                f"first LowCmd parsed order={self._target_order} "
+                f"mean={target_cpu.mean():+.4f} absmax={target_cpu.abs().max():.4f}"
+            )
+        return target.unsqueeze(0).repeat(self.num_envs, 1)
+
+    def _apply_target_rate_limit(self, target: torch.Tensor) -> torch.Tensor:
+        max_delta = float(self.cfg.target_rate_limit_rad_per_step)
+        if max_delta <= 0.0:
+            self._last_target_step_delta_absmax = torch.max(
+                torch.abs(target - self._processed_actions), dim=-1
+            ).values
+            return target
+        delta = torch.clamp(target - self._processed_actions, min=-max_delta, max=max_delta)
+        self._last_target_step_delta_absmax = torch.max(torch.abs(delta), dim=-1).values
+        return self._processed_actions + delta
+
+    @staticmethod
+    def _set_sequence(dst, values) -> None:
+        for idx, value in enumerate(values):
+            dst[idx] = float(value)
+
+    def _publish_lowstate(self) -> None:
+        if not self._dds_ready or self._lowstate_publisher is None or self._lowstate_msg is None:
+            return
+
+        env_idx = 0
+        joint_pos = self._asset.data.joint_pos[env_idx, self._joint_ids].detach().cpu()
+        joint_vel = self._asset.data.joint_vel[env_idx, self._joint_ids].detach().cpu()
+        joint_acc = self._asset.data.joint_acc[env_idx, self._joint_ids].detach().cpu()
+        torque_src = getattr(self._asset.data, "applied_torque", None)
+        if torque_src is None:
+            joint_tau = torch.zeros_like(joint_pos)
+        else:
+            joint_tau = torque_src[env_idx, self._joint_ids].detach().cpu()
+        root_quat = self._asset.data.root_quat_w[env_idx].detach().cpu()
+        root_ang_vel = self._asset.data.root_ang_vel_b[env_idx].detach().cpu()
+
+        if self._target_order == "mujoco":
+            joint_pos = joint_pos[self._mujoco_to_isaac_index.cpu()]
+            joint_vel = joint_vel[self._mujoco_to_isaac_index.cpu()]
+            joint_acc = joint_acc[self._mujoco_to_isaac_index.cpu()]
+            joint_tau = joint_tau[self._mujoco_to_isaac_index.cpu()]
+
+        for i in range(len(SONIC_G1_29DOF_JOINT_ORDER)):
+            motor_state = self._lowstate_msg.motor_state[i]
+            motor_state.q = float(joint_pos[i])
+            motor_state.dq = float(joint_vel[i])
+            motor_state.ddq = float(joint_acc[i])
+            motor_state.tau_est = float(joint_tau[i])
+        if hasattr(self._lowstate_msg, "mode_machine"):
+            self._lowstate_msg.mode_machine = int(self.cfg.mode_machine)
+        if hasattr(self._lowstate_msg, "tick"):
+            self._lowstate_msg.tick = int(time.monotonic() * 1000.0) & 0xFFFFFFFF
+        self._set_sequence(self._lowstate_msg.imu_state.quaternion, root_quat.tolist())
+        self._set_sequence(self._lowstate_msg.imu_state.gyroscope, root_ang_vel.tolist())
+        self._set_sequence(self._lowstate_msg.imu_state.accelerometer, (0.0, 0.0, 0.0))
+        self._lowstate_publisher.Write(self._lowstate_msg)
+
+        if self._secondary_imu_publisher is not None and self._secondary_imu_msg is not None:
+            self._set_sequence(self._secondary_imu_msg.quaternion, root_quat.tolist())
+            self._set_sequence(self._secondary_imu_msg.gyroscope, root_ang_vel.tolist())
+            self._secondary_imu_publisher.Write(self._secondary_imu_msg)
+        self._lowstate_count += 1
+
+    def process_actions(self, actions: torch.Tensor):
+        low_cmd, is_new = self._take_latest_lowcmd()
+        if low_cmd is not None and is_new:
+            target = self._extract_lowcmd_target(low_cmd)
+            if target is not None:
+                self._processed_actions = self._apply_target_rate_limit(target)
+                if self.cfg.clip is not None:
+                    self._processed_actions = torch.clamp(
+                        self._processed_actions, min=self._clip[:, :, 0], max=self._clip[:, :, 1]
+                    )
+
+        stale_timeout_s = float(self.cfg.stale_timeout_s)
+        if (
+            stale_timeout_s > 0.0
+            and self._last_lowcmd_time > 0.0
+            and time.monotonic() - self._last_lowcmd_time > stale_timeout_s
+        ):
+            self._last_lowcmd_time = 0.0
+            self._log_warning(f"no LowCmd received for {stale_timeout_s:.2f}s; holding last target.")
+
+        self._debug_counter += 1
+        if self.cfg.debug_log_interval > 0 and self._debug_counter % self.cfg.debug_log_interval == 0:
+            proc = self._processed_actions[0].detach().cpu()
+            self._log_info(
+                f"step={self._debug_counter} lowcmd={self._lowcmd_count} lowstate={self._lowstate_count} "
+                f"target_mean={proc.mean():+.4f} target_absmax={proc.abs().max():.4f} "
+                f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f}"
+            )
+
+    def apply_actions(self):
+        self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+        if self.cfg.publish_lowstate_every_apply:
+            self._publish_lowstate()
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:

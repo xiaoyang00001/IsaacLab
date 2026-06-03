@@ -8,7 +8,13 @@ from dataclasses import MISSING
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions import AgileBasedLowerBodyAction, AutoWalkAction, SonicDeployTargetAction, SONICWholeBodyAction
+from ..mdp.actions import (
+    AgileBasedLowerBodyAction,
+    AutoWalkAction,
+    SonicDeployTargetAction,
+    SONICWholeBodyAction,
+    UnitreeDdsLowCmdAction,
+)
 
 
 @configclass
@@ -118,6 +124,49 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
 
     debug_log_interval: int = 50
     """Print target statistics every N control steps. 0 disables periodic logging."""
+
+
+@configclass
+class UnitreeDdsLowCmdActionCfg(ActionTermCfg):
+    """Unitree DDS low-level sim bridge for sonic_robot."""
+
+    class_type: type[ActionTerm] = UnitreeDdsLowCmdAction
+
+    joint_names: list[str] = MISSING
+    """29 G1 joint names in IsaacLab/SONIC order."""
+
+    domain_id: int = 0
+    """DDS domain id used by Unitree SDK2."""
+
+    network_interface: str = ""
+    """Optional DDS network interface name. Leave empty to let CycloneDDS choose."""
+
+    lowcmd_topic: str = "rt/lowcmd"
+    """Unitree low-level command topic to subscribe."""
+
+    lowstate_topic: str = "rt/lowstate"
+    """Unitree low-level state topic to publish."""
+
+    secondary_imu_topic: str = "rt/secondary_imu"
+    """Unitree torso IMU topic to publish."""
+
+    target_order: str = "mujoco"
+    """LowCmd motor order. Unitree G1 lowcmd uses hardware/MuJoCo order."""
+
+    target_rate_limit_rad_per_step: float = 0.08
+    """Optional per-step target clamp to reduce abrupt deploy/sim startup jumps. 0 disables it."""
+
+    stale_timeout_s: float = 0.5
+    """Warn and hold the last command if no fresh LowCmd arrives for this long. 0 disables warning."""
+
+    publish_lowstate_every_apply: bool = True
+    """Publish LowState from IsaacLab at every action apply call."""
+
+    mode_machine: int = 5
+    """G1 mode_machine value reported in LowState so deploy can identify the robot variant."""
+
+    debug_log_interval: int = 50
+    """Print DDS bridge statistics every N control steps. 0 disables periodic logging."""
 
 
 @configclass
