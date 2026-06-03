@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
@@ -19,6 +20,8 @@ from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
 from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_conjugate, quat_mul
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -177,6 +180,8 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_packet_time = 0.0
         self._packet_count = 0
         self._debug_counter = 0
+        self._first_packet_logged = False
+        self._first_target_logged = False
         self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
 
         self._target_order = str(cfg.target_order).lower()
@@ -187,12 +192,12 @@ class SonicDeployTargetAction(ActionTerm):
             SONIC_G1_ISAACLAB_TO_MUJOCO_DOF, device=self.device, dtype=torch.long
         )
         self._connect_receiver()
-
-        print(
-            "[IsaacLab] [SonicDeployTarget] "
+        self._log_info(
             f"asset={cfg.asset_name} endpoint={cfg.endpoint} topic={cfg.topic!r} "
             f"field={cfg.target_field!r} target_order={self._target_order} "
-            f"resolved={len(self._joint_ids)} joints"
+            f"resolved={len(self._joint_ids)} joints receiver_ready={self._receiver_ready} "
+            f"env_endpoint={os.environ.get('SONIC_DEPLOY_ENDPOINT', '<unset>')!r} "
+            f"env_topic={os.environ.get('SONIC_DEPLOY_TOPIC', '<unset>')!r}"
         )
 
     def __del__(self):
@@ -223,6 +228,20 @@ class SonicDeployTargetAction(ActionTerm):
     def processed_actions(self) -> torch.Tensor:
         return self._processed_actions
 
+    @staticmethod
+    def _format_log_message(message: str) -> str:
+        return f"[SonicDeployTarget] {message}"
+
+    def _log_info(self, message: str) -> None:
+        formatted = self._format_log_message(message)
+        logger.info(formatted)
+        print(f"[IsaacLab] {formatted}")
+
+    def _log_warning(self, message: str) -> None:
+        formatted = self._format_log_message(f"WARNING {message}")
+        logger.warning(formatted)
+        print(f"[IsaacLab] {formatted}")
+
     def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
         resolved_ids: list[int] = []
         resolved_names: list[str] = []
@@ -242,12 +261,10 @@ class SonicDeployTargetAction(ActionTerm):
             import msgpack
             import zmq
         except ModuleNotFoundError as exc:
-            print(
-                "[IsaacLab] [SonicDeployTarget] WARNING "
-                f"{exc.name} is not installed; holding sonic_robot default pose."
-            )
+            self._log_warning(f"{exc.name} is not installed; holding sonic_robot default pose.")
             return
 
+        self._log_info(f"connecting endpoint={self.cfg.endpoint} topic={self.cfg.topic!r}")
         self._zmq = zmq
         self._msgpack = msgpack
         self._context = zmq.Context()
@@ -260,6 +277,7 @@ class SonicDeployTargetAction(ActionTerm):
             pass
         self._socket.connect(self.cfg.endpoint)
         self._receiver_ready = True
+        self._log_info(f"subscriber connected endpoint={self.cfg.endpoint} topic={self.cfg.topic!r}")
 
     def _drain_latest_packet(self) -> dict | None:
         if not self._receiver_ready or self._socket is None or self._zmq is None or self._msgpack is None:
@@ -282,14 +300,20 @@ class SonicDeployTargetAction(ActionTerm):
         try:
             payload = self._msgpack.unpackb(latest_payload, raw=False, strict_map_key=False)
         except Exception as exc:
-            print(f"[IsaacLab] [SonicDeployTarget] WARNING failed to unpack msgpack payload: {exc}")
+            self._log_warning(f"failed to unpack msgpack payload: {exc}")
             return None
 
         if not isinstance(payload, dict):
-            print(f"[IsaacLab] [SonicDeployTarget] WARNING expected msgpack map, got {type(payload).__name__}")
+            self._log_warning(f"expected msgpack map, got {type(payload).__name__}")
             return None
         self._last_packet_time = time.monotonic()
         self._packet_count += 1
+        if not self._first_packet_logged:
+            self._first_packet_logged = True
+            self._log_info(
+                f"first packet received keys={list(payload.keys())} "
+                f"payload_fields={len(payload)}"
+            )
         return payload
 
     def _extract_target(self, payload: dict) -> torch.Tensor | None:
@@ -308,21 +332,24 @@ class SonicDeployTargetAction(ActionTerm):
                 break
         if target_values is None:
             if self._packet_count <= 3:
-                print(
-                    "[IsaacLab] [SonicDeployTarget] WARNING "
+                self._log_warning(
                     f"none of target fields {field_names} found; payload keys={list(payload.keys())}"
                 )
             return None
 
         target = torch.tensor(target_values, device=self.device, dtype=torch.float32).flatten()
         if target.numel() != len(SONIC_G1_29DOF_JOINT_ORDER):
-            print(
-                "[IsaacLab] [SonicDeployTarget] WARNING "
-                f"field {target_field!r} has {target.numel()} values, expected 29"
-            )
+            self._log_warning(f"field {target_field!r} has {target.numel()} values, expected 29")
             return None
         if self._target_order == "mujoco":
             target = target[self._isaac_to_mujoco_index]
+        if not self._first_target_logged:
+            self._first_target_logged = True
+            target_cpu = target.detach().cpu()
+            self._log_info(
+                f"first target parsed field={target_field!r} order={self._target_order} "
+                f"mean={target_cpu.mean():+.4f} absmax={target_cpu.abs().max():.4f}"
+            )
         return target.unsqueeze(0).repeat(self.num_envs, 1)
 
     def _apply_target_rate_limit(self, target: torch.Tensor) -> torch.Tensor:
@@ -355,16 +382,12 @@ class SonicDeployTargetAction(ActionTerm):
             and time.monotonic() - self._last_packet_time > stale_timeout_s
         ):
             self._last_packet_time = 0.0
-            print(
-                "[IsaacLab] [SonicDeployTarget] WARNING "
-                f"no deploy target received for {stale_timeout_s:.2f}s; holding last target."
-            )
+            self._log_warning(f"no deploy target received for {stale_timeout_s:.2f}s; holding last target.")
 
         self._debug_counter += 1
         if self.cfg.debug_log_interval > 0 and self._debug_counter % self.cfg.debug_log_interval == 0:
             proc = self._processed_actions[0].detach().cpu()
-            print(
-                "[IsaacLab] [SonicDeployTarget] "
+            self._log_info(
                 f"step={self._debug_counter} packets={self._packet_count} "
                 f"target_mean={proc.mean():+.4f} target_absmax={proc.abs().max():.4f} "
                 f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f}"
