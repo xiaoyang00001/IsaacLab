@@ -49,7 +49,7 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_robot_sync imp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
     AgileBasedLowerBodyActionCfg,
     AutoWalkActionCfg,
-    SONICWholeBodyActionCfg,
+    SonicDeployTargetActionCfg,
 )
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import SONIC_G1_29DOF_JOINT_ORDER
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
@@ -458,48 +458,18 @@ class ActionsCfg:
 
     upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
 
-    # 第四个机器人：GEAR-SONIC ONNX dual-pass 推理
-    # reset 时把 robot 同步到 mocap 第 0 帧，并用该姿态预热 10 帧 history。
-    # action_scale 是部署 per-joint scale 外层的全局倍率，默认保持 1.0。
-    sonic_wholebody = SONICWholeBodyActionCfg(
+    # Minimal bridge: GR00T-WholeBodyControl runs deploy, IsaacLab only consumes
+    # its 29-DoF target stream and applies it to the SONIC-actuated robot.
+    sonic_wholebody = SonicDeployTargetActionCfg(
         asset_name="sonic_robot",
-        encoder_path=SONIC_ENCODER_PATH,
-        decoder_path=SONIC_DECODER_PATH,
         joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-        action_scale=1.0,
-        mocap_path=SONIC_MOCAP_PATH,
-        # 探针字段（默认 False，按需开启验证反馈循环驱动）：
-        # - force_zero_last_action_history: 屏蔽 his_last_actions (offset 674:964)
-        #   实测 step 250 absmax 2-8 (vs 基线 16+)，证明 _last_action 是主反馈驱动
-        # - force_zero_decoder_history: 屏蔽全部 history (offset 64:994)，仅留 token
-        #   实测 step 1-250 absmax 完全 flat=2.7717（精确到小数 4 位），证明 decoder
-        #   history 是反馈循环唯一驱动 — SONIC ONNX 完全依赖 history 训练分布
-        # B1 obs noise 注入实验结果（2026-05-25）：失败
-        #   step 50/100/150/200/250 absmax 11.6/15.9/11.7/13.3/10.9，joint_pos 仍撞 3.08
-        #   noise 注入只让数值波动 ±20%，未消除反馈循环爆炸
-        # → 推翻"noise 是核心 OOD 来源"假设；候选根因转 ONNX export 漏 obs_normalization /
-        #   ckpt 训练 task 不是 walking（TRL_G1_Track tracking）→ 需走 B2 PyTorch ckpt
-        # obs_noise_enabled=True,
-        # B2 PyTorch ckpt 加载（2026-05-25，commit fd8cef87a）：
-        #   推翻 obs_normalization 假设（actor_sd 55 keys 无 running_mean_std 层）
-        #   发现 trainable `std: (29,) ∈ [0.30, 0.50]` → 训练 actor 是 Normal(mean, std).sample()
-        #   推理 ONNX 只取 mean → obs.last_action 训练含 noise / 推理 deterministic → noise gap 累积
-        # 部署路径使用 ONNX deterministic mean。action_noise 是探针开关，会直接造成关节目标抖动。
-        action_noise_enabled=False,
-        action_noise_std=0.40,  # scalar fallback (path 不存在时启用)
-        action_noise_std_path=SONIC_ACTION_STD_PATH,
-        # 先固定 mocap 起点，把观测/动作链路调通；随机 reset 后续再作为鲁棒性实验打开。
-        reset_to_random_mocap_frame=False,
-        reset_mocap_frame=0,
-        seed_history_from_reset_pose=True,
-        align_root_height_to_mocap=True,
-        # 输出层稳定器：主链路已打通后，仅用于压制上肢启动瞬态和 wrist 末端甩动。
-        startup_blend_steps=25,
-        upper_body_target_rate_limit_rad_per_step=0.06,
-        wrist_target_rate_limit_rad_per_step=0.04,
-        # 实验开关：上肢直接贴 mocap 能小幅降低 wrist 峰值，但会轻微影响 root/feet，默认关闭。
-        upper_body_mocap_target_blend=0.0,
-        wrist_mocap_target_blend=0.0,
+        endpoint="tcp://127.0.0.1:5557",
+        topic="g1_debug",
+        target_field="body_q_target",
+        target_order="mujoco",
+        target_rate_limit_rad_per_step=0.08,
+        stale_timeout_s=0.5,
+        debug_log_interval=50,
     )
 
     # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）

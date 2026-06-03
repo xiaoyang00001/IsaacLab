@@ -8,7 +8,7 @@ from dataclasses import MISSING
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions import AgileBasedLowerBodyAction, AutoWalkAction, SONICWholeBodyAction
+from ..mdp.actions import AgileBasedLowerBodyAction, AutoWalkAction, SonicDeployTargetAction, SONICWholeBodyAction
 
 
 @configclass
@@ -81,6 +81,43 @@ class AutoWalkActionCfg(ActionTermCfg):
     # ── 手部 ────────────────────────────────────────────────
     hand_curl_amount: float = 0.10
     """手指关节相对默认位置的轻微卷曲（rad），仿真放松握拳姿态。设为 0 关闭。"""
+
+
+@configclass
+class SonicDeployTargetActionCfg(ActionTermCfg):
+    """Minimal GR00T deploy target receiver for sonic_robot."""
+
+    class_type: type[ActionTerm] = SonicDeployTargetAction
+
+    joint_names: list[str] = MISSING
+    """29 G1 joint names in IsaacLab/SONIC order."""
+
+    endpoint: str = "tcp://127.0.0.1:5557"
+    """GR00T deploy ZMQ PUB endpoint."""
+
+    topic: str = "g1_debug"
+    """Topic prefix published by GR00T deploy."""
+
+    target_field: str = "body_q_target"
+    """Msgpack field to consume as the 29-DoF joint target."""
+
+    target_order: str = "mujoco"
+    """Input joint order. GR00T deploy documents body_q_target as MuJoCo order."""
+
+    target_rate_limit_rad_per_step: float = 0.08
+    """Optional per-step target clamp to reduce abrupt deploy/sim startup jumps. 0 disables it."""
+
+    stale_timeout_s: float = 0.5
+    """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
+
+    fallback_to_last_action: bool = False
+    """If body_q_target is absent, optionally consume deploy last_action."""
+
+    fallback_to_measured: bool = False
+    """If target fields are absent, optionally fall back to measured body_q fields."""
+
+    debug_log_interval: int = 50
+    """Print target statistics every N control steps. 0 disables periodic logging."""
 
 
 @configclass

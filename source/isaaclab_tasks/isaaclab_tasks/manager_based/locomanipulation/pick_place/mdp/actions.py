@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +23,12 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_conju
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from ..configs.action_cfg import AgileBasedLowerBodyActionCfg, AutoWalkActionCfg, SONICWholeBodyActionCfg
+    from ..configs.action_cfg import (
+        AgileBasedLowerBodyActionCfg,
+        AutoWalkActionCfg,
+        SonicDeployTargetActionCfg,
+        SONICWholeBodyActionCfg,
+    )
 
 
 # G1 29-DoF MuJoCo/URDF order. Deploy uses this order only at the motor boundary.
@@ -139,6 +145,241 @@ SMPL_TO_SONIC_BODY_IDX: tuple[int, ...] = (
     19,  # right_elbow_link
     21,  # right_wrist_yaw_link
 )
+
+
+class SonicDeployTargetAction(ActionTerm):
+    """Drive the SONIC robot from GR00T deploy ZMQ joint targets.
+
+    GR00T deploy publishes a single-part ZMQ message:
+        [topic_prefix][msgpack payload]
+
+    The minimal IsaacLab bridge consumes `body_q_target` and writes it directly
+    as joint position targets for `sonic_robot`.
+    """
+
+    cfg: SonicDeployTargetActionCfg
+    _asset: Articulation
+
+    def __init__(self, cfg: SonicDeployTargetActionCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset = env.scene[cfg.asset_name]
+        self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        self._default_joint_pos = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
+        self._processed_actions = self._default_joint_pos.clone()
+        self._raw_actions = torch.zeros((self.num_envs, 0), device=self.device)
+
+        self._topic = cfg.topic.encode("utf-8")
+        self._context = None
+        self._socket = None
+        self._zmq = None
+        self._msgpack = None
+        self._receiver_ready = False
+        self._last_packet_time = 0.0
+        self._packet_count = 0
+        self._debug_counter = 0
+        self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+
+        self._target_order = str(cfg.target_order).lower()
+        if self._target_order not in ("mujoco", "isaaclab"):
+            raise ValueError(f"target_order must be 'mujoco' or 'isaaclab', got {cfg.target_order!r}")
+
+        self._isaac_to_mujoco_index = torch.tensor(
+            SONIC_G1_ISAACLAB_TO_MUJOCO_DOF, device=self.device, dtype=torch.long
+        )
+        self._connect_receiver()
+
+        print(
+            "[IsaacLab] [SonicDeployTarget] "
+            f"asset={cfg.asset_name} endpoint={cfg.endpoint} topic={cfg.topic!r} "
+            f"field={cfg.target_field!r} target_order={self._target_order} "
+            f"resolved={len(self._joint_ids)} joints"
+        )
+
+    def __del__(self):
+        if self._socket is not None:
+            try:
+                self._socket.close(0)
+            except Exception:
+                pass
+        if self._context is not None:
+            try:
+                self._context.term()
+            except Exception:
+                pass
+        try:
+            super().__del__()
+        except AttributeError:
+            pass
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
+        resolved_ids: list[int] = []
+        resolved_names: list[str] = []
+        for joint_name in joint_names:
+            joint_ids, matched_names = self._asset.find_joints([f"^{joint_name}$"])
+            if len(joint_ids) != 1:
+                raise ValueError(
+                    f"Expected exactly one joint match for '{joint_name}' on asset '{self.cfg.asset_name}', "
+                    f"but got {len(joint_ids)} matches: {matched_names}"
+                )
+            resolved_ids.append(int(joint_ids[0]))
+            resolved_names.append(matched_names[0])
+        return resolved_ids, resolved_names
+
+    def _connect_receiver(self) -> None:
+        try:
+            import msgpack
+            import zmq
+        except ModuleNotFoundError as exc:
+            print(
+                "[IsaacLab] [SonicDeployTarget] WARNING "
+                f"{exc.name} is not installed; holding sonic_robot default pose."
+            )
+            return
+
+        self._zmq = zmq
+        self._msgpack = msgpack
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.SUB)
+        self._socket.setsockopt(zmq.SUBSCRIBE, self._topic)
+        self._socket.setsockopt(zmq.RCVHWM, 1)
+        try:
+            self._socket.setsockopt(zmq.CONFLATE, 1)
+        except zmq.ZMQError:
+            pass
+        self._socket.connect(self.cfg.endpoint)
+        self._receiver_ready = True
+
+    def _drain_latest_packet(self) -> dict | None:
+        if not self._receiver_ready or self._socket is None or self._zmq is None or self._msgpack is None:
+            return None
+
+        latest_payload = None
+        while True:
+            try:
+                raw = self._socket.recv(flags=self._zmq.NOBLOCK)
+            except self._zmq.Again:
+                break
+
+            if not raw.startswith(self._topic):
+                continue
+            latest_payload = raw[len(self._topic):]
+
+        if latest_payload is None:
+            return None
+
+        try:
+            payload = self._msgpack.unpackb(latest_payload, raw=False, strict_map_key=False)
+        except Exception as exc:
+            print(f"[IsaacLab] [SonicDeployTarget] WARNING failed to unpack msgpack payload: {exc}")
+            return None
+
+        if not isinstance(payload, dict):
+            print(f"[IsaacLab] [SonicDeployTarget] WARNING expected msgpack map, got {type(payload).__name__}")
+            return None
+        self._last_packet_time = time.monotonic()
+        self._packet_count += 1
+        return payload
+
+    def _extract_target(self, payload: dict) -> torch.Tensor | None:
+        field_names = [self.cfg.target_field]
+        if self.cfg.fallback_to_last_action:
+            field_names.append("last_action")
+        if self.cfg.fallback_to_measured:
+            field_names.extend(("body_q_measured", "body_q"))
+
+        target_values = None
+        target_field = None
+        for field_name in field_names:
+            if field_name in payload:
+                target_values = payload[field_name]
+                target_field = field_name
+                break
+        if target_values is None:
+            if self._packet_count <= 3:
+                print(
+                    "[IsaacLab] [SonicDeployTarget] WARNING "
+                    f"none of target fields {field_names} found; payload keys={list(payload.keys())}"
+                )
+            return None
+
+        target = torch.tensor(target_values, device=self.device, dtype=torch.float32).flatten()
+        if target.numel() != len(SONIC_G1_29DOF_JOINT_ORDER):
+            print(
+                "[IsaacLab] [SonicDeployTarget] WARNING "
+                f"field {target_field!r} has {target.numel()} values, expected 29"
+            )
+            return None
+        if self._target_order == "mujoco":
+            target = target[self._isaac_to_mujoco_index]
+        return target.unsqueeze(0).repeat(self.num_envs, 1)
+
+    def _apply_target_rate_limit(self, target: torch.Tensor) -> torch.Tensor:
+        max_delta = float(self.cfg.target_rate_limit_rad_per_step)
+        if max_delta <= 0.0:
+            self._last_target_step_delta_absmax = torch.max(
+                torch.abs(target - self._processed_actions), dim=-1
+            ).values
+            return target
+
+        delta = torch.clamp(target - self._processed_actions, min=-max_delta, max=max_delta)
+        self._last_target_step_delta_absmax = torch.max(torch.abs(delta), dim=-1).values
+        return self._processed_actions + delta
+
+    def process_actions(self, actions: torch.Tensor):
+        payload = self._drain_latest_packet()
+        if payload is not None:
+            target = self._extract_target(payload)
+            if target is not None:
+                self._processed_actions = self._apply_target_rate_limit(target)
+                if self.cfg.clip is not None:
+                    self._processed_actions = torch.clamp(
+                        self._processed_actions, min=self._clip[:, :, 0], max=self._clip[:, :, 1]
+                    )
+
+        stale_timeout_s = float(self.cfg.stale_timeout_s)
+        if (
+            stale_timeout_s > 0.0
+            and self._last_packet_time > 0.0
+            and time.monotonic() - self._last_packet_time > stale_timeout_s
+        ):
+            self._last_packet_time = 0.0
+            print(
+                "[IsaacLab] [SonicDeployTarget] WARNING "
+                f"no deploy target received for {stale_timeout_s:.2f}s; holding last target."
+            )
+
+        self._debug_counter += 1
+        if self.cfg.debug_log_interval > 0 and self._debug_counter % self.cfg.debug_log_interval == 0:
+            proc = self._processed_actions[0].detach().cpu()
+            print(
+                "[IsaacLab] [SonicDeployTarget] "
+                f"step={self._debug_counter} packets={self._packet_count} "
+                f"target_mean={proc.mean():+.4f} target_absmax={proc.abs().max():.4f} "
+                f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f}"
+            )
+
+    def apply_actions(self):
+        self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._processed_actions.copy_(self._default_joint_pos)
+            self._last_target_step_delta_absmax.zero_()
+            return
+        self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
+        self._last_target_step_delta_absmax[env_ids] = 0.0
 
 
 class AgileBasedLowerBodyAction(ActionTerm):
