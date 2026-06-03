@@ -463,8 +463,8 @@ class ActionsCfg:
     sonic_wholebody = SonicDeployTargetActionCfg(
         asset_name="sonic_robot",
         joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-        endpoint="tcp://127.0.0.1:5557",
-        topic="g1_debug",
+        endpoint=os.environ.get("SONIC_DEPLOY_ENDPOINT", "tcp://127.0.0.1:5557"),
+        topic=os.environ.get("SONIC_DEPLOY_TOPIC", "g1_debug"),
         target_field="body_q_target",
         target_order="mujoco",
         target_rate_limit_rad_per_step=0.08,
