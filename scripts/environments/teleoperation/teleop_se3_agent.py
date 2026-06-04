@@ -74,8 +74,10 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.manager_based.manipulation.lift import mdp
 from isaaclab_tasks.utils import parse_env_cfg
 
-if args_cli.enable_pinocchio:
+if args_cli.task and "Locomanipulation" in args_cli.task:
     import isaaclab_tasks.manager_based.locomanipulation.pick_place  # noqa: F401
+
+if args_cli.enable_pinocchio:
     import isaaclab_tasks.manager_based.manipulation.pick_place  # noqa: F401
 
 # import logger
