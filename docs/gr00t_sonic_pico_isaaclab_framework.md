@@ -22,7 +22,7 @@ flowchart LR
 
     Mujoco[MuJoCo run_sim_loop.py<br/>短期 LowState 来源] -->|LowState| Deploy
 
-    Deploy -->|ZMQ 发布 g1_debug.body_q_target<br/>默认 tcp://127.0.0.1:5557| IsaacTeleop[teleop_se3_agent.py]
+    Deploy -->|ZMQ 发布 g1_debug.last_action<br/>默认 tcp://127.0.0.1:5557| IsaacTeleop[teleop_se3_agent.py]
     Deploy --> LongDdsCmd[长期 Unitree DDS rt/lowcmd]
     LongDdsCmd --> IsaacTeleop
 
@@ -42,7 +42,7 @@ flowchart LR
 ```text
 GR00T deploy
   -> ZMQ topic: g1_debug
-  -> msgpack field: body_q_target
+  -> msgpack field: last_action
   -> MuJoCo / Unitree motor order 29DoF
   -> IsaacLab SonicDeployTargetAction
   -> remap to IsaacLab/SONIC joint order
@@ -109,7 +109,7 @@ sequenceDiagram
     Pico->>PM: XR / 手柄 / 姿态输入
     PM->>Deploy: ZMQ manager 输入
     Deploy->>Deploy: SONIC encoder / decoder
-    Deploy->>Isaac: ZMQ g1_debug.body_q_target
+    Deploy->>Isaac: ZMQ g1_debug.last_action
     Isaac->>Isaac: env.step(zero_action)
     Isaac->>Action: process_actions()
     Action->>Action: 取最新 packet + 29DoF 顺序 remap
@@ -192,6 +192,7 @@ unset LOCIMANIP_ENABLE_WALKER_ROBOT
 export SONIC_DEPLOY_TRANSPORT=zmq
 export SONIC_DEPLOY_ENDPOINT=tcp://127.0.0.1:5557
 export SONIC_DEPLOY_TOPIC=g1_debug
+export SONIC_DEPLOY_TARGET_FIELD=last_action
 
 ./isaaclab.sh -p scripts/environments/teleoperation/teleop_se3_agent.py \
   --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 \
@@ -208,12 +209,13 @@ deploy ZMQ 包当前消费字段：
 | --- | --- |
 | topic | `g1_debug` |
 | payload format | msgpack map |
-| target field | `body_q_target` |
+| target field | `last_action` |
 | target dim | 29 |
 | input order | MuJoCo / Unitree motor order |
 | IsaacLab action term | `SonicDeployTargetAction` |
 
 `SonicDeployTargetAction` 会把 MuJoCo / Unitree 顺序 remap 到 IsaacLab/SONIC joint order，然后写入 `sonic_robot` 的 joint position target。
+直接 GR00T/SONIC deploy 默认消费 `last_action`，因为它是已经按 `g1_action_scale + default_angles` 转成电机 q 的实际策略输出。`body_q_target` 是 motion/reference 可视化目标，当前只作为 fallback 或 DDS proxy 转发 LowCmd.q 时的兼容字段。
 
 ## 稳定策略
 

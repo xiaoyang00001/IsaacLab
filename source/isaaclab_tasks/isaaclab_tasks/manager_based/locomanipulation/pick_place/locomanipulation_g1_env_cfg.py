@@ -77,11 +77,13 @@ def _env_flag(name: str, default: bool) -> bool:
 
 SONIC_G1_PHYSICS_MODE = _env_flag("SONIC_G1_PHYSICS_MODE", False)
 SONIC_G1_FIX_ROOT = not SONIC_G1_PHYSICS_MODE
+SONIC_G1_VISUAL_SERVO_MODE = _env_flag("SONIC_G1_VISUAL_SERVO_MODE", SONIC_G1_FIX_ROOT)
 ENABLE_WALKER_ROBOT = _env_flag("LOCIMANIP_ENABLE_WALKER_ROBOT", False) and SONIC_G1_PHYSICS_MODE
 print(
     "[locomanip_cfg] "
     f"SONIC_G1_FIX_ROOT={SONIC_G1_FIX_ROOT} "
     f"SONIC_G1_PHYSICS_MODE={SONIC_G1_PHYSICS_MODE} "
+    f"SONIC_G1_VISUAL_SERVO_MODE={SONIC_G1_VISUAL_SERVO_MODE} "
     f"ENABLE_WALKER_ROBOT={ENABLE_WALKER_ROBOT} "
     f"legacy_SONIC_G1_FIX_ROOT_env={os.environ.get('SONIC_G1_FIX_ROOT', '<unset>')!r}"
 )
@@ -115,6 +117,9 @@ WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 # （来自 BeyondMimic / whole_body_tracking）。NATURAL_FREQ=10Hz、DAMPING_RATIO=2.0，
 # 各 actuator armature 配 stiffness=armature×NATURAL_FREQ²、damping=2×DAMPING_RATIO×armature×NATURAL_FREQ。
 # 注意：不动 G1_29DOF_CFG（robot / walker_robot / remote_robot 仍用 IsaacLab DCMotor）。
+# 默认 fixed-root deploy 验证是“目标可视化”，不是完整物理闭环；这里会在定义完训练 PD
+# 后按 SONIC_G1_VISUAL_SERVO_MODE 切回 IsaacLab 原始高刚度位置伺服，让手臂更忠实跟随
+# GR00T/SONIC deploy 的实际 motor target。设置 SONIC_G1_VISUAL_SERVO_MODE=0 可恢复训练 PD。
 from isaaclab.actuators import ImplicitActuatorCfg as _SonicImplicitActuatorCfg
 
 _SONIC_ARMATURE_5020 = 0.003609725
@@ -263,6 +268,8 @@ SONIC_G1_29DOF_CFG.actuators = {
         },
     ),
 }
+if SONIC_G1_VISUAL_SERVO_MODE:
+    SONIC_G1_29DOF_CFG.actuators = deepcopy(G1_29DOF_CFG.actuators)
 
 # SONIC ONNX 模型路径（由 download_from_hf.py 下载，详见 docs/GR00T_WholeBodyControl_集成计划.md）
 SONIC_ENCODER_PATH = r"D:/src/Isaac/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release/model_encoder.onnx"
@@ -516,11 +523,13 @@ class ActionsCfg:
             joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
             endpoint=os.environ.get("SONIC_DEPLOY_ENDPOINT", "tcp://127.0.0.1:5557"),
             topic=os.environ.get("SONIC_DEPLOY_TOPIC", "g1_debug"),
-            target_field="body_q_target",
+            target_field=os.environ.get("SONIC_DEPLOY_TARGET_FIELD", "last_action"),
             target_order="mujoco",
             target_rate_limit_rad_per_step=0.08,
             stabilize_root_pose=SONIC_G1_FIX_ROOT,
             stale_timeout_s=0.5,
+            fallback_to_last_action=True,
+            fallback_to_body_q_target=True,
             debug_log_interval=50,
         )
 

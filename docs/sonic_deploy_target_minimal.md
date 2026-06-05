@@ -18,7 +18,7 @@
 Pico / pose input
   -> GR00T-WholeBodyControl deploy
   -> SONIC encoder + decoder
-  -> ZMQ PUB g1_debug.body_q_target, MuJoCo order, 29 DoF
+  -> ZMQ PUB g1_debug.last_action, MuJoCo order, 29 DoF
   -> IsaacLab SonicDeployTargetAction
   -> sonic_robot joint position targets
 ```
@@ -95,6 +95,7 @@ Could not locate cyclonedds. Try to set CYCLONEDDS_HOME or CMAKE_PREFIX_PATH
 $env:SONIC_DEPLOY_TRANSPORT="zmq"
 $env:SONIC_DEPLOY_ENDPOINT="tcp://<GR00T_MACHINE_IP>:5557"
 $env:SONIC_DEPLOY_TOPIC="g1_debug"
+$env:SONIC_DEPLOY_TARGET_FIELD="last_action"
 .\isaaclab.bat -p scripts\environments\teleoperation\teleop_se3_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0
 ```
 
@@ -144,6 +145,7 @@ Windows IsaacLab 机器消费代理转出的 ZMQ 流：
 $env:SONIC_DEPLOY_TRANSPORT="zmq"
 $env:SONIC_DEPLOY_ENDPOINT="tcp://<GR00T_MACHINE_IP>:5557"
 $env:SONIC_DEPLOY_TOPIC="g1_debug"
+$env:SONIC_DEPLOY_TARGET_FIELD="body_q_target"
 .\isaaclab.bat -p scripts\environments\teleoperation\teleop_se3_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0
 ```
 
@@ -172,6 +174,7 @@ IsaacLab DDS 模式：
 SONIC_DEPLOY_TRANSPORT=zmq|dds
 SONIC_DEPLOY_ENDPOINT=tcp://<host>:5557
 SONIC_DEPLOY_TOPIC=g1_debug
+SONIC_DEPLOY_TARGET_FIELD=last_action
 UNITREE_DDS_DOMAIN_ID=0
 UNITREE_DDS_INTERFACE=<interface-name>
 UNITREE_LOWCMD_TOPIC=rt/lowcmd

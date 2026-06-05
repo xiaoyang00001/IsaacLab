@@ -158,8 +158,8 @@ class SonicDeployTargetAction(ActionTerm):
     GR00T deploy publishes a single-part ZMQ message:
         [topic_prefix][msgpack payload]
 
-    The minimal IsaacLab bridge consumes `body_q_target` and writes it directly
-    as joint position targets for `sonic_robot`.
+    The minimal IsaacLab bridge consumes deploy motor targets and writes them
+    directly as joint position targets for `sonic_robot`.
     """
 
     cfg: SonicDeployTargetActionCfg
@@ -322,11 +322,24 @@ class SonicDeployTargetAction(ActionTerm):
         return payload
 
     def _extract_target(self, payload: dict) -> torch.Tensor | None:
-        field_names = [self.cfg.target_field]
+        field_names: list[str] = []
+
+        def _append_field_name(field_name: str) -> None:
+            field_name = field_name.strip()
+            if field_name and field_name not in field_names:
+                field_names.append(field_name)
+
+        # Allow comma-separated overrides such as
+        # SONIC_DEPLOY_TARGET_FIELD=last_action,body_q_target during debugging.
+        for field_name in str(self.cfg.target_field).split(","):
+            _append_field_name(field_name)
         if self.cfg.fallback_to_last_action:
-            field_names.append("last_action")
+            _append_field_name("last_action")
+        if getattr(self.cfg, "fallback_to_body_q_target", True):
+            _append_field_name("body_q_target")
         if self.cfg.fallback_to_measured:
-            field_names.extend(("body_q_measured", "body_q"))
+            _append_field_name("body_q_measured")
+            _append_field_name("body_q")
 
         target_values = None
         target_field = None
@@ -346,13 +359,19 @@ class SonicDeployTargetAction(ActionTerm):
         if target.numel() != len(SONIC_G1_29DOF_JOINT_ORDER):
             self._log_warning(f"field {target_field!r} has {target.numel()} values, expected 29")
             return None
-        if self._target_order == "mujoco":
+        packet_target_order = str(payload.get("target_order", self._target_order)).lower()
+        if packet_target_order not in ("mujoco", "isaaclab"):
+            self._log_warning(
+                f"payload target_order={packet_target_order!r} is invalid; using cfg order {self._target_order!r}"
+            )
+            packet_target_order = self._target_order
+        if packet_target_order == "mujoco":
             target = target[self._isaac_to_mujoco_index]
         if not self._first_target_logged:
             self._first_target_logged = True
             target_cpu = target.detach().cpu()
             self._log_info(
-                f"first target parsed field={target_field!r} order={self._target_order} "
+                f"first target parsed field={target_field!r} order={packet_target_order} "
                 f"mean={target_cpu.mean():+.4f} absmax={target_cpu.abs().max():.4f}"
             )
         return target.unsqueeze(0).repeat(self.num_envs, 1)

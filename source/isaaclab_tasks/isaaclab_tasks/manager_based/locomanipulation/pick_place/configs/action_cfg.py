@@ -104,11 +104,16 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     topic: str = "g1_debug"
     """Topic prefix published by GR00T deploy."""
 
-    target_field: str = "body_q_target"
-    """Msgpack field to consume as the 29-DoF joint target."""
+    target_field: str = "last_action"
+    """Msgpack field to consume as the 29-DoF joint target.
+
+    Direct GR00T/SONIC deploy publishes ``last_action`` as the scaled motor
+    target with default offsets. ``body_q_target`` is the motion/reference
+    visualization target and is kept as a fallback for simple proxy tools.
+    """
 
     target_order: str = "mujoco"
-    """Input joint order. GR00T deploy documents body_q_target as MuJoCo order."""
+    """Input joint order. GR00T deploy/debug joint arrays are in MuJoCo order."""
 
     target_rate_limit_rad_per_step: float = 0.08
     """Optional per-step target clamp to reduce abrupt deploy/sim startup jumps. 0 disables it."""
@@ -120,7 +125,10 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 
     fallback_to_last_action: bool = False
-    """If body_q_target is absent, optionally consume deploy last_action."""
+    """If the preferred target field is absent, optionally consume deploy last_action."""
+
+    fallback_to_body_q_target: bool = True
+    """If the preferred target field is absent, optionally consume body_q_target."""
 
     fallback_to_measured: bool = False
     """If target fields are absent, optionally fall back to measured body_q fields."""
