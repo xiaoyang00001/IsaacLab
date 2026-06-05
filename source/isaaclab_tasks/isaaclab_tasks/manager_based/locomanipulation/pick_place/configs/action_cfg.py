@@ -115,7 +115,7 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     target_order: str = "mujoco"
     """Input joint order. GR00T deploy/debug joint arrays are in MuJoCo order."""
 
-    target_rate_limit_rad_per_step: float = 0.08
+    target_rate_limit_rad_per_step: float = 0.16
     """Optional per-step target clamp to reduce abrupt deploy/sim startup jumps. 0 disables it."""
 
     stabilize_root_pose: bool = True
@@ -139,6 +139,9 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     blend_reference_lower_body: bool = True
     """Use reference_target_field for legs and waist while keeping target_field for arms."""
 
+    hold_last_reference_target: bool = True
+    """Hold the last valid lower-body reference when deploy sends an empty reference frame."""
+
     follow_base_yaw_target: bool = True
     """Rotate the fixed root yaw from deploy base_quat_target."""
 
@@ -151,14 +154,26 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     base_trans_target_field: str = "base_trans_target"
     """Msgpack translation field used by follow_base_translation_target."""
 
-    base_yaw_rate_limit_rad_per_step: float = 0.08
+    base_yaw_rate_limit_rad_per_step: float = 0.12
     """Optional per-step root yaw clamp. 0 disables it."""
 
-    base_translation_rate_limit_m_per_step: float = 0.04
+    base_translation_rate_limit_m_per_step: float = 0.08
     """Optional per-step root XY clamp. 0 disables it."""
 
-    base_translation_scale: float = 1.0
+    base_translation_scale: float = 2.0
     """Scale applied to deploy base_trans_target XY deltas."""
+
+    synthetic_base_motion_from_lower_body: bool = True
+    """Generate visual root XY motion from leg activity when base_trans_target is static."""
+
+    synthetic_base_motion_gain: float = 0.35
+    """Meters of visual root travel per radian of lower-body target change."""
+
+    synthetic_base_motion_deadzone: float = 0.002
+    """Mean lower-body target delta below this value does not move the visual root."""
+
+    synthetic_base_motion_max_step_m: float = 0.035
+    """Maximum synthetic root translation per apply step."""
 
     debug_log_interval: int = 50
     """Print target statistics every N control steps. 0 disables periodic logging."""

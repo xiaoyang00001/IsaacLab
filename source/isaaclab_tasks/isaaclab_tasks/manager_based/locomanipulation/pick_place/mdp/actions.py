@@ -197,7 +197,12 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_anchor_logged = False
         self._base_trans_target: torch.Tensor | None = None
         self._initial_base_target_pos: torch.Tensor | None = None
+        self._previous_base_trans_target: torch.Tensor | None = None
+        self._base_translation_goal_xy: torch.Tensor | None = None
         self._last_root_xy_target: torch.Tensor | None = None
+        self._previous_lower_body_target: torch.Tensor | None = None
+        self._last_reference_target: torch.Tensor | None = None
+        self._last_root_motion_source = "none"
         self._base_quat_target: torch.Tensor | None = None
         self._initial_base_target_yaw: torch.Tensor | None = None
         self._root_anchor_yaw: torch.Tensor | None = None
@@ -219,7 +224,9 @@ class SonicDeployTargetAction(ActionTerm):
             f"resolved={len(self._joint_ids)} joints receiver_ready={self._receiver_ready} "
             f"reference_lower_body={bool(cfg.blend_reference_lower_body)} "
             f"reference_joints={len(reference_joint_ids)} "
+            f"hold_reference={bool(cfg.hold_last_reference_target)} "
             f"follow_base_translation={bool(cfg.follow_base_translation_target)} "
+            f"synthetic_base_motion={bool(cfg.synthetic_base_motion_from_lower_body)} "
             f"follow_base_yaw={bool(cfg.follow_base_yaw_target)} "
             f"env_endpoint={os.environ.get('SONIC_DEPLOY_ENDPOINT', '<unset>')!r} "
             f"env_topic={os.environ.get('SONIC_DEPLOY_TOPIC', '<unset>')!r}"
@@ -449,6 +456,8 @@ class SonicDeployTargetAction(ActionTerm):
             payload, reference_field_names, log_missing=False
         )
         reference_used = False
+        reference_to_apply = None
+        reference_label = "<none>"
         if (
             reference is not None
             and bool(self.cfg.blend_reference_lower_body)
@@ -456,11 +465,22 @@ class SonicDeployTargetAction(ActionTerm):
         ):
             reference_lower = reference[:, self._reference_joint_indices]
             if torch.max(torch.abs(reference_lower)).item() > 1.0e-4:
-                target[:, self._reference_joint_indices] = reference_lower
-                reference_used = True
+                self._last_reference_target = reference.clone()
+                reference_to_apply = reference
+                reference_label = str(reference_field)
+        if (
+            reference_to_apply is None
+            and bool(self.cfg.hold_last_reference_target)
+            and self._last_reference_target is not None
+        ):
+            reference_to_apply = self._last_reference_target
+            reference_label = f"{self.cfg.reference_target_field}:hold"
+        if reference_to_apply is not None and self._reference_joint_indices.numel() > 0:
+            target[:, self._reference_joint_indices] = reference_to_apply[:, self._reference_joint_indices]
+            reference_used = True
 
         self._last_target_field = str(target_field)
-        self._last_reference_field = str(reference_field) if reference_used else "<none>"
+        self._last_reference_field = reference_label if reference_used else "<none>"
         base_trans_target = self._extract_base_trans_target(payload)
         if base_trans_target is not None:
             self._base_trans_target = base_trans_target
@@ -512,22 +532,82 @@ class SonicDeployTargetAction(ActionTerm):
                 )
                 self._root_anchor_logged = True
         root_pose_target = self._root_pose_anchor.clone()
+        desired_xy = (
+            self._last_root_xy_target.clone()
+            if self._last_root_xy_target is not None
+            else self._root_pose_anchor[:, :2].clone()
+        )
+        self._last_root_xy_step_norm.zero_()
+        self._last_root_motion_source = "none"
+        base_desired_xy = None
+
         if bool(self.cfg.follow_base_translation_target) and self._base_trans_target is not None:
             if self._initial_base_target_pos is None:
                 self._initial_base_target_pos = self._base_trans_target.clone()
-            desired_xy = self._root_pose_anchor[:, :2] + (
-                self._base_trans_target[:, :2] - self._initial_base_target_pos[:, :2]
-            ) * float(self.cfg.base_translation_scale)
+                self._previous_base_trans_target = self._base_trans_target.clone()
+            if self._previous_base_trans_target is None:
+                self._previous_base_trans_target = self._base_trans_target.clone()
+
+            base_target_step = torch.linalg.norm(
+                self._base_trans_target[:, :2] - self._previous_base_trans_target[:, :2], dim=-1
+            )
+            if torch.max(base_target_step).item() > 1.0e-6:
+                self._base_translation_goal_xy = self._root_pose_anchor[:, :2] + (
+                    self._base_trans_target[:, :2] - self._initial_base_target_pos[:, :2]
+                ) * float(self.cfg.base_translation_scale)
+            self._previous_base_trans_target = self._base_trans_target.clone()
+
+            base_desired_xy = self._base_translation_goal_xy
+        if base_desired_xy is not None:
+            base_goal_xy = base_desired_xy
             max_delta = float(self.cfg.base_translation_rate_limit_m_per_step)
             if max_delta > 0.0 and self._last_root_xy_target is not None:
-                xy_delta = desired_xy - self._last_root_xy_target
+                xy_delta = base_desired_xy - self._last_root_xy_target
                 delta_norm = torch.linalg.norm(xy_delta, dim=-1, keepdim=True).clamp_min(1.0e-6)
                 scale = torch.clamp(max_delta / delta_norm, max=1.0)
-                desired_xy = self._last_root_xy_target + xy_delta * scale
-            if self._last_root_xy_target is not None:
-                self._last_root_xy_step_norm = torch.linalg.norm(desired_xy - self._last_root_xy_target, dim=-1)
-            self._last_root_xy_target = desired_xy.clone()
-            root_pose_target[:, :2] = desired_xy
+                base_desired_xy = self._last_root_xy_target + xy_delta * scale
+            if (
+                self._last_root_xy_target is None
+                or torch.max(torch.linalg.norm(base_desired_xy - self._last_root_xy_target, dim=-1)).item() > 1.0e-6
+            ):
+                desired_xy = base_desired_xy
+                self._last_root_motion_source = "base_trans"
+            if torch.max(torch.linalg.norm(base_goal_xy - desired_xy, dim=-1)).item() <= 1.0e-5:
+                self._base_translation_goal_xy = None
+
+        if (
+            self._last_root_motion_source == "none"
+            and bool(self.cfg.synthetic_base_motion_from_lower_body)
+            and self._reference_joint_indices.numel() > 0
+        ):
+            lower_target = self._processed_actions[:, self._reference_joint_indices]
+            if self._previous_lower_body_target is None:
+                self._previous_lower_body_target = lower_target.clone()
+            lower_activity = torch.mean(torch.abs(lower_target - self._previous_lower_body_target), dim=-1)
+            self._previous_lower_body_target = lower_target.clone()
+            synthetic_step = torch.clamp(
+                (lower_activity - float(self.cfg.synthetic_base_motion_deadzone))
+                * float(self.cfg.synthetic_base_motion_gain),
+                min=0.0,
+                max=float(self.cfg.synthetic_base_motion_max_step_m),
+            )
+            if torch.max(synthetic_step).item() > 1.0e-6:
+                motion_yaw = (
+                    self._last_root_yaw_target
+                    if self._last_root_yaw_target is not None
+                    else self._root_anchor_yaw
+                )
+                if motion_yaw is None:
+                    motion_yaw = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+                forward = torch.stack([torch.cos(motion_yaw), torch.sin(motion_yaw)], dim=-1)
+                desired_xy = desired_xy + forward * synthetic_step.unsqueeze(-1)
+                self._last_root_motion_source = "synthetic"
+
+        if self._last_root_xy_target is not None:
+            self._last_root_xy_step_norm = torch.linalg.norm(desired_xy - self._last_root_xy_target, dim=-1)
+        self._last_root_xy_target = desired_xy.clone()
+        root_pose_target[:, :2] = desired_xy
+
         if bool(self.cfg.follow_base_yaw_target) and self._base_quat_target is not None:
             base_target_yaw = self._yaw_from_quat(self._base_quat_target)
             if self._initial_base_target_yaw is None:
@@ -574,7 +654,8 @@ class SonicDeployTargetAction(ActionTerm):
                 f"field={self._last_target_field} ref={self._last_reference_field} "
                 f"target_mean={proc.mean():+.4f} target_absmax={proc.abs().max():.4f} "
                 f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f} "
-                f"root_xy_step={self._last_root_xy_step_norm[0].item():.4f}"
+                f"root_xy_step={self._last_root_xy_step_norm[0].item():.4f} "
+                f"root_src={self._last_root_motion_source}"
             )
 
     def apply_actions(self):
@@ -589,7 +670,12 @@ class SonicDeployTargetAction(ActionTerm):
             self._root_pose_anchor = None
             self._base_trans_target = None
             self._initial_base_target_pos = None
+            self._previous_base_trans_target = None
+            self._base_translation_goal_xy = None
             self._last_root_xy_target = None
+            self._previous_lower_body_target = None
+            self._last_reference_target = None
+            self._last_root_motion_source = "none"
             self._base_quat_target = None
             self._initial_base_target_yaw = None
             self._root_anchor_yaw = None
@@ -601,7 +687,12 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_pose_anchor = None
         self._base_trans_target = None
         self._initial_base_target_pos = None
+        self._previous_base_trans_target = None
+        self._base_translation_goal_xy = None
         self._last_root_xy_target = None
+        self._previous_lower_body_target = None
+        self._last_reference_target = None
+        self._last_root_motion_source = "none"
         self._base_quat_target = None
         self._initial_base_target_yaw = None
         self._root_anchor_yaw = None

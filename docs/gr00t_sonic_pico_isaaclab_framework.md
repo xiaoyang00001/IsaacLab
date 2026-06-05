@@ -193,10 +193,15 @@ export SONIC_DEPLOY_TRANSPORT=zmq
 export SONIC_DEPLOY_ENDPOINT=tcp://127.0.0.1:5557
 export SONIC_DEPLOY_TOPIC=g1_debug
 export SONIC_DEPLOY_TARGET_FIELD=last_action
+export SONIC_DEPLOY_TARGET_RATE_LIMIT=0.16
 export SONIC_DEPLOY_REFERENCE_TARGET_FIELD=body_q_target
 export SONIC_DEPLOY_BLEND_REFERENCE_LOWER_BODY=1
+export SONIC_DEPLOY_HOLD_LAST_REFERENCE=1
 export SONIC_DEPLOY_FOLLOW_BASE_YAW=1
 export SONIC_DEPLOY_FOLLOW_BASE_TRANSLATION=1
+export SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT=0.08
+export SONIC_DEPLOY_BASE_TRANSLATION_SCALE=2.0
+export SONIC_DEPLOY_SYNTHETIC_BASE_MOTION=1
 
 ./isaaclab.sh -p scripts/environments/teleoperation/teleop_se3_agent.py \
   --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 \
@@ -222,7 +227,9 @@ deploy ZMQ 包当前消费字段：
 | IsaacLab action term | `SonicDeployTargetAction` |
 
 `SonicDeployTargetAction` 会把 MuJoCo / Unitree 顺序 remap 到 IsaacLab/SONIC joint order，然后写入 `sonic_robot` 的 joint position target。
-直接 GR00T/SONIC deploy 默认用 `last_action` 驱动上肢，因为它是已经按 `g1_action_scale + default_angles` 转成电机 q 的实际策略输出。为了让 fixed-root 可视化机器人也能转身和行走，当前会用 `body_q_target` 覆盖腿部和腰部目标，用 `base_quat_target` 的相对 yaw 旋转 root，并用 `base_trans_target` 的相对 XY 平移 root。若 `body_q_target` 或 `base_trans_target` 是全零占位，则不会使用对应 reference。
+直接 GR00T/SONIC deploy 默认用 `last_action` 驱动上肢，因为它是已经按 `g1_action_scale + default_angles` 转成电机 q 的实际策略输出。为了让 fixed-root 可视化机器人也能转身和行走，当前会用 `body_q_target` 覆盖腿部和腰部目标，用 `base_quat_target` 的相对 yaw 旋转 root，并用 `base_trans_target` 的相对 XY 平移 root。
+
+如果 deploy 偶尔发送空的 `body_q_target`，IsaacLab 默认保持上一帧有效下半身 reference，避免腿和腰抖回 `last_action`。如果 `base_trans_target` 长时间静止，但腿部 reference 已经在走，IsaacLab 会从下半身目标变化合成一个小的可视 root 平移，让固定 root 调试模式下也能看出“向前走”的效果。这个合成平移只用于 ZMQ target 可视化调试；长期物理正确路径仍然是 Unitree DDS 闭环，由 IsaacLab 发布 LowState 让 deploy 自己闭环产生稳定步态。
 
 ## 稳定策略
 
