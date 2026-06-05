@@ -135,7 +135,7 @@ def main() -> None:
     deploy_target_mode = bool(
         args_cli.task
         and "Locomanipulation" in args_cli.task
-        and os.environ.get("SONIC_DEPLOY_TRANSPORT", "").lower() in ("zmq", "dds")
+        and os.environ.get("SONIC_DEPLOY_TRANSPORT", "zmq").lower() in ("zmq", "dds")
     )
 
     # Callback handlers
