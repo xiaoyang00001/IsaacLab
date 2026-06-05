@@ -172,6 +172,12 @@ class SonicDeployTargetAction(ActionTerm):
         self._default_joint_pos = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
         self._processed_actions = self._default_joint_pos.clone()
         self._raw_actions = torch.zeros((self.num_envs, 0), device=self.device)
+        reference_joint_ids = [
+            idx
+            for idx, joint_name in enumerate(self._joint_names)
+            if any(token in joint_name for token in ("_hip_", "_knee_", "_ankle_", "waist_"))
+        ]
+        self._reference_joint_indices = torch.tensor(reference_joint_ids, device=self.device, dtype=torch.long)
 
         self._topic = cfg.topic.encode("utf-8")
         self._context = None
@@ -188,6 +194,12 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_pose_anchor: torch.Tensor | None = None
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
+        self._base_quat_target: torch.Tensor | None = None
+        self._initial_base_target_yaw: torch.Tensor | None = None
+        self._root_anchor_yaw: torch.Tensor | None = None
+        self._last_root_yaw_target: torch.Tensor | None = None
+        self._last_target_field = "<none>"
+        self._last_reference_field = "<none>"
 
         self._target_order = str(cfg.target_order).lower()
         if self._target_order not in ("mujoco", "isaaclab"):
@@ -201,6 +213,9 @@ class SonicDeployTargetAction(ActionTerm):
             f"asset={cfg.asset_name} endpoint={cfg.endpoint} topic={cfg.topic!r} "
             f"field={cfg.target_field!r} target_order={self._target_order} "
             f"resolved={len(self._joint_ids)} joints receiver_ready={self._receiver_ready} "
+            f"reference_lower_body={bool(cfg.blend_reference_lower_body)} "
+            f"reference_joints={len(reference_joint_ids)} "
+            f"follow_base_yaw={bool(cfg.follow_base_yaw_target)} "
             f"env_endpoint={os.environ.get('SONIC_DEPLOY_ENDPOINT', '<unset>')!r} "
             f"env_topic={os.environ.get('SONIC_DEPLOY_TOPIC', '<unset>')!r}"
         )
@@ -321,26 +336,47 @@ class SonicDeployTargetAction(ActionTerm):
             )
         return payload
 
-    def _extract_target(self, payload: dict) -> torch.Tensor | None:
+    @staticmethod
+    def _append_field_name(field_names: list[str], field_name: str) -> None:
+        field_name = field_name.strip()
+        if field_name and field_name not in field_names:
+            field_names.append(field_name)
+
+    @staticmethod
+    def _wrap_to_pi(angle: torch.Tensor) -> torch.Tensor:
+        return torch.atan2(torch.sin(angle), torch.cos(angle))
+
+    @staticmethod
+    def _yaw_from_quat(quat_wxyz: torch.Tensor) -> torch.Tensor:
+        w, x, y, z = quat_wxyz.unbind(dim=-1)
+        return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+    @staticmethod
+    def _quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
+        half_yaw = 0.5 * yaw
+        quat = torch.zeros(yaw.shape[0], 4, device=yaw.device, dtype=yaw.dtype)
+        quat[:, 0] = torch.cos(half_yaw)
+        quat[:, 3] = torch.sin(half_yaw)
+        return quat
+
+    def _primary_target_field_names(self) -> list[str]:
         field_names: list[str] = []
-
-        def _append_field_name(field_name: str) -> None:
-            field_name = field_name.strip()
-            if field_name and field_name not in field_names:
-                field_names.append(field_name)
-
         # Allow comma-separated overrides such as
         # SONIC_DEPLOY_TARGET_FIELD=last_action,body_q_target during debugging.
         for field_name in str(self.cfg.target_field).split(","):
-            _append_field_name(field_name)
+            self._append_field_name(field_names, field_name)
         if self.cfg.fallback_to_last_action:
-            _append_field_name("last_action")
+            self._append_field_name(field_names, "last_action")
         if getattr(self.cfg, "fallback_to_body_q_target", True):
-            _append_field_name("body_q_target")
+            self._append_field_name(field_names, "body_q_target")
         if self.cfg.fallback_to_measured:
-            _append_field_name("body_q_measured")
-            _append_field_name("body_q")
+            self._append_field_name(field_names, "body_q_measured")
+            self._append_field_name(field_names, "body_q")
+        return field_names
 
+    def _extract_joint_target_from_fields(
+        self, payload: dict, field_names: list[str], *, log_missing: bool
+    ) -> tuple[torch.Tensor | None, str | None]:
         target_values = None
         target_field = None
         for field_name in field_names:
@@ -349,16 +385,16 @@ class SonicDeployTargetAction(ActionTerm):
                 target_field = field_name
                 break
         if target_values is None:
-            if self._packet_count <= 3:
+            if log_missing and self._packet_count <= 3:
                 self._log_warning(
                     f"none of target fields {field_names} found; payload keys={list(payload.keys())}"
                 )
-            return None
+            return None, None
 
         target = torch.tensor(target_values, device=self.device, dtype=torch.float32).flatten()
         if target.numel() != len(SONIC_G1_29DOF_JOINT_ORDER):
             self._log_warning(f"field {target_field!r} has {target.numel()} values, expected 29")
-            return None
+            return None, None
         packet_target_order = str(payload.get("target_order", self._target_order)).lower()
         if packet_target_order not in ("mujoco", "isaaclab"):
             self._log_warning(
@@ -367,14 +403,63 @@ class SonicDeployTargetAction(ActionTerm):
             packet_target_order = self._target_order
         if packet_target_order == "mujoco":
             target = target[self._isaac_to_mujoco_index]
+        return target.unsqueeze(0).repeat(self.num_envs, 1), str(target_field)
+
+    def _extract_base_quat_target(self, payload: dict) -> torch.Tensor | None:
+        field_name = str(self.cfg.base_quat_target_field).strip()
+        if not field_name or field_name not in payload:
+            return None
+        quat = torch.tensor(payload[field_name], device=self.device, dtype=torch.float32).flatten()
+        if quat.numel() != 4:
+            if self._packet_count <= 3:
+                self._log_warning(f"field {field_name!r} has {quat.numel()} values, expected quaternion size 4")
+            return None
+        quat = quat / torch.linalg.norm(quat).clamp_min(1.0e-6)
+        return quat.unsqueeze(0).repeat(self.num_envs, 1)
+
+    def _extract_target(self, payload: dict) -> torch.Tensor | None:
+        target, target_field = self._extract_joint_target_from_fields(
+            payload, self._primary_target_field_names(), log_missing=True
+        )
+        if target is None:
+            return None
+
+        reference_field_names: list[str] = []
+        for field_name in str(self.cfg.reference_target_field).split(","):
+            self._append_field_name(reference_field_names, field_name)
+        reference, reference_field = self._extract_joint_target_from_fields(
+            payload, reference_field_names, log_missing=False
+        )
+        reference_used = False
+        if (
+            reference is not None
+            and bool(self.cfg.blend_reference_lower_body)
+            and self._reference_joint_indices.numel() > 0
+        ):
+            reference_lower = reference[:, self._reference_joint_indices]
+            if torch.max(torch.abs(reference_lower)).item() > 1.0e-4:
+                target[:, self._reference_joint_indices] = reference_lower
+                reference_used = True
+
+        self._last_target_field = str(target_field)
+        self._last_reference_field = str(reference_field) if reference_used else "<none>"
+        base_quat_target = self._extract_base_quat_target(payload)
+        if base_quat_target is not None:
+            self._base_quat_target = base_quat_target
+
         if not self._first_target_logged:
             self._first_target_logged = True
             target_cpu = target.detach().cpu()
+            ref_text = (
+                f" ref_field={self._last_reference_field!r} ref_joints={int(self._reference_joint_indices.numel())}"
+                if reference_used
+                else ""
+            )
             self._log_info(
-                f"first target parsed field={target_field!r} order={packet_target_order} "
+                f"first target parsed field={self._last_target_field!r}{ref_text} "
                 f"mean={target_cpu.mean():+.4f} absmax={target_cpu.abs().max():.4f}"
             )
-        return target.unsqueeze(0).repeat(self.num_envs, 1)
+        return target
 
     def _apply_target_rate_limit(self, target: torch.Tensor) -> torch.Tensor:
         max_delta = float(self.cfg.target_rate_limit_rad_per_step)
@@ -395,6 +480,8 @@ class SonicDeployTargetAction(ActionTerm):
             self._root_pose_anchor = torch.cat(
                 [self._asset.data.root_pos_w, self._asset.data.root_quat_w], dim=-1
             ).clone()
+            self._root_anchor_yaw = self._yaw_from_quat(self._root_pose_anchor[:, 3:7]).clone()
+            self._last_root_yaw_target = self._root_anchor_yaw.clone()
             if not self._root_anchor_logged:
                 anchor = self._root_pose_anchor[0].detach().cpu().tolist()
                 self._log_info(
@@ -402,7 +489,23 @@ class SonicDeployTargetAction(ActionTerm):
                     f"pos=({anchor[0]:+.3f}, {anchor[1]:+.3f}, {anchor[2]:+.3f})"
                 )
                 self._root_anchor_logged = True
-        self._asset.write_root_pose_to_sim(self._root_pose_anchor)
+        root_pose_target = self._root_pose_anchor.clone()
+        if bool(self.cfg.follow_base_yaw_target) and self._base_quat_target is not None:
+            base_target_yaw = self._yaw_from_quat(self._base_quat_target)
+            if self._initial_base_target_yaw is None:
+                self._initial_base_target_yaw = base_target_yaw.clone()
+            desired_yaw = self._root_anchor_yaw + self._wrap_to_pi(base_target_yaw - self._initial_base_target_yaw)
+            max_delta = float(self.cfg.base_yaw_rate_limit_rad_per_step)
+            if max_delta > 0.0 and self._last_root_yaw_target is not None:
+                yaw_delta = torch.clamp(
+                    self._wrap_to_pi(desired_yaw - self._last_root_yaw_target),
+                    min=-max_delta,
+                    max=max_delta,
+                )
+                desired_yaw = self._last_root_yaw_target + yaw_delta
+            self._last_root_yaw_target = desired_yaw.clone()
+            root_pose_target[:, 3:7] = self._quat_from_yaw(desired_yaw)
+        self._asset.write_root_pose_to_sim(root_pose_target)
         self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
 
     def process_actions(self, actions: torch.Tensor):
@@ -430,6 +533,7 @@ class SonicDeployTargetAction(ActionTerm):
             proc = self._processed_actions[0].detach().cpu()
             self._log_info(
                 f"step={self._debug_counter} packets={self._packet_count} "
+                f"field={self._last_target_field} ref={self._last_reference_field} "
                 f"target_mean={proc.mean():+.4f} target_absmax={proc.abs().max():.4f} "
                 f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f}"
             )
@@ -443,10 +547,18 @@ class SonicDeployTargetAction(ActionTerm):
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_target_step_delta_absmax.zero_()
             self._root_pose_anchor = None
+            self._base_quat_target = None
+            self._initial_base_target_yaw = None
+            self._root_anchor_yaw = None
+            self._last_root_yaw_target = None
             return
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
         self._root_pose_anchor = None
+        self._base_quat_target = None
+        self._initial_base_target_yaw = None
+        self._root_anchor_yaw = None
+        self._last_root_yaw_target = None
 
 
 class UnitreeDdsLowCmdAction(ActionTerm):

@@ -530,6 +530,11 @@ class ActionsCfg:
             stale_timeout_s=0.5,
             fallback_to_last_action=True,
             fallback_to_body_q_target=True,
+            reference_target_field=os.environ.get("SONIC_DEPLOY_REFERENCE_TARGET_FIELD", "body_q_target"),
+            blend_reference_lower_body=_env_flag("SONIC_DEPLOY_BLEND_REFERENCE_LOWER_BODY", True),
+            follow_base_yaw_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_YAW", True),
+            base_quat_target_field=os.environ.get("SONIC_DEPLOY_BASE_QUAT_FIELD", "base_quat_target"),
+            base_yaw_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_YAW_RATE_LIMIT", "0.08")),
             debug_log_interval=50,
         )
 

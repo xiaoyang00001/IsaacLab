@@ -133,6 +133,21 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     fallback_to_measured: bool = False
     """If target fields are absent, optionally fall back to measured body_q fields."""
 
+    reference_target_field: str = "body_q_target"
+    """Optional deploy reference field used for lower-body and waist visualization."""
+
+    blend_reference_lower_body: bool = True
+    """Use reference_target_field for legs and waist while keeping target_field for arms."""
+
+    follow_base_yaw_target: bool = True
+    """Rotate the fixed root yaw from deploy base_quat_target while keeping root position fixed."""
+
+    base_quat_target_field: str = "base_quat_target"
+    """Msgpack quaternion field used by follow_base_yaw_target."""
+
+    base_yaw_rate_limit_rad_per_step: float = 0.08
+    """Optional per-step root yaw clamp. 0 disables it."""
+
     debug_log_interval: int = 50
     """Print target statistics every N control steps. 0 disables periodic logging."""
 
