@@ -533,8 +533,12 @@ class ActionsCfg:
             reference_target_field=os.environ.get("SONIC_DEPLOY_REFERENCE_TARGET_FIELD", "body_q_target"),
             blend_reference_lower_body=_env_flag("SONIC_DEPLOY_BLEND_REFERENCE_LOWER_BODY", True),
             follow_base_yaw_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_YAW", True),
+            follow_base_translation_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_TRANSLATION", True),
             base_quat_target_field=os.environ.get("SONIC_DEPLOY_BASE_QUAT_FIELD", "base_quat_target"),
+            base_trans_target_field=os.environ.get("SONIC_DEPLOY_BASE_TRANS_FIELD", "base_trans_target"),
             base_yaw_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_YAW_RATE_LIMIT", "0.08")),
+            base_translation_rate_limit_m_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT", "0.04")),
+            base_translation_scale=float(os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_SCALE", "1.0")),
             debug_log_interval=50,
         )
 

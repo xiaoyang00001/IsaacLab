@@ -191,9 +191,13 @@ class SonicDeployTargetAction(ActionTerm):
         self._first_packet_logged = False
         self._first_target_logged = False
         self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        self._last_root_xy_step_norm = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
         self._root_pose_anchor: torch.Tensor | None = None
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
+        self._base_trans_target: torch.Tensor | None = None
+        self._initial_base_target_pos: torch.Tensor | None = None
+        self._last_root_xy_target: torch.Tensor | None = None
         self._base_quat_target: torch.Tensor | None = None
         self._initial_base_target_yaw: torch.Tensor | None = None
         self._root_anchor_yaw: torch.Tensor | None = None
@@ -215,6 +219,7 @@ class SonicDeployTargetAction(ActionTerm):
             f"resolved={len(self._joint_ids)} joints receiver_ready={self._receiver_ready} "
             f"reference_lower_body={bool(cfg.blend_reference_lower_body)} "
             f"reference_joints={len(reference_joint_ids)} "
+            f"follow_base_translation={bool(cfg.follow_base_translation_target)} "
             f"follow_base_yaw={bool(cfg.follow_base_yaw_target)} "
             f"env_endpoint={os.environ.get('SONIC_DEPLOY_ENDPOINT', '<unset>')!r} "
             f"env_topic={os.environ.get('SONIC_DEPLOY_TOPIC', '<unset>')!r}"
@@ -417,6 +422,19 @@ class SonicDeployTargetAction(ActionTerm):
         quat = quat / torch.linalg.norm(quat).clamp_min(1.0e-6)
         return quat.unsqueeze(0).repeat(self.num_envs, 1)
 
+    def _extract_base_trans_target(self, payload: dict) -> torch.Tensor | None:
+        field_name = str(self.cfg.base_trans_target_field).strip()
+        if not field_name or field_name not in payload:
+            return None
+        pos = torch.tensor(payload[field_name], device=self.device, dtype=torch.float32).flatten()
+        if pos.numel() != 3:
+            if self._packet_count <= 3:
+                self._log_warning(f"field {field_name!r} has {pos.numel()} values, expected translation size 3")
+            return None
+        if torch.max(torch.abs(pos)).item() <= 1.0e-4:
+            return None
+        return pos.unsqueeze(0).repeat(self.num_envs, 1)
+
     def _extract_target(self, payload: dict) -> torch.Tensor | None:
         target, target_field = self._extract_joint_target_from_fields(
             payload, self._primary_target_field_names(), log_missing=True
@@ -443,6 +461,9 @@ class SonicDeployTargetAction(ActionTerm):
 
         self._last_target_field = str(target_field)
         self._last_reference_field = str(reference_field) if reference_used else "<none>"
+        base_trans_target = self._extract_base_trans_target(payload)
+        if base_trans_target is not None:
+            self._base_trans_target = base_trans_target
         base_quat_target = self._extract_base_quat_target(payload)
         if base_quat_target is not None:
             self._base_quat_target = base_quat_target
@@ -481,6 +502,7 @@ class SonicDeployTargetAction(ActionTerm):
                 [self._asset.data.root_pos_w, self._asset.data.root_quat_w], dim=-1
             ).clone()
             self._root_anchor_yaw = self._yaw_from_quat(self._root_pose_anchor[:, 3:7]).clone()
+            self._last_root_xy_target = self._root_pose_anchor[:, :2].clone()
             self._last_root_yaw_target = self._root_anchor_yaw.clone()
             if not self._root_anchor_logged:
                 anchor = self._root_pose_anchor[0].detach().cpu().tolist()
@@ -490,6 +512,22 @@ class SonicDeployTargetAction(ActionTerm):
                 )
                 self._root_anchor_logged = True
         root_pose_target = self._root_pose_anchor.clone()
+        if bool(self.cfg.follow_base_translation_target) and self._base_trans_target is not None:
+            if self._initial_base_target_pos is None:
+                self._initial_base_target_pos = self._base_trans_target.clone()
+            desired_xy = self._root_pose_anchor[:, :2] + (
+                self._base_trans_target[:, :2] - self._initial_base_target_pos[:, :2]
+            ) * float(self.cfg.base_translation_scale)
+            max_delta = float(self.cfg.base_translation_rate_limit_m_per_step)
+            if max_delta > 0.0 and self._last_root_xy_target is not None:
+                xy_delta = desired_xy - self._last_root_xy_target
+                delta_norm = torch.linalg.norm(xy_delta, dim=-1, keepdim=True).clamp_min(1.0e-6)
+                scale = torch.clamp(max_delta / delta_norm, max=1.0)
+                desired_xy = self._last_root_xy_target + xy_delta * scale
+            if self._last_root_xy_target is not None:
+                self._last_root_xy_step_norm = torch.linalg.norm(desired_xy - self._last_root_xy_target, dim=-1)
+            self._last_root_xy_target = desired_xy.clone()
+            root_pose_target[:, :2] = desired_xy
         if bool(self.cfg.follow_base_yaw_target) and self._base_quat_target is not None:
             base_target_yaw = self._yaw_from_quat(self._base_quat_target)
             if self._initial_base_target_yaw is None:
@@ -535,7 +573,8 @@ class SonicDeployTargetAction(ActionTerm):
                 f"step={self._debug_counter} packets={self._packet_count} "
                 f"field={self._last_target_field} ref={self._last_reference_field} "
                 f"target_mean={proc.mean():+.4f} target_absmax={proc.abs().max():.4f} "
-                f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f}"
+                f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f} "
+                f"root_xy_step={self._last_root_xy_step_norm[0].item():.4f}"
             )
 
     def apply_actions(self):
@@ -546,7 +585,11 @@ class SonicDeployTargetAction(ActionTerm):
         if env_ids is None:
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_target_step_delta_absmax.zero_()
+            self._last_root_xy_step_norm.zero_()
             self._root_pose_anchor = None
+            self._base_trans_target = None
+            self._initial_base_target_pos = None
+            self._last_root_xy_target = None
             self._base_quat_target = None
             self._initial_base_target_yaw = None
             self._root_anchor_yaw = None
@@ -554,7 +597,11 @@ class SonicDeployTargetAction(ActionTerm):
             return
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
+        self._last_root_xy_step_norm[env_ids] = 0.0
         self._root_pose_anchor = None
+        self._base_trans_target = None
+        self._initial_base_target_pos = None
+        self._last_root_xy_target = None
         self._base_quat_target = None
         self._initial_base_target_yaw = None
         self._root_anchor_yaw = None

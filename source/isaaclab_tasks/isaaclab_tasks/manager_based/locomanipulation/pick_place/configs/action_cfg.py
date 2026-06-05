@@ -140,13 +140,25 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     """Use reference_target_field for legs and waist while keeping target_field for arms."""
 
     follow_base_yaw_target: bool = True
-    """Rotate the fixed root yaw from deploy base_quat_target while keeping root position fixed."""
+    """Rotate the fixed root yaw from deploy base_quat_target."""
+
+    follow_base_translation_target: bool = True
+    """Move the fixed root XY from deploy base_trans_target for visual walking."""
 
     base_quat_target_field: str = "base_quat_target"
     """Msgpack quaternion field used by follow_base_yaw_target."""
 
+    base_trans_target_field: str = "base_trans_target"
+    """Msgpack translation field used by follow_base_translation_target."""
+
     base_yaw_rate_limit_rad_per_step: float = 0.08
     """Optional per-step root yaw clamp. 0 disables it."""
+
+    base_translation_rate_limit_m_per_step: float = 0.04
+    """Optional per-step root XY clamp. 0 disables it."""
+
+    base_translation_scale: float = 1.0
+    """Scale applied to deploy base_trans_target XY deltas."""
 
     debug_log_interval: int = 50
     """Print target statistics every N control steps. 0 disables periodic logging."""
