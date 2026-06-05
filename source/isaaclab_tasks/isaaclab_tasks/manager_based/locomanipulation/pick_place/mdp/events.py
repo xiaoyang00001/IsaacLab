@@ -13,6 +13,7 @@ import torch
 from isaacsim.core.utils.stage import get_current_stage
 from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics
 
+import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
 
 if TYPE_CHECKING:
@@ -44,6 +45,66 @@ def _find_named_prim_under_background(stage: Usd.Stage, env_id: int, prim_name: 
         if prim.GetName() == prim_name:
             return prim
     return None
+
+
+def fix_nested_articulation_roots(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    prim_path_templates: tuple[str, ...] = ("/World/envs/env_{}/SONICRobot",),
+    fix_root_link: bool = True,
+    disable_gravity: bool = True,
+):
+    """Fix nested articulation roots for USDs whose articulation root is below the spawned prim.
+
+    IsaacLab's spawn-level ``fix_root_link`` only works when the spawned prim itself carries
+    ``ArticulationRootAPI``. Unitree G1 USDs can be nested, so for deploy visualization we scan
+    under the spawned prim and modify the actual articulation root.
+    """
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    articulation_cfg = sim_utils.ArticulationRootPropertiesCfg(fix_root_link=fix_root_link)
+    rigid_cfg = sim_utils.RigidBodyPropertiesCfg(disable_gravity=disable_gravity)
+
+    for env_id in env_ids.tolist():
+        for prim_path_template in prim_path_templates:
+            base_path = prim_path_template.format(env_id)
+            base_prim = stage.GetPrimAtPath(base_path)
+            if not base_prim or not base_prim.IsValid():
+                _diag_print(f"[locomanip_event] fix_nested_articulation_roots: prim not found: {base_path}")
+                continue
+
+            root_prim = None
+            for prim in Usd.PrimRange(base_prim):
+                if UsdPhysics.ArticulationRootAPI(prim):
+                    root_prim = prim
+                    break
+
+            if root_prim is None:
+                _diag_print(f"[locomanip_event] fix_nested_articulation_roots: no articulation root under {base_path}")
+            else:
+                root_path = root_prim.GetPath().pathString
+                try:
+                    ok = sim_utils.modify_articulation_root_properties(root_path, articulation_cfg, stage=stage)
+                    _diag_print(
+                        f"[locomanip_event] fix_nested_articulation_roots: "
+                        f"root={root_path} fix_root_link={fix_root_link} ok={ok}"
+                    )
+                except Exception as exc:
+                    _diag_print(
+                        f"[locomanip_event] fix_nested_articulation_roots: failed to fix {root_path}: {exc}"
+                    )
+
+            if disable_gravity:
+                ok = sim_utils.modify_rigid_body_properties(base_path, rigid_cfg, stage=stage)
+                _diag_print(
+                    f"[locomanip_event] fix_nested_articulation_roots: "
+                    f"disable_gravity under {base_path} ok={ok}"
+                )
 
 
 def setup_usd_rigid_object_physics(
@@ -1187,4 +1248,3 @@ def rotate_conveyor_rollers(
             op = xformable.GetRotateZOp()
         if op:
             op.Set(cumulative_angle_deg)
-

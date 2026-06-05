@@ -185,6 +185,9 @@ class SonicDeployTargetAction(ActionTerm):
         self._first_packet_logged = False
         self._first_target_logged = False
         self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        self._root_pose_anchor: torch.Tensor | None = None
+        self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
+        self._root_anchor_logged = False
 
         self._target_order = str(cfg.target_order).lower()
         if self._target_order not in ("mujoco", "isaaclab"):
@@ -366,6 +369,23 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_target_step_delta_absmax = torch.max(torch.abs(delta), dim=-1).values
         return self._processed_actions + delta
 
+    def _stabilize_root_pose(self) -> None:
+        if not self.cfg.stabilize_root_pose:
+            return
+        if self._root_pose_anchor is None:
+            self._root_pose_anchor = torch.cat(
+                [self._asset.data.root_pos_w, self._asset.data.root_quat_w], dim=-1
+            ).clone()
+            if not self._root_anchor_logged:
+                anchor = self._root_pose_anchor[0].detach().cpu().tolist()
+                self._log_info(
+                    "root pose stabilized at "
+                    f"pos=({anchor[0]:+.3f}, {anchor[1]:+.3f}, {anchor[2]:+.3f})"
+                )
+                self._root_anchor_logged = True
+        self._asset.write_root_pose_to_sim(self._root_pose_anchor)
+        self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+
     def process_actions(self, actions: torch.Tensor):
         payload = self._drain_latest_packet()
         if payload is not None:
@@ -397,14 +417,17 @@ class SonicDeployTargetAction(ActionTerm):
 
     def apply_actions(self):
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+        self._stabilize_root_pose()
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_target_step_delta_absmax.zero_()
+            self._root_pose_anchor = None
             return
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
+        self._root_pose_anchor = None
 
 
 class UnitreeDdsLowCmdAction(ActionTerm):
@@ -443,6 +466,9 @@ class UnitreeDdsLowCmdAction(ActionTerm):
         self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
         self._debug_counter = 0
         self._first_lowcmd_logged = False
+        self._root_pose_anchor: torch.Tensor | None = None
+        self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
+        self._root_anchor_logged = False
         self._dds_ready = False
         self._lowstate_msg = None
         self._secondary_imu_msg = None
@@ -572,6 +598,23 @@ class UnitreeDdsLowCmdAction(ActionTerm):
         self._last_target_step_delta_absmax = torch.max(torch.abs(delta), dim=-1).values
         return self._processed_actions + delta
 
+    def _stabilize_root_pose(self) -> None:
+        if not self.cfg.stabilize_root_pose:
+            return
+        if self._root_pose_anchor is None:
+            self._root_pose_anchor = torch.cat(
+                [self._asset.data.root_pos_w, self._asset.data.root_quat_w], dim=-1
+            ).clone()
+            if not self._root_anchor_logged:
+                anchor = self._root_pose_anchor[0].detach().cpu().tolist()
+                self._log_info(
+                    "root pose stabilized at "
+                    f"pos=({anchor[0]:+.3f}, {anchor[1]:+.3f}, {anchor[2]:+.3f})"
+                )
+                self._root_anchor_logged = True
+        self._asset.write_root_pose_to_sim(self._root_pose_anchor)
+        self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+
     @staticmethod
     def _set_sequence(dst, values) -> None:
         for idx, value in enumerate(values):
@@ -651,6 +694,7 @@ class UnitreeDdsLowCmdAction(ActionTerm):
 
     def apply_actions(self):
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+        self._stabilize_root_pose()
         if self.cfg.publish_lowstate_every_apply:
             self._publish_lowstate()
 
@@ -658,9 +702,11 @@ class UnitreeDdsLowCmdAction(ActionTerm):
         if env_ids is None:
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_target_step_delta_absmax.zero_()
+            self._root_pose_anchor = None
             return
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
+        self._root_pose_anchor = None
 
 
 class AgileBasedLowerBodyAction(ActionTerm):

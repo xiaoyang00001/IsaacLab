@@ -52,7 +52,10 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
     SonicDeployTargetActionCfg,
     UnitreeDdsLowCmdActionCfg,
 )
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import SONIC_G1_29DOF_JOINT_ORDER
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import (
+    SONIC_G1_29DOF_DEFAULT_ANGLES,
+    SONIC_G1_29DOF_JOINT_ORDER,
+)
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
     AgileTeacherPolicyObservationsCfg,
 )
@@ -64,6 +67,25 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_contr
     G1_UPPER_BODY_IK_ACTION_CFG,
 )
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+SONIC_G1_PHYSICS_MODE = _env_flag("SONIC_G1_PHYSICS_MODE", False)
+SONIC_G1_FIX_ROOT = not SONIC_G1_PHYSICS_MODE
+ENABLE_WALKER_ROBOT = _env_flag("LOCIMANIP_ENABLE_WALKER_ROBOT", False) and SONIC_G1_PHYSICS_MODE
+print(
+    "[locomanip_cfg] "
+    f"SONIC_G1_FIX_ROOT={SONIC_G1_FIX_ROOT} "
+    f"SONIC_G1_PHYSICS_MODE={SONIC_G1_PHYSICS_MODE} "
+    f"ENABLE_WALKER_ROBOT={ENABLE_WALKER_ROBOT} "
+    f"legacy_SONIC_G1_FIX_ROOT_env={os.environ.get('SONIC_G1_FIX_ROOT', '<unset>')!r}"
+)
+
 FIXED_G1_29DOF_CFG = G1_29DOF_CFG.copy()
 FIXED_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = True
 FIXED_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = True
@@ -71,12 +93,17 @@ REMOTE_FIXED_G1_29DOF_CFG = FIXED_G1_29DOF_CFG.copy()
 
 # 第三个机器人（自动行走）：解除根节点固定，启用物理行走
 WALKER_G1_29DOF_CFG = G1_29DOF_CFG.copy()
-WALKER_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
-WALKER_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
+WALKER_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = not ENABLE_WALKER_ROBOT
+WALKER_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = not ENABLE_WALKER_ROBOT
 WALKER_G1_29DOF_CFG.init_state.pos = (-2.0, 0.0, 0.75)
 WALKER_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 
-# 第四个机器人：GEAR-SONIC ONNX 驱动（阶段 3.1：真实 decoder obs + encoder zero-fill）
+# 第四个机器人：GEAR-SONIC ONNX/Deploy 驱动。
+#
+# 短期目标是先验证 PICO manager -> GR00T/SONIC deploy -> IsaacLab 的目标链路，
+# 等价于 MuJoCo run_sim_loop.py 当前承担的“站稳状态源/可视化机器人”角色；因此默认固定
+# root 并关闭重力，避免没有完整 LowState/平衡闭环时启动即倒。长期做 IsaacLab Unitree DDS
+# 闭环物理验证时，设置 SONIC_G1_PHYSICS_MODE=1 才恢复自由根节点和重力。
 # init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
 # X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
 #
@@ -108,10 +135,13 @@ _D_7520_22 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_22 * _SONIC_NATUR
 _D_4010 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ
 
 SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
-SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = False
-SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = False
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = SONIC_G1_FIX_ROOT
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = _env_flag("SONIC_G1_DISABLE_GRAVITY", SONIC_G1_FIX_ROOT)
 SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+SONIC_G1_29DOF_CFG.init_state.joint_pos = dict(
+    zip(SONIC_G1_29DOF_JOINT_ORDER, SONIC_G1_29DOF_DEFAULT_ANGLES, strict=True)
+)
 # 整体替换 actuators，与 SONIC 训练完全对齐
 SONIC_G1_29DOF_CFG.actuators = {
     "legs": _SonicImplicitActuatorCfg(
@@ -474,6 +504,7 @@ class ActionsCfg:
             secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
             target_order="mujoco",
             target_rate_limit_rad_per_step=0.08,
+            stabilize_root_pose=SONIC_G1_FIX_ROOT,
             stale_timeout_s=0.5,
             publish_lowstate_every_apply=True,
             mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
@@ -488,28 +519,30 @@ class ActionsCfg:
             target_field="body_q_target",
             target_order="mujoco",
             target_rate_limit_rad_per_step=0.08,
+            stabilize_root_pose=SONIC_G1_FIX_ROOT,
             stale_timeout_s=0.5,
             debug_log_interval=50,
         )
 
-    # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
-    # forward_speed 已在 v3 物理驱动后废弃（脚地接触自然推进），不再传入
-    walker_skeletal_walk = AutoWalkActionCfg(
-        asset_name="walker_robot",
-        joint_names=WALKER_WHOLE_BODY_JOINTS,
-        walk_frequency=0.8,
-        # 腿部
-        hip_pitch_amplitude=0.25,
-        knee_amplitude=0.30,
-        ankle_pitch_amplitude=0.12,
-        # 手臂摆动
-        arm_swing_amplitude=0.35,
-        elbow_bend_amplitude=0.15,
-        # 腰部
-        waist_yaw_amplitude=0.06,
-        # 手部
-        hand_curl_amount=0.10,
-    )
+    if ENABLE_WALKER_ROBOT:
+        # 第三个机器人：模拟全身骨骼数据驱动行走（腿+腰+手臂+手）
+        # forward_speed 已在 v3 物理驱动后废弃（脚地接触自然推进），不再传入
+        walker_skeletal_walk = AutoWalkActionCfg(
+            asset_name="walker_robot",
+            joint_names=WALKER_WHOLE_BODY_JOINTS,
+            walk_frequency=0.8,
+            # 腿部
+            hip_pitch_amplitude=0.25,
+            knee_amplitude=0.30,
+            ankle_pitch_amplitude=0.12,
+            # 手臂摆动
+            arm_swing_amplitude=0.35,
+            elbow_bend_amplitude=0.15,
+            # 腰部
+            waist_yaw_amplitude=0.06,
+            # 手部
+            hand_curl_amount=0.10,
+        )
 
     publish_robot_state = ZmqRobotSyncActionCfg(
         asset_name="robot",
@@ -605,6 +638,28 @@ class TerminationsCfg:
 @configclass
 class EventsCfg:
     """Runtime events（仓库场景：传送带自动运行 + 回合重置时复位球体）。"""
+
+    if SONIC_G1_FIX_ROOT:
+        fix_sonic_articulation_root = EventTerm(
+            func=locomanip_mdp.fix_nested_articulation_roots,
+            mode="prestartup",
+            params={
+                "prim_path_templates": ("/World/envs/env_{}/SONICRobot",),
+                "fix_root_link": True,
+                "disable_gravity": True,
+            },
+        )
+
+    if not ENABLE_WALKER_ROBOT:
+        fix_walker_articulation_root = EventTerm(
+            func=locomanip_mdp.fix_nested_articulation_roots,
+            mode="prestartup",
+            params={
+                "prim_path_templates": ("/World/envs/env_{}/WalkerRobot",),
+                "fix_root_link": True,
+                "disable_gravity": True,
+            },
+        )
 
     # prestartup：在 PhysX 初始化前为 SM_CardBoxD_05.usd 注入刚体物理 API。
     # UsdFileCfg 只会 modify（而非 define）RigidBodyAPI，此事件补上 define 步骤。

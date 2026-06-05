@@ -113,6 +113,9 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     target_rate_limit_rad_per_step: float = 0.08
     """Optional per-step target clamp to reduce abrupt deploy/sim startup jumps. 0 disables it."""
 
+    stabilize_root_pose: bool = True
+    """Hold the robot root at the post-reset pose while validating deploy joint targets."""
+
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 
@@ -155,6 +158,9 @@ class UnitreeDdsLowCmdActionCfg(ActionTermCfg):
 
     target_rate_limit_rad_per_step: float = 0.08
     """Optional per-step target clamp to reduce abrupt deploy/sim startup jumps. 0 disables it."""
+
+    stabilize_root_pose: bool = True
+    """Hold the robot root at the post-reset pose while the DDS state bridge is still being validated."""
 
     stale_timeout_s: float = 0.5
     """Warn and hold the last command if no fresh LowCmd arrives for this long. 0 disables warning."""
