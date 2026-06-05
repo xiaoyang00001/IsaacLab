@@ -1,18 +1,18 @@
-# SONIC deploy target minimal bridge
+# SONIC deploy target 最小桥接方案
 
-This branch keeps the minimum useful split between the two machines:
+本文档说明 `sonic-deploy-target-minimal` 分支里的最小可用桥接形态。它把系统拆成两个边界清楚的部分：
 
-- GR00T-WholeBodyControl machine: Pico input, SONIC encoder/decoder/deploy loop.
-- IsaacLab machine: virtual G1 target, physics, and optional Unitree DDS sim topics.
+- GR00T-WholeBodyControl 机器：负责 Pico 输入、SONIC encoder/decoder，以及 deploy 主循环。
+- IsaacLab 机器：负责虚拟 G1 目标、物理仿真，以及可选的 Unitree DDS 仿真 topic。
 
-The goal is to make IsaacLab look like either:
+目标是让 IsaacLab 对 GR00T deploy 看起来像下面两种对象之一：
 
-- a direct ZMQ consumer of GR00T deploy debug targets; or
-- a Unitree G1 low-level simulator that talks over `rt/lowcmd` and `rt/lowstate`.
+- 直接消费 GR00T deploy 调试目标的 ZMQ subscriber；
+- 通过 `rt/lowcmd` 和 `rt/lowstate` 通信的 Unitree G1 低层仿真器。
 
-## Data architecture
+## 数据架构
 
-Default direct path:
+默认直接 ZMQ 路径：
 
 ```text
 Pico / pose input
@@ -23,7 +23,7 @@ Pico / pose input
   -> sonic_robot joint position targets
 ```
 
-DDS hardware-like path:
+类硬件 DDS 路径：
 
 ```text
 Pico / pose input
@@ -36,8 +36,7 @@ Pico / pose input
   -> GR00T deploy reads lowstate like a real/sim G1
 ```
 
-Native Windows IsaacLab cannot reliably install/use CycloneDDS. For that case,
-use the proxy path instead:
+原生 Windows 上的 IsaacLab 很难稳定安装和使用 CycloneDDS。遇到这种情况时，推荐使用代理路径：
 
 ```text
 Pico / pose input
@@ -51,46 +50,46 @@ Pico / pose input
   -> sonic_robot joint position targets
 ```
 
-In this branch, IsaacLab does not run SONIC encoder/decoder in the DDS path. It only receives the final low-level command and publishes simulated state. That is the closest deployment shape to the future physical robot, because the GR00T side can later switch from IsaacLab DDS to the real Unitree DDS network without changing the policy boundary.
+在这个分支里，IsaacLab 的 DDS 路径不运行 SONIC encoder/decoder。IsaacLab 只接收最终低层命令，并发布仿真的状态。这种边界最接近未来真机部署：之后 GR00T 侧可以从 IsaacLab DDS 切到真实 Unitree DDS 网络，而不用改变 policy 边界。
 
-## Branch
+## 分支
 
-Use:
+使用：
 
 ```powershell
 git checkout sonic-deploy-target-minimal
 ```
 
-This branch was created from `gr00t-sonic-debug`.
+该分支从 `gr00t-sonic-debug` 创建。
 
-## IsaacLab machine
+## IsaacLab 机器
 
-Install runtime dependencies in the IsaacLab Python environment:
+在 IsaacLab Python 环境里安装运行依赖：
 
 ```powershell
 .\isaaclab.bat -p -m pip install pyzmq msgpack
 ```
 
-For DDS mode, also install Unitree SDK2 Python into the same environment. The GR00T repo already vendors it:
+如果要使用 DDS 模式，还需要把 Unitree SDK2 Python 安装进同一个环境。GR00T 仓库已经 vendored 了该依赖：
 
 ```powershell
 .\isaaclab.bat -p -m pip install -e D:\src\Isaac\GR00T-WholeBodyControl\external_dependencies\unitree_sdk2_python
 ```
 
-If this fails on Windows with:
+如果 Windows 上安装时报错：
 
 ```text
 Could not locate cyclonedds. Try to set CYCLONEDDS_HOME or CMAKE_PREFIX_PATH
 ```
 
-then the Python binding found no native CycloneDDS install. For the current two-machine bring-up, prefer one of these:
+说明 Python binding 没找到本机 CycloneDDS。当前双机 bring-up 阶段建议优先选择：
 
-- stay on direct ZMQ mode on native Windows;
-- run `scripts/tools/sonic_unitree_dds_proxy.py` on the GR00T/Linux machine and let Windows IsaacLab consume its ZMQ output;
-- run the IsaacLab DDS bridge from Linux/WSL2 where CycloneDDS builds and selects network interfaces reliably;
-- only use native Windows DDS after installing CycloneDDS C/C++ and exporting `CYCLONEDDS_HOME` or `CMAKE_PREFIX_PATH` before pip installing `unitree_sdk2_python`.
+- 原生 Windows 上继续使用直接 ZMQ 模式；
+- 在 GR00T/Linux 机器上运行 `scripts/tools/sonic_unitree_dds_proxy.py`，让 Windows IsaacLab 消费代理转出的 ZMQ；
+- 在 Linux/WSL2 里运行 IsaacLab DDS bridge，因为 CycloneDDS 构建和网卡选择更稳定；
+- 只有在安装 CycloneDDS C/C++ 并在 pip 安装 `unitree_sdk2_python` 前设置好 `CYCLONEDDS_HOME` 或 `CMAKE_PREFIX_PATH` 后，再尝试原生 Windows DDS。
 
-Direct ZMQ mode:
+直接 ZMQ 模式：
 
 ```powershell
 $env:SONIC_DEPLOY_TRANSPORT="zmq"
@@ -99,7 +98,7 @@ $env:SONIC_DEPLOY_TOPIC="g1_debug"
 .\isaaclab.bat -p scripts\environments\teleoperation\teleop_se3_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0
 ```
 
-DDS mode:
+DDS 模式：
 
 ```powershell
 $env:SONIC_DEPLOY_TRANSPORT="dds"
@@ -108,20 +107,20 @@ $env:UNITREE_DDS_INTERFACE="<isaaclab_network_interface>"
 .\isaaclab.bat -p scripts\environments\teleoperation\teleop_se3_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0
 ```
 
-Leave `UNITREE_DDS_INTERFACE` empty if CycloneDDS auto-selects the right interface. On Windows, DDS loopback/interface selection can be fragile; WSL2 or Linux is usually easier for DDS.
+如果 CycloneDDS 能自动选择正确网卡，可以让 `UNITREE_DDS_INTERFACE` 为空。Windows 上 DDS loopback 和网卡选择比较脆弱；通常 WSL2 或 Linux 更适合 DDS。
 
-## GR00T machine
+## GR00T 机器
 
-Direct ZMQ mode publishes the debug target stream that IsaacLab subscribes to:
+直接 ZMQ 模式会发布 IsaacLab 订阅的调试目标流：
 
 ```bash
 cd /path/to/GR00T-WholeBodyControl/gear_sonic_deploy
 ./deploy.sh sim --input-type zmq_manager --zmq-host <pico_or_pose_source_host>
 ```
 
-Make sure the deploy output/debug ZMQ port is reachable by the IsaacLab machine and matches `SONIC_DEPLOY_ENDPOINT`.
+需要确认 deploy 的输出/调试 ZMQ 端口能被 IsaacLab 机器访问，并且与 `SONIC_DEPLOY_ENDPOINT` 一致。
 
-Proxy mode is the recommended path when GR00T requires DDS but IsaacLab is on native Windows. Run this proxy on the GR00T/Linux machine in an environment where `unitree_sdk2py`, `pyzmq`, and `msgpack` are installed:
+当 GR00T 需要 DDS、但 IsaacLab 跑在原生 Windows 上时，推荐使用代理模式。代理应运行在 GR00T/Linux 机器上，并且所在环境需要安装 `unitree_sdk2py`、`pyzmq`、`msgpack`：
 
 ```bash
 cd /path/to/IsaacLab
@@ -132,14 +131,14 @@ python scripts/tools/sonic_unitree_dds_proxy.py \
   --zmq-topic g1_debug
 ```
 
-Then run GR00T deploy normally in simulator mode so CRC checks are disabled:
+然后正常以 simulator 模式运行 GR00T deploy，这样 CRC 检查会被关闭：
 
 ```bash
 cd /path/to/GR00T-WholeBodyControl/gear_sonic_deploy
 ./deploy.sh sim --input-type zmq_manager --zmq-host <pico_or_pose_source_host>
 ```
 
-On the Windows IsaacLab machine, consume the proxy ZMQ stream:
+Windows IsaacLab 机器消费代理转出的 ZMQ 流：
 
 ```powershell
 $env:SONIC_DEPLOY_TRANSPORT="zmq"
@@ -148,26 +147,26 @@ $env:SONIC_DEPLOY_TOPIC="g1_debug"
 .\isaaclab.bat -p scripts\environments\teleoperation\teleop_se3_agent.py --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0
 ```
 
-Pure DDS mode runs GR00T deploy as if IsaacLab itself were a simulator on the DDS network:
+纯 DDS 模式下，GR00T deploy 会把 IsaacLab 当成 DDS 网络上的仿真器：
 
 ```bash
 cd /path/to/GR00T-WholeBodyControl/gear_sonic_deploy
 ./deploy.sh sim --input-type zmq_manager --zmq-host <pico_or_pose_source_host>
 ```
 
-Use the same DDS domain and network interface as IsaacLab. The `sim` target is important because GR00T deploy disables LowState CRC checking for simulator compatibility. IsaacLab currently publishes structurally correct `LowState`, but does not compute Unitree CRC yet.
+GR00T 和 IsaacLab 需要使用相同的 DDS domain 和网络接口。`sim` target 很重要，因为 GR00T deploy 会为 simulator 兼容性关闭 LowState CRC 检查。IsaacLab 当前发布结构正确的 `LowState`，但还没有计算 Unitree CRC。
 
-## Topic contract
+## Topic 合同
 
-IsaacLab DDS mode:
+IsaacLab DDS 模式：
 
-- subscribes `rt/lowcmd` using `unitree_hg.msg.dds_.LowCmd_`;
-- publishes `rt/lowstate` using `unitree_hg.msg.dds_.LowState_`;
-- publishes `rt/secondary_imu` using `unitree_hg.msg.dds_.IMUState_`;
-- uses G1 29-DoF hardware/MuJoCo motor order at the DDS boundary;
-- remaps internally to IsaacLab/SONIC joint order before writing `sonic_robot`.
+- 使用 `unitree_hg.msg.dds_.LowCmd_` 订阅 `rt/lowcmd`；
+- 使用 `unitree_hg.msg.dds_.LowState_` 发布 `rt/lowstate`；
+- 使用 `unitree_hg.msg.dds_.IMUState_` 发布 `rt/secondary_imu`；
+- 在 DDS 边界使用 G1 29DoF hardware/MuJoCo motor order；
+- 写入 `sonic_robot` 前，内部 remap 到 IsaacLab/SONIC joint order。
 
-Useful environment variables:
+常用环境变量：
 
 ```text
 SONIC_DEPLOY_TRANSPORT=zmq|dds
@@ -181,8 +180,8 @@ UNITREE_SECONDARY_IMU_TOPIC=rt/secondary_imu
 UNITREE_G1_MODE_MACHINE=5
 ```
 
-## Current limitations
+## 当前限制
 
-- DDS LowState CRC is not generated in IsaacLab yet; run GR00T deploy in `sim` mode.
-- Hand DDS topics are not bridged in IsaacLab yet; body 29-DoF is the first minimum target.
-- LowState acceleration is zero-filled for now. Joint position, joint velocity, estimated torque, base quaternion, and base angular velocity are populated from IsaacLab.
+- IsaacLab 还没有生成 DDS LowState CRC；GR00T deploy 需要运行在 `sim` 模式。
+- IsaacLab 还没有桥接手部 DDS topic；当前最小目标先覆盖 body 29DoF。
+- LowState acceleration 当前先填 0。joint position、joint velocity、estimated torque、base quaternion、base angular velocity 会从 IsaacLab 状态填入。
