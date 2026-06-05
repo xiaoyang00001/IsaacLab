@@ -60,6 +60,7 @@ simulation_app = app_launcher.app
 
 
 import logging
+import os
 
 import gymnasium as gym
 import torch
@@ -131,6 +132,11 @@ def main() -> None:
     # Flags for controlling teleoperation flow
     should_reset_recording_instance = False
     teleoperation_active = True
+    deploy_target_mode = bool(
+        args_cli.task
+        and "Locomanipulation" in args_cli.task
+        and os.environ.get("SONIC_DEPLOY_TRANSPORT", "").lower() in ("zmq", "dds")
+    )
 
     # Callback handlers
     def reset_recording_instance() -> None:
@@ -188,61 +194,75 @@ def main() -> None:
         # Always active for other devices
         teleoperation_active = True
 
-    # Create teleop device from config if present, otherwise create manually
+    # Create teleop device from config if present, otherwise create manually.
+    # In GR00T/SONIC deploy-target mode, the robot is driven by zero-action
+    # action terms that pull ZMQ/DDS packets internally; the outer env action is
+    # only a correctly-shaped placeholder used to advance the simulation.
     teleop_interface = None
-    try:
-        if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:
-            teleop_interface = create_teleop_device(
-                args_cli.teleop_device, env_cfg.teleop_devices.devices, teleoperation_callbacks
-            )
-        else:
-            logger.warning(
-                f"No teleop device '{args_cli.teleop_device}' found in environment config. Creating default."
-            )
-            # Create fallback teleop device
-            sensitivity = args_cli.sensitivity
-            if args_cli.teleop_device.lower() == "keyboard":
-                teleop_interface = Se3Keyboard(
-                    Se3KeyboardCfg(pos_sensitivity=0.05 * sensitivity, rot_sensitivity=0.05 * sensitivity)
-                )
-            elif args_cli.teleop_device.lower() == "spacemouse":
-                teleop_interface = Se3SpaceMouse(
-                    Se3SpaceMouseCfg(pos_sensitivity=0.05 * sensitivity, rot_sensitivity=0.05 * sensitivity)
-                )
-            elif args_cli.teleop_device.lower() == "gamepad":
-                teleop_interface = Se3Gamepad(
-                    Se3GamepadCfg(pos_sensitivity=0.1 * sensitivity, rot_sensitivity=0.1 * sensitivity)
+    if deploy_target_mode:
+        print(
+            "[teleop_se3_agent] SONIC deploy target mode enabled; "
+            "using zero env actions while SonicDeployTargetAction consumes external packets."
+        )
+    else:
+        try:
+            if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:
+                teleop_interface = create_teleop_device(
+                    args_cli.teleop_device, env_cfg.teleop_devices.devices, teleoperation_callbacks
                 )
             else:
-                logger.error(f"Unsupported teleop device: {args_cli.teleop_device}")
-                logger.error("Configure the teleop device in the environment config.")
-                env.close()
-                simulation_app.close()
-                return
+                logger.warning(
+                    f"No teleop device '{args_cli.teleop_device}' found in environment config. Creating default."
+                )
+                # Create fallback teleop device
+                sensitivity = args_cli.sensitivity
+                if args_cli.teleop_device.lower() == "keyboard":
+                    teleop_interface = Se3Keyboard(
+                        Se3KeyboardCfg(pos_sensitivity=0.05 * sensitivity, rot_sensitivity=0.05 * sensitivity)
+                    )
+                elif args_cli.teleop_device.lower() == "spacemouse":
+                    teleop_interface = Se3SpaceMouse(
+                        Se3SpaceMouseCfg(pos_sensitivity=0.05 * sensitivity, rot_sensitivity=0.05 * sensitivity)
+                    )
+                elif args_cli.teleop_device.lower() == "gamepad":
+                    teleop_interface = Se3Gamepad(
+                        Se3GamepadCfg(pos_sensitivity=0.1 * sensitivity, rot_sensitivity=0.1 * sensitivity)
+                    )
+                else:
+                    logger.error(f"Unsupported teleop device: {args_cli.teleop_device}")
+                    logger.error("Configure the teleop device in the environment config.")
+                    env.close()
+                    simulation_app.close()
+                    return
 
-            # Add callbacks to fallback device
-            for key, callback in teleoperation_callbacks.items():
-                try:
-                    teleop_interface.add_callback(key, callback)
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Failed to add callback for key {key}: {e}")
-    except Exception as e:
-        logger.error(f"Failed to create teleop device: {e}")
-        env.close()
-        simulation_app.close()
-        return
+                # Add callbacks to fallback device
+                for key, callback in teleoperation_callbacks.items():
+                    try:
+                        teleop_interface.add_callback(key, callback)
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Failed to add callback for key {key}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to create teleop device: {e}")
+            env.close()
+            simulation_app.close()
+            return
 
-    if teleop_interface is None:
+    if teleop_interface is None and not deploy_target_mode:
         logger.error("Failed to create teleop interface")
         env.close()
         simulation_app.close()
         return
 
-    print(f"Using teleop device: {teleop_interface}")
+    if teleop_interface is not None:
+        print(f"Using teleop device: {teleop_interface}")
 
     # reset environment
     env.reset()
-    teleop_interface.reset()
+    if teleop_interface is not None:
+        teleop_interface.reset()
+    deploy_zero_actions = None
+    if deploy_target_mode:
+        deploy_zero_actions = torch.zeros(env.action_space.shape, device=env.device)
 
     print("Teleoperation started. Press 'R' to reset the environment.")
 
@@ -251,21 +271,25 @@ def main() -> None:
         try:
             # run everything in inference mode
             with torch.inference_mode():
-                # get device command
-                action = teleop_interface.advance()
-
-                # Only apply teleop commands when active
-                if teleoperation_active:
-                    # process actions
-                    actions = action.repeat(env.num_envs, 1)
-                    # apply actions
-                    env.step(actions)
+                if deploy_target_mode:
+                    env.step(deploy_zero_actions)
                 else:
-                    env.sim.render()
+                    # get device command
+                    action = teleop_interface.advance()
+
+                    # Only apply teleop commands when active
+                    if teleoperation_active:
+                        # process actions
+                        actions = action.repeat(env.num_envs, 1)
+                        # apply actions
+                        env.step(actions)
+                    else:
+                        env.sim.render()
 
                 if should_reset_recording_instance:
                     env.reset()
-                    teleop_interface.reset()
+                    if teleop_interface is not None:
+                        teleop_interface.reset()
                     should_reset_recording_instance = False
                     print("Environment reset complete")
         except Exception as e:
