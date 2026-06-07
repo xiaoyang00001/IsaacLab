@@ -14,6 +14,7 @@ from ..mdp.actions import (
     SonicDeployTargetAction,
     SONICWholeBodyAction,
     UnitreeDdsLowCmdAction,
+    UnitreeLowStatePublisherAction,
 )
 
 
@@ -163,6 +164,15 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     base_translation_scale: float = 2.0
     """Scale applied to deploy base_trans_target XY deltas."""
 
+    follow_base_height_target: bool = False
+    """Lower/raise the fixed root Z from deploy base_trans_target so a squat shows as the body sinking instead of the feet lifting."""
+
+    base_height_rate_limit_m_per_step: float = 0.05
+    """Optional per-step root Z clamp. 0 disables it."""
+
+    base_height_scale: float = 1.0
+    """Scale applied to deploy base_trans_target Z deltas."""
+
     synthetic_base_motion_from_lower_body: bool = True
     """Generate visual root XY motion from leg activity when base_trans_target is static."""
 
@@ -223,6 +233,49 @@ class UnitreeDdsLowCmdActionCfg(ActionTermCfg):
 
     debug_log_interval: int = 50
     """Print DDS bridge statistics every N control steps. 0 disables periodic logging."""
+
+
+@configclass
+class UnitreeLowStatePublisherActionCfg(ActionTermCfg):
+    """Publish sonic_robot state on Unitree DDS rt/lowstate without consuming commands.
+
+    Use this alongside the default ZMQ ``SonicDeployTargetActionCfg`` so GR00T/SONIC
+    deploy can read IsaacLab's simulated robot state while joint targets are still driven
+    over ZMQ. In DDS transport mode the lowstate is already published by
+    ``UnitreeDdsLowCmdActionCfg``, so this term is not needed there.
+    """
+
+    class_type: type[ActionTerm] = UnitreeLowStatePublisherAction
+
+    asset_name: str = "sonic_robot"
+    """Articulation whose state is mirrored onto rt/lowstate."""
+
+    joint_names: list[str] = MISSING
+    """29 G1 joint names in IsaacLab/SONIC order."""
+
+    domain_id: int = 0
+    """DDS domain id used by Unitree SDK2."""
+
+    network_interface: str = ""
+    """Optional DDS network interface name. Leave empty to let CycloneDDS choose."""
+
+    lowstate_topic: str = "rt/lowstate"
+    """Unitree low-level state topic to publish."""
+
+    secondary_imu_topic: str = "rt/secondary_imu"
+    """Unitree torso IMU topic to publish."""
+
+    publish_secondary_imu: bool = True
+    """Also publish the torso IMU on secondary_imu_topic."""
+
+    target_order: str = "mujoco"
+    """Output motor order. Unitree G1 lowstate uses hardware/MuJoCo order."""
+
+    mode_machine: int = 5
+    """G1 mode_machine value reported in LowState so deploy can identify the robot variant."""
+
+    debug_log_interval: int = 100
+    """Print publish statistics every N control steps. 0 disables periodic logging."""
 
 
 @configclass

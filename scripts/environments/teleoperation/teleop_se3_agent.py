@@ -50,6 +50,16 @@ parser.add_argument(
     default=False,
     help="Enable Pinocchio.",
 )
+parser.add_argument(
+    "--publish_lowstate",
+    action="store_true",
+    default=False,
+    help=(
+        "For Locomanipulation SONIC tasks in the default ZMQ deploy mode: also publish the simulated"
+        " sonic_robot state (joint q/dq/ddq/tau + base IMU) on Unitree DDS rt/lowstate so GR00T/SONIC"
+        " deploy can use IsaacLab as the state source. Ignored in DDS transport mode (already published)."
+    ),
+)
 # 追加 IsaacLab/Isaac Sim 通用启动参数。
 AppLauncher.add_app_launcher_args(parser)
 # 解析后的 args_cli 会在模块级使用；这是 IsaacLab 官方脚本常见模式，因为 simulation_app
@@ -89,6 +99,11 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.manager_based.manipulation.lift import mdp
 from isaaclab_tasks.utils import parse_env_cfg
+
+# --publish_lowstate 必须在导入 locomanipulation 配置之前转成环境变量：ActionsCfg 在
+# 该模块 import 时（类体执行）就根据 SONIC_PUBLISH_LOWSTATE 决定是否挂载 lowstate 发布 term。
+if args_cli.publish_lowstate:
+    os.environ["SONIC_PUBLISH_LOWSTATE"] = "1"
 
 if args_cli.task and "Locomanipulation" in args_cli.task:
     # Locomanipulation 任务不是默认必然被导入的包。这里显式 import 会执行该包的

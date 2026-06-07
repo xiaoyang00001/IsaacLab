@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         SonicDeployTargetActionCfg,
         SONICWholeBodyActionCfg,
         UnitreeDdsLowCmdActionCfg,
+        UnitreeLowStatePublisherActionCfg,
     )
 
 
@@ -207,6 +208,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._initial_base_target_yaw: torch.Tensor | None = None
         self._root_anchor_yaw: torch.Tensor | None = None
         self._last_root_yaw_target: torch.Tensor | None = None
+        self._last_root_z_target: torch.Tensor | None = None
         self._last_target_field = "<none>"
         self._last_reference_field = "<none>"
 
@@ -608,6 +610,21 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_root_xy_target = desired_xy.clone()
         root_pose_target[:, :2] = desired_xy
 
+        if bool(self.cfg.follow_base_height_target) and self._base_trans_target is not None:
+            if self._initial_base_target_pos is None:
+                self._initial_base_target_pos = self._base_trans_target.clone()
+            desired_z = self._root_pose_anchor[:, 2] + (
+                self._base_trans_target[:, 2] - self._initial_base_target_pos[:, 2]
+            ) * float(self.cfg.base_height_scale)
+            max_delta = float(self.cfg.base_height_rate_limit_m_per_step)
+            if max_delta > 0.0 and self._last_root_z_target is not None:
+                z_delta = torch.clamp(
+                    desired_z - self._last_root_z_target, min=-max_delta, max=max_delta
+                )
+                desired_z = self._last_root_z_target + z_delta
+            self._last_root_z_target = desired_z.clone()
+            root_pose_target[:, 2] = desired_z
+
         if bool(self.cfg.follow_base_yaw_target) and self._base_quat_target is not None:
             base_target_yaw = self._yaw_from_quat(self._base_quat_target)
             if self._initial_base_target_yaw is None:
@@ -680,6 +697,7 @@ class SonicDeployTargetAction(ActionTerm):
             self._initial_base_target_yaw = None
             self._root_anchor_yaw = None
             self._last_root_yaw_target = None
+            self._last_root_z_target = None
             return
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
@@ -697,6 +715,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._initial_base_target_yaw = None
         self._root_anchor_yaw = None
         self._last_root_yaw_target = None
+        self._last_root_z_target = None
 
 
 class UnitreeDdsLowCmdAction(ActionTerm):
@@ -976,6 +995,179 @@ class UnitreeDdsLowCmdAction(ActionTerm):
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
         self._root_pose_anchor = None
+
+
+class UnitreeLowStatePublisherAction(ActionTerm):
+    """Publish sonic_robot state as Unitree DDS ``rt/lowstate`` without consuming commands.
+
+    Unlike :class:`UnitreeDdsLowCmdAction`, this term does not subscribe to ``rt/lowcmd``
+    and does not drive any joint. It only mirrors the simulated ``sonic_robot`` state
+    (joint q/dq/ddq/tau_est + base IMU) onto ``rt/lowstate`` so GR00T/SONIC deploy can use
+    IsaacLab as the state source while joint targets are still driven over ZMQ by
+    :class:`SonicDeployTargetAction`.
+    """
+
+    cfg: UnitreeLowStatePublisherActionCfg
+    _asset: Articulation
+
+    def __init__(self, cfg: UnitreeLowStatePublisherActionCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset = env.scene[cfg.asset_name]
+        self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        self._raw_actions = torch.zeros((self.num_envs, 0), device=self.device)
+        self._processed_actions = self._raw_actions
+        self._mujoco_to_isaac_index = torch.tensor(
+            SONIC_G1_MUJOCO_TO_ISAACLAB_DOF, device=self.device, dtype=torch.long
+        )
+        self._target_order = str(cfg.target_order).lower()
+        if self._target_order not in ("mujoco", "isaaclab"):
+            raise ValueError(f"target_order must be 'mujoco' or 'isaaclab', got {cfg.target_order!r}")
+
+        self._lowstate_count = 0
+        self._debug_counter = 0
+        self._dds_ready = False
+        self._lowstate_msg = None
+        self._secondary_imu_msg = None
+        self._lowstate_publisher = None
+        self._secondary_imu_publisher = None
+        self._connect_dds()
+        secondary = self.cfg.secondary_imu_topic if self.cfg.publish_secondary_imu else "<off>"
+        self._log_info(
+            f"asset={cfg.asset_name} domain_id={cfg.domain_id} "
+            f"interface={cfg.network_interface or '<auto>'} lowstate={cfg.lowstate_topic!r} "
+            f"secondary_imu={secondary!r} target_order={self._target_order} "
+            f"resolved={len(self._joint_ids)} joints dds_ready={self._dds_ready}"
+        )
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    @staticmethod
+    def _format_log_message(message: str) -> str:
+        return f"[UnitreeLowStatePublisher] {message}"
+
+    def _log_info(self, message: str) -> None:
+        formatted = self._format_log_message(message)
+        logger.info(formatted)
+        print(f"[IsaacLab] {formatted}")
+
+    def _log_warning(self, message: str) -> None:
+        formatted = self._format_log_message(f"WARNING {message}")
+        logger.warning(formatted)
+        print(f"[IsaacLab] {formatted}")
+
+    def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
+        resolved_ids: list[int] = []
+        resolved_names: list[str] = []
+        for joint_name in joint_names:
+            joint_ids, matched_names = self._asset.find_joints([f"^{joint_name}$"])
+            if len(joint_ids) != 1:
+                raise ValueError(
+                    f"Expected exactly one joint match for '{joint_name}' on asset '{self.cfg.asset_name}', "
+                    f"but got {len(joint_ids)} matches: {matched_names}"
+                )
+            resolved_ids.append(int(joint_ids[0]))
+            resolved_names.append(matched_names[0])
+        return resolved_ids, resolved_names
+
+    def _connect_dds(self) -> None:
+        try:
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
+            from unitree_sdk2py.idl.default import (
+                unitree_hg_msg_dds__IMUState_ as IMUStateDefault,
+                unitree_hg_msg_dds__LowState_ as LowStateDefault,
+            )
+            from unitree_sdk2py.idl.unitree_hg.msg.dds_ import IMUState_, LowState_
+        except ModuleNotFoundError as exc:
+            self._log_warning(f"{exc.name} is not installed; rt/lowstate will not be published.")
+            return
+
+        try:
+            if self.cfg.network_interface:
+                ChannelFactoryInitialize(int(self.cfg.domain_id), self.cfg.network_interface)
+            else:
+                ChannelFactoryInitialize(int(self.cfg.domain_id))
+        except Exception as exc:
+            self._log_warning(f"ChannelFactoryInitialize failed: {exc}")
+            return
+
+        self._lowstate_msg = LowStateDefault()
+        self._lowstate_publisher = ChannelPublisher(self.cfg.lowstate_topic, LowState_)
+        self._lowstate_publisher.Init()
+        if self.cfg.publish_secondary_imu:
+            self._secondary_imu_msg = IMUStateDefault()
+            self._secondary_imu_publisher = ChannelPublisher(self.cfg.secondary_imu_topic, IMUState_)
+            self._secondary_imu_publisher.Init()
+        self._dds_ready = True
+
+    @staticmethod
+    def _set_sequence(dst, values) -> None:
+        for idx, value in enumerate(values):
+            dst[idx] = float(value)
+
+    def _publish_lowstate(self) -> None:
+        if not self._dds_ready or self._lowstate_publisher is None or self._lowstate_msg is None:
+            return
+
+        env_idx = 0
+        joint_pos = self._asset.data.joint_pos[env_idx, self._joint_ids].detach().cpu()
+        joint_vel = self._asset.data.joint_vel[env_idx, self._joint_ids].detach().cpu()
+        joint_acc = self._asset.data.joint_acc[env_idx, self._joint_ids].detach().cpu()
+        torque_src = getattr(self._asset.data, "applied_torque", None)
+        if torque_src is None:
+            joint_tau = torch.zeros_like(joint_pos)
+        else:
+            joint_tau = torque_src[env_idx, self._joint_ids].detach().cpu()
+        root_quat = self._asset.data.root_quat_w[env_idx].detach().cpu()
+        root_ang_vel = self._asset.data.root_ang_vel_b[env_idx].detach().cpu()
+
+        if self._target_order == "mujoco":
+            joint_pos = joint_pos[self._mujoco_to_isaac_index.cpu()]
+            joint_vel = joint_vel[self._mujoco_to_isaac_index.cpu()]
+            joint_acc = joint_acc[self._mujoco_to_isaac_index.cpu()]
+            joint_tau = joint_tau[self._mujoco_to_isaac_index.cpu()]
+
+        for i in range(len(SONIC_G1_29DOF_JOINT_ORDER)):
+            motor_state = self._lowstate_msg.motor_state[i]
+            motor_state.q = float(joint_pos[i])
+            motor_state.dq = float(joint_vel[i])
+            motor_state.ddq = float(joint_acc[i])
+            motor_state.tau_est = float(joint_tau[i])
+        if hasattr(self._lowstate_msg, "mode_machine"):
+            self._lowstate_msg.mode_machine = int(self.cfg.mode_machine)
+        if hasattr(self._lowstate_msg, "tick"):
+            self._lowstate_msg.tick = int(time.monotonic() * 1000.0) & 0xFFFFFFFF
+        self._set_sequence(self._lowstate_msg.imu_state.quaternion, root_quat.tolist())
+        self._set_sequence(self._lowstate_msg.imu_state.gyroscope, root_ang_vel.tolist())
+        self._set_sequence(self._lowstate_msg.imu_state.accelerometer, (0.0, 0.0, 0.0))
+        self._lowstate_publisher.Write(self._lowstate_msg)
+
+        if self._secondary_imu_publisher is not None and self._secondary_imu_msg is not None:
+            self._set_sequence(self._secondary_imu_msg.quaternion, root_quat.tolist())
+            self._set_sequence(self._secondary_imu_msg.gyroscope, root_ang_vel.tolist())
+            self._secondary_imu_publisher.Write(self._secondary_imu_msg)
+        self._lowstate_count += 1
+
+    def process_actions(self, actions: torch.Tensor):
+        del actions
+
+    def apply_actions(self):
+        self._publish_lowstate()
+        self._debug_counter += 1
+        if self.cfg.debug_log_interval > 0 and self._debug_counter % self.cfg.debug_log_interval == 0:
+            self._log_info(f"step={self._debug_counter} lowstate={self._lowstate_count}")
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        del env_ids
 
 
 class AgileBasedLowerBodyAction(ActionTerm):

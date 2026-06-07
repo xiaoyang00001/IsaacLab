@@ -51,6 +51,7 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
     AutoWalkActionCfg,
     SonicDeployTargetActionCfg,
     UnitreeDdsLowCmdActionCfg,
+    UnitreeLowStatePublisherActionCfg,
 )
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import (
     SONIC_G1_29DOF_DEFAULT_ANGLES,
@@ -540,11 +541,35 @@ class ActionsCfg:
             base_yaw_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_YAW_RATE_LIMIT", "0.12")),
             base_translation_rate_limit_m_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT", "0.08")),
             base_translation_scale=float(os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_SCALE", "2.0")),
+            follow_base_height_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_HEIGHT", False),
+            base_height_rate_limit_m_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_HEIGHT_RATE_LIMIT", "0.05")),
+            base_height_scale=float(os.environ.get("SONIC_DEPLOY_BASE_HEIGHT_SCALE", "1.0")),
             synthetic_base_motion_from_lower_body=_env_flag("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION", True),
             synthetic_base_motion_gain=float(os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_GAIN", "0.35")),
             synthetic_base_motion_deadzone=float(os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_DEADZONE", "0.002")),
             synthetic_base_motion_max_step_m=float(os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_MAX_STEP", "0.035")),
             debug_log_interval=50,
+        )
+
+    # 默认 ZMQ 链路下，关节由 SonicDeployTargetAction 驱动，但不会回传机器人状态。
+    # 设 SONIC_PUBLISH_LOWSTATE=1（或 teleop 的 --publish_lowstate）时额外开一路 DDS，
+    # 把 sonic_robot 的 sim 状态发到 rt/lowstate，供 GR00T/SONIC deploy 当状态源。
+    # DDS 传输模式（SONIC_DEPLOY_TRANSPORT=dds）已由 UnitreeDdsLowCmdAction 发布 lowstate，
+    # 因此这里仅在非 dds 模式下挂载，避免重复发布与 DDS 重复初始化。
+    if os.environ.get("SONIC_DEPLOY_TRANSPORT", "zmq").lower() != "dds" and _env_flag(
+        "SONIC_PUBLISH_LOWSTATE", False
+    ):
+        sonic_lowstate_pub = UnitreeLowStatePublisherActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            domain_id=int(os.environ.get("UNITREE_DDS_DOMAIN_ID", "0")),
+            network_interface=os.environ.get("UNITREE_DDS_INTERFACE", ""),
+            lowstate_topic=os.environ.get("UNITREE_LOWSTATE_TOPIC", "rt/lowstate"),
+            secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
+            publish_secondary_imu=_env_flag("SONIC_PUBLISH_SECONDARY_IMU", True),
+            target_order="mujoco",
+            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
+            debug_log_interval=100,
         )
 
     if ENABLE_WALKER_ROBOT:
