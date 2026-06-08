@@ -196,6 +196,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_pose_anchor: torch.Tensor | None = None
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
+        self._root_pose_unlocked = False
         self._base_trans_target: torch.Tensor | None = None
         self._initial_base_target_pos: torch.Tensor | None = None
         self._previous_base_trans_target: torch.Tensor | None = None
@@ -528,7 +529,7 @@ class SonicDeployTargetAction(ActionTerm):
         return self._processed_actions + delta
 
     def _stabilize_root_pose(self) -> None:
-        if not self.cfg.stabilize_root_pose:
+        if not self.cfg.stabilize_root_pose or self._root_pose_unlocked:
             return
         if self._root_pose_anchor is None:
             self._root_pose_anchor = torch.cat(
@@ -675,6 +676,16 @@ class SonicDeployTargetAction(ActionTerm):
         self._asset.write_root_pose_to_sim(root_pose_target)
         self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
 
+    def unlock_root_pose(self) -> None:
+        if not self.cfg.stabilize_root_pose:
+            self._log_info("root pose stabilization is disabled; unlock request ignored")
+            return
+        if self._root_pose_unlocked:
+            return
+        self._root_pose_unlocked = True
+        self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+        self._log_info("root pose unlocked by operator")
+
     def process_actions(self, actions: torch.Tensor):
         payload = self._drain_latest_packet()
         if payload is not None:
@@ -729,6 +740,7 @@ class SonicDeployTargetAction(ActionTerm):
             self._last_target_step_delta_absmax.zero_()
             self._last_root_xy_step_norm.zero_()
             self._root_pose_anchor = None
+            self._root_pose_unlocked = False
             self._base_trans_target = None
             self._initial_base_target_pos = None
             self._previous_base_trans_target = None
@@ -748,6 +760,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_target_step_delta_absmax[env_ids] = 0.0
         self._last_root_xy_step_norm[env_ids] = 0.0
         self._root_pose_anchor = None
+        self._root_pose_unlocked = False
         self._base_trans_target = None
         self._initial_base_target_pos = None
         self._previous_base_trans_target = None
@@ -803,6 +816,7 @@ class UnitreeDdsLowCmdAction(ActionTerm):
         self._root_pose_anchor: torch.Tensor | None = None
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
+        self._root_pose_unlocked = False
         self._dds_ready = False
         self._lowstate_msg = None
         self._secondary_imu_msg = None
@@ -933,7 +947,7 @@ class UnitreeDdsLowCmdAction(ActionTerm):
         return self._processed_actions + delta
 
     def _stabilize_root_pose(self) -> None:
-        if not self.cfg.stabilize_root_pose:
+        if not self.cfg.stabilize_root_pose or self._root_pose_unlocked:
             return
         if self._root_pose_anchor is None:
             self._root_pose_anchor = torch.cat(
@@ -948,6 +962,16 @@ class UnitreeDdsLowCmdAction(ActionTerm):
                 self._root_anchor_logged = True
         self._asset.write_root_pose_to_sim(self._root_pose_anchor)
         self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+
+    def unlock_root_pose(self) -> None:
+        if not self.cfg.stabilize_root_pose:
+            self._log_info("root pose stabilization is disabled; unlock request ignored")
+            return
+        if self._root_pose_unlocked:
+            return
+        self._root_pose_unlocked = True
+        self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+        self._log_info("root pose unlocked by operator")
 
     @staticmethod
     def _set_sequence(dst, values) -> None:
@@ -1037,10 +1061,12 @@ class UnitreeDdsLowCmdAction(ActionTerm):
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_target_step_delta_absmax.zero_()
             self._root_pose_anchor = None
+            self._root_pose_unlocked = False
             return
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
         self._root_pose_anchor = None
+        self._root_pose_unlocked = False
 
 
 class UnitreeLowStatePublisherAction(ActionTerm):

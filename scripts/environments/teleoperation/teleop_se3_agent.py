@@ -195,17 +195,32 @@ def main() -> None:
         should_reset_recording_instance = True
         print("Reset triggered - Environment will reset on next step")
 
+    def unlock_sonic_root_pose() -> None:
+        try:
+            term = env.action_manager.get_term("sonic_wholebody")
+            unlock = getattr(term, "unlock_root_pose", None)
+            if callable(unlock):
+                unlock()
+            else:
+                term.cfg.stabilize_root_pose = False
+                print("[teleop_se3_agent] sonic root pose unlocked")
+        except Exception as exc:
+            logger.warning(f"Failed to unlock sonic root pose: {exc}")
+
     def start_teleoperation() -> None:
         """
         Activate teleoperation control of the robot.
 
         Enables the application of teleoperation commands to the environment.
+        In SONIC deploy target mode, START also releases the startup root lock.
 
         Returns:
             None
         """
         nonlocal teleoperation_active
         teleoperation_active = True
+        if deploy_target_mode:
+            unlock_sonic_root_pose()
         print("Teleoperation activated")
 
     def stop_teleoperation() -> None:
@@ -227,6 +242,7 @@ def main() -> None:
         "START": start_teleoperation,
         "STOP": stop_teleoperation,
         "RESET": reset_recording_instance,
+        "U": unlock_sonic_root_pose,
     }
 
     # 手部追踪通常启动时先让用户摆好姿态/校准，所以默认不立即发送 teleop action；
@@ -236,13 +252,40 @@ def main() -> None:
     else:
         teleoperation_active = True
 
-    # 普通 teleop 模式需要创建输入设备；deploy target 模式不需要，因为机器人目标来自外部进程。
+    # 普通 teleop 模式需要创建设备来产生 action；deploy target 模式只需要设备回调。
     teleop_interface = None
+    deploy_keyboard_interface = None
     if deploy_target_mode:
         print(
             "[teleop_se3_agent] SONIC deploy target mode enabled; "
             "using zero env actions while SonicDeployTargetAction consumes external packets."
         )
+        deploy_callback_device_name = args_cli.teleop_device
+        try:
+            deploy_keyboard_interface = Se3Keyboard(
+                Se3KeyboardCfg(pos_sensitivity=0.0, rot_sensitivity=0.0)
+            )
+            deploy_keyboard_interface.add_callback("U", unlock_sonic_root_pose)
+            deploy_keyboard_interface.add_callback("R", reset_recording_instance)
+            print("[teleop_se3_agent] deploy keyboard callback: U unlocks sonic root pose")
+        except Exception as exc:
+            logger.warning(f"Failed to create deploy keyboard callback device: {exc}")
+
+        if hasattr(env_cfg, "teleop_devices"):
+            devices = env_cfg.teleop_devices.devices
+            if deploy_callback_device_name not in devices and "motion_controllers" in devices:
+                deploy_callback_device_name = "motion_controllers"
+            if deploy_callback_device_name in devices:
+                try:
+                    teleop_interface = create_teleop_device(
+                        deploy_callback_device_name, devices, teleoperation_callbacks
+                    )
+                    print(
+                        f"[teleop_se3_agent] deploy callback device: {deploy_callback_device_name} "
+                        "(START unlocks sonic root pose)"
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to create deploy callback device: {exc}")
     else:
         try:
             if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:

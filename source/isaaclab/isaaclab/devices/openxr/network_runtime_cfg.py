@@ -4,8 +4,8 @@ import os
 from dataclasses import dataclass
 
 
-MACHINE_A_IP = os.environ.get("ISAACLAB_MACHINE_A_IP", "192.168.50.105")
-MACHINE_B_IP = os.environ.get("ISAACLAB_MACHINE_B_IP", "192.168.50.68")
+MACHINE_A_IP = os.environ.get("ISAACLAB_MACHINE_A_IP", "192.168.50.68")
+MACHINE_B_IP = os.environ.get("ISAACLAB_MACHINE_B_IP", "192.168.50.105")
 TRACKING_HUB_IP = os.environ.get("ISAACLAB_TRACKING_HUB_IP", MACHINE_A_IP)
 DEPLOY_LOCAL_MACHINE_IP = os.environ.get("ISAACLAB_LOCAL_MACHINE_IP", MACHINE_A_IP)
 

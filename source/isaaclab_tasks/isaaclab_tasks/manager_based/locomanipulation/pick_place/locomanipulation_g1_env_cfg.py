@@ -79,12 +79,14 @@ def _env_flag(name: str, default: bool) -> bool:
 SONIC_G1_PHYSICS_MODE = _env_flag("SONIC_G1_PHYSICS_MODE", False)
 SONIC_G1_FIX_ROOT = not SONIC_G1_PHYSICS_MODE
 SONIC_G1_VISUAL_SERVO_MODE = _env_flag("SONIC_G1_VISUAL_SERVO_MODE", SONIC_G1_FIX_ROOT)
+SONIC_G1_SELF_COLLISIONS = SONIC_G1_PHYSICS_MODE and _env_flag("SONIC_G1_SELF_COLLISIONS", False)
 ENABLE_WALKER_ROBOT = _env_flag("LOCIMANIP_ENABLE_WALKER_ROBOT", False) and SONIC_G1_PHYSICS_MODE
 print(
     "[locomanip_cfg] "
     f"SONIC_G1_FIX_ROOT={SONIC_G1_FIX_ROOT} "
     f"SONIC_G1_PHYSICS_MODE={SONIC_G1_PHYSICS_MODE} "
     f"SONIC_G1_VISUAL_SERVO_MODE={SONIC_G1_VISUAL_SERVO_MODE} "
+    f"SONIC_G1_SELF_COLLISIONS={SONIC_G1_SELF_COLLISIONS} "
     f"ENABLE_WALKER_ROBOT={ENABLE_WALKER_ROBOT} "
     f"legacy_SONIC_G1_FIX_ROOT_env={os.environ.get('SONIC_G1_FIX_ROOT', '<unset>')!r}"
 )
@@ -141,9 +143,11 @@ _D_7520_22 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_22 * _SONIC_NATUR
 _D_4010 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ
 
 SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+SONIC_G1_29DOF_CFG.spawn.activate_contact_sensors = SONIC_G1_PHYSICS_MODE
 SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = SONIC_G1_FIX_ROOT
+SONIC_G1_29DOF_CFG.spawn.articulation_props.enabled_self_collisions = SONIC_G1_SELF_COLLISIONS
 SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = _env_flag("SONIC_G1_DISABLE_GRAVITY", SONIC_G1_FIX_ROOT)
-SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.75)
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.76)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 SONIC_G1_29DOF_CFG.init_state.joint_pos = dict(
     zip(SONIC_G1_29DOF_JOINT_ORDER, SONIC_G1_29DOF_DEFAULT_ANGLES, strict=True)
@@ -512,7 +516,7 @@ class ActionsCfg:
             secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
             target_order="mujoco",
             target_rate_limit_rad_per_step=0.08,
-            stabilize_root_pose=SONIC_G1_FIX_ROOT,
+            stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
             stale_timeout_s=0.5,
             publish_lowstate_every_apply=True,
             mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
@@ -527,7 +531,7 @@ class ActionsCfg:
             target_field=os.environ.get("SONIC_DEPLOY_TARGET_FIELD", "last_action"),
             target_order="mujoco",
             target_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_TARGET_RATE_LIMIT", "0.16")),
-            stabilize_root_pose=SONIC_G1_FIX_ROOT,
+            stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
             stale_timeout_s=0.5,
             fallback_to_last_action=True,
             fallback_to_body_q_target=True,
