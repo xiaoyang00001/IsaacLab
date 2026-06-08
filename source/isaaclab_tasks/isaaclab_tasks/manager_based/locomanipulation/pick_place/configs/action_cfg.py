@@ -173,6 +173,15 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     base_height_scale: float = 1.0
     """Scale applied to deploy base_trans_target Z deltas."""
 
+    keep_feet_on_ground: bool = False
+    """Lower the fixed root when the knees bend so a squat shows as the body sinking instead of the feet lifting. Driven by knee-joint angle (stable and bounded), not world foot positions (which get corrupted by floor contact in fixed-root mode)."""
+
+    foot_ground_scale: float = 0.35
+    """Meters the fixed root sinks per radian of average knee bend beyond the standing pose."""
+
+    max_squat_drop_m: float = 0.45
+    """Maximum root sink (m) from squat compensation, clamped to avoid going through the floor."""
+
     synthetic_base_motion_from_lower_body: bool = True
     """Generate visual root XY motion from leg activity when base_trans_target is static."""
 

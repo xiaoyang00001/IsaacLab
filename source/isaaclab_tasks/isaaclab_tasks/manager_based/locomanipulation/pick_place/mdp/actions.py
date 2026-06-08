@@ -209,6 +209,17 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_anchor_yaw: torch.Tensor | None = None
         self._last_root_yaw_target: torch.Tensor | None = None
         self._last_root_z_target: torch.Tensor | None = None
+        self._anchor_knee: torch.Tensor | None = None
+        knee_ids = [idx for idx, name in enumerate(self._joint_names) if "knee" in name]
+        self._knee_joint_indices = torch.tensor(knee_ids, device=self.device, dtype=torch.long)
+        if bool(cfg.keep_feet_on_ground):
+            if self._knee_joint_indices.numel() == 0:
+                self._log_warning("keep_feet_on_ground enabled but no knee joints found; disabling squat")
+            else:
+                self._log_info(
+                    f"keep_feet_on_ground squat via knee joints "
+                    f"{[self._joint_names[i] for i in knee_ids]} scale={cfg.foot_ground_scale} max_drop={cfg.max_squat_drop_m}"
+                )
         self._last_target_field = "<none>"
         self._last_reference_field = "<none>"
 
@@ -526,6 +537,8 @@ class SonicDeployTargetAction(ActionTerm):
             self._root_anchor_yaw = self._yaw_from_quat(self._root_pose_anchor[:, 3:7]).clone()
             self._last_root_xy_target = self._root_pose_anchor[:, :2].clone()
             self._last_root_yaw_target = self._root_anchor_yaw.clone()
+            if self._knee_joint_indices.numel() > 0:
+                self._anchor_knee = self._processed_actions[:, self._knee_joint_indices].mean(dim=-1).clone()
             if not self._root_anchor_logged:
                 anchor = self._root_pose_anchor[0].detach().cpu().tolist()
                 self._log_info(
@@ -625,6 +638,25 @@ class SonicDeployTargetAction(ActionTerm):
             self._last_root_z_target = desired_z.clone()
             root_pose_target[:, 2] = desired_z
 
+        if bool(self.cfg.keep_feet_on_ground) and self._knee_joint_indices.numel() > 0:
+            knee = self._processed_actions[:, self._knee_joint_indices].mean(dim=-1)
+            if self._anchor_knee is None:
+                self._anchor_knee = knee.clone()
+            squat_depth = torch.clamp(
+                (knee - self._anchor_knee) * float(self.cfg.foot_ground_scale),
+                min=0.0,
+                max=float(self.cfg.max_squat_drop_m),
+            )
+            desired_z = self._root_pose_anchor[:, 2] - squat_depth
+            max_delta = float(self.cfg.base_height_rate_limit_m_per_step)
+            if max_delta > 0.0 and self._last_root_z_target is not None:
+                z_delta = torch.clamp(
+                    desired_z - self._last_root_z_target, min=-max_delta, max=max_delta
+                )
+                desired_z = self._last_root_z_target + z_delta
+            self._last_root_z_target = desired_z.clone()
+            root_pose_target[:, 2] = desired_z
+
         if bool(self.cfg.follow_base_yaw_target) and self._base_quat_target is not None:
             base_target_yaw = self._yaw_from_quat(self._base_quat_target)
             if self._initial_base_target_yaw is None:
@@ -666,13 +698,25 @@ class SonicDeployTargetAction(ActionTerm):
         self._debug_counter += 1
         if self.cfg.debug_log_interval > 0 and self._debug_counter % self.cfg.debug_log_interval == 0:
             proc = self._processed_actions[0].detach().cpu()
+            bt = self._base_trans_target
+            bt_text = (
+                f"({bt[0, 0].item():+.3f},{bt[0, 1].item():+.3f},{bt[0, 2].item():+.3f})"
+                if bt is not None
+                else "<none>"
+            )
+            rz_text = (
+                f"{self._last_root_z_target[0].item():+.3f}"
+                if self._last_root_z_target is not None
+                else "<none>"
+            )
             self._log_info(
                 f"step={self._debug_counter} packets={self._packet_count} "
                 f"field={self._last_target_field} ref={self._last_reference_field} "
                 f"target_mean={proc.mean():+.4f} target_absmax={proc.abs().max():.4f} "
                 f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f} "
                 f"root_xy_step={self._last_root_xy_step_norm[0].item():.4f} "
-                f"root_src={self._last_root_motion_source}"
+                f"root_src={self._last_root_motion_source} "
+                f"base_trans={bt_text} root_z={rz_text}"
             )
 
     def apply_actions(self):
@@ -698,6 +742,7 @@ class SonicDeployTargetAction(ActionTerm):
             self._root_anchor_yaw = None
             self._last_root_yaw_target = None
             self._last_root_z_target = None
+            self._anchor_knee = None
             return
         self._processed_actions[env_ids] = self._default_joint_pos[env_ids]
         self._last_target_step_delta_absmax[env_ids] = 0.0
@@ -716,6 +761,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_anchor_yaw = None
         self._last_root_yaw_target = None
         self._last_root_z_target = None
+        self._anchor_knee = None
 
 
 class UnitreeDdsLowCmdAction(ActionTerm):
