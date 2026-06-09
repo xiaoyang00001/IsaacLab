@@ -125,13 +125,13 @@ parser.add_argument(
 parser.add_argument(
     "--task-camera-head-rig-x",
     type=float,
-    default=-0.485,
+    default=-0.25597,
     help="Head-link local X translation for the RobotYaoTaskStereo rig parent, in meters.",
 )
 parser.add_argument(
     "--task-camera-head-rig-y",
     type=float,
-    default=0.12683,
+    default=0.15846,
     help="Head-link local Y translation for the RobotYaoTaskStereo rig parent, in meters.",
 )
 parser.add_argument(
@@ -143,7 +143,7 @@ parser.add_argument(
 parser.add_argument(
     "--task-camera-head-rig-roll-deg",
     type=float,
-    default=90.0,
+    default=-90.0,
     help="Head-link local X rotation for the RobotYaoTaskStereo rig parent, in degrees.",
 )
 parser.add_argument(
@@ -155,7 +155,7 @@ parser.add_argument(
 parser.add_argument(
     "--task-camera-head-rig-yaw-deg",
     type=float,
-    default=0.0,
+    default=180.0,
     help="Head-link local Z rotation for the RobotYaoTaskStereo rig parent, in degrees.",
 )
 parser.add_argument(
@@ -775,6 +775,10 @@ def _design_task_scene_stereo_cameras(
         left_camera_prim_path = f"{head_link_expr}/RobotYaoTaskStereo/LeftFisheye"
         right_camera_prim_path = f"{head_link_expr}/RobotYaoTaskStereo/RightFisheye"
         camera_offset_rot = _quat_wxyz_from_pitch_tuple(math.radians(float(args_cli.task_camera_head_look_down_deg)))
+        # Visual verification with the current head mount shows +local Y appears on the robot's physical right.
+        # Keep the named LeftFisheye on the physical left by assigning it the negative local-Y offset.
+        left_lateral_offset = float(-args_cli.baseline * 0.5)
+        right_lateral_offset = float(args_cli.baseline * 0.5)
         left_camera = Camera(
             cfg=_make_task_fisheye_camera_cfg(
                 left_camera_prim_path,
@@ -783,7 +787,7 @@ def _design_task_scene_stereo_cameras(
                 fisheye_fov,
                 (
                     float(args_cli.task_camera_head_forward_offset),
-                    float(args_cli.baseline * 0.5),
+                    left_lateral_offset,
                     float(args_cli.task_camera_head_up_offset),
                 ),
                 camera_offset_rot,
@@ -797,7 +801,7 @@ def _design_task_scene_stereo_cameras(
                 fisheye_fov,
                 (
                     float(args_cli.task_camera_head_forward_offset),
-                    float(-args_cli.baseline * 0.5),
+                    right_lateral_offset,
                     float(args_cli.task_camera_head_up_offset),
                 ),
                 camera_offset_rot,
@@ -952,6 +956,8 @@ class RobotYaoTaskSceneController:
                 f"local_forward={args_cli.task_camera_head_forward_offset:.3f} m, "
                 f"local_up={args_cli.task_camera_head_up_offset:.3f} m, "
                 f"baseline={args_cli.baseline:.3f} m, "
+                f"left_local_y={-args_cli.baseline * 0.5:.3f} m, "
+                f"right_local_y={args_cli.baseline * 0.5:.3f} m, "
                 f"local_look_down={args_cli.task_camera_head_look_down_deg:.1f} deg",
                 flush=True,
             )

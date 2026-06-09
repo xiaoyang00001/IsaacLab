@@ -20,7 +20,7 @@ namespace RobotYao
 
         [Header("Fisheye")]
         [SerializeField] private float fisheyeFovDegrees = 180.0f;
-        [SerializeField] private bool flipY = true;
+        [SerializeField] private bool flipY = false;
         [SerializeField] private bool swapRedBlue = false;
 
         [Header("Preview")]

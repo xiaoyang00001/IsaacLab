@@ -4,7 +4,7 @@ Shader "RobotYao/Fisheye180Inside"
     {
         _MainTex ("Fisheye Texture", 2D) = "black" {}
         _FovDeg ("FOV Degrees", Float) = 180
-        _FlipY ("Flip Y", Float) = 1
+        _FlipY ("Flip Y", Float) = 0
         _SwapRedBlue ("Swap Red Blue", Float) = 0
         _Exposure ("Exposure", Float) = 1
     }
