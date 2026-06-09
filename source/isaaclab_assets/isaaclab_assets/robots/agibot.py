@@ -106,7 +106,7 @@ AGIBOT_A2D_CFG = ArticulationCfg(
             },
             velocity_limit_sim=1.57,
             stiffness={"left_arm_joint1": 10000000.0, "left_arm_joint[2-7]": 20000.0},
-            damping={"left_arm_joint1": 0.0, "left_arm_joint[2-7]": 0.0},
+            damping={"left_arm_joint1": 2000.0, "left_arm_joint[2-7]": 200.0},
         ),
         # Right arm actuator
         "right_arm": ImplicitActuatorCfg(
@@ -117,7 +117,7 @@ AGIBOT_A2D_CFG = ArticulationCfg(
             },
             velocity_limit_sim=1.57,
             stiffness={"right_arm_joint1": 10000000.0, "right_arm_joint[2-7]": 20000.0},
-            damping={"right_arm_joint1": 0.0, "right_arm_joint[2-7]": 0.0},
+            damping={"right_arm_joint1": 2000.0, "right_arm_joint[2-7]": 200.0},
         ),
         # "left_Right_2_Joint" is excluded from Articulation.
         # "left_hand_joint1" is the driver joint, and "left_Right_1_Joint" is the mimic joint.

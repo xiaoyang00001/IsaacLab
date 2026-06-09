@@ -26,3 +26,4 @@ from .humanoid.unitree.trihand.g1_upper_body_retargeter import (
 from .manipulator.gripper_retargeter import GripperRetargeter, GripperRetargeterCfg
 from .manipulator.se3_abs_retargeter import Se3AbsRetargeter, Se3AbsRetargeterCfg
 from .manipulator.se3_rel_retargeter import Se3RelRetargeter, Se3RelRetargeterCfg
+from .robotyao_wheeled_xr_retargeter import RobotYaoWheeledXrRetargeter, RobotYaoWheeledXrRetargeterCfg

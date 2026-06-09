@@ -192,21 +192,41 @@ class ZeroMqGameSubDevice(DeviceBase):
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._socket is not None:
+        thread = self._thread
+        context = self._context
+
+        if thread is not None and thread.is_alive():
+            join_timeout = max(1.0, self._cfg.receive_timeout_ms / 1000.0 + 0.5)
+            thread.join(timeout=join_timeout)
+
+        if thread is not None and thread.is_alive():
+            logger.warning("ZeroMQ subscriber thread did not stop within timeout; terminating context.")
+            context = self._context
+            try:
+                if context is not None:
+                    context.term()
+                    self._context = None
+            except Exception:
+                pass
+            thread.join(timeout=1.0)
+            context = None
+
+        if self._socket is not None and (thread is None or not thread.is_alive()):
             try:
                 self._socket.close(0)
             except Exception:
                 pass
             self._socket = None
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-        self._thread = None
-        if self._context is not None:
+
+        if context is not None and (thread is None or not thread.is_alive()):
             try:
-                self._context.term()
+                context.term()
             except Exception:
                 pass
             self._context = None
+
+        if thread is None or not thread.is_alive():
+            self._thread = None
 
     def reset(self) -> None:
         with self._lock:
@@ -227,6 +247,18 @@ class ZeroMqGameSubDevice(DeviceBase):
     def add_callback(self, key: str, func: Callable):
         """Keep the same callback API as OpenXRDevice for START/STOP/RESET hooks."""
         self._additional_callbacks[key] = func
+
+    def advance(self) -> torch.Tensor | None:
+        """Process current device state and return control commands.
+
+        Returns:
+            None if no remote player is connected or no tracking packets have been received.
+            Otherwise, a torch.Tensor containing the retargeted outputs.
+        """
+        with self._lock:
+            if self._select_remote_player_id_locked() is None:
+                return None
+        return super().advance()
 
     def _get_raw_data(self) -> Any:
         """Return latest remote tracking data in Isaac Lab device format."""
@@ -274,36 +306,50 @@ class ZeroMqGameSubDevice(DeviceBase):
     # ---------------------------------------------------------------------
 
     def _thread_sub_fun(self) -> None:
-        socket = self._context.socket(zmq.SUB)
-        self._socket = socket
-        socket.setsockopt(zmq.LINGER, 0)
-        socket.setsockopt(zmq.RCVHWM, self._cfg.receive_high_water_mark)
-        socket.setsockopt_string(zmq.SUBSCRIBE, self._cfg.topic)
-        socket.setsockopt(zmq.RCVTIMEO, self._cfg.receive_timeout_ms)
-
+        socket = None
         try:
-            socket.connect(self._cfg.endpoint)
-        except Exception as exc:
-            logger.error("ZeroMQ subscriber connect failed: %s", exc)
-            return
+            context = self._context
+            if context is None:
+                return
 
-        while not self._stop_event.is_set():
-            try:
-                frames = socket.recv_multipart()
-            except zmq.Again:
-                continue
-            except zmq.ZMQError:
-                if not self._stop_event.is_set():
-                    logger.exception("ZeroMQ subscriber receive failed")
-                break
+            socket = context.socket(zmq.SUB)
+            self._socket = socket
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.setsockopt(zmq.RCVHWM, self._cfg.receive_high_water_mark)
+            socket.setsockopt_string(zmq.SUBSCRIBE, self._cfg.topic)
+            socket.setsockopt(zmq.RCVTIMEO, self._cfg.receive_timeout_ms)
 
-            if not frames:
-                continue
-            payload = frames[-1]
             try:
-                self._handle_remote_packet(payload)
-            except Exception:
-                logger.exception("Failed to handle MGXR packet")
+                socket.connect(self._cfg.endpoint)
+            except Exception as exc:
+                logger.error("ZeroMQ subscriber connect failed: %s", exc)
+                return
+
+            while not self._stop_event.is_set():
+                try:
+                    frames = socket.recv_multipart()
+                except zmq.Again:
+                    continue
+                except zmq.ZMQError:
+                    if not self._stop_event.is_set():
+                        logger.exception("ZeroMQ subscriber receive failed")
+                    break
+
+                if not frames:
+                    continue
+                payload = frames[-1]
+                try:
+                    self._handle_remote_packet(payload)
+                except Exception:
+                    logger.exception("Failed to handle MGXR packet")
+        finally:
+            if socket is not None:
+                try:
+                    socket.close(0)
+                except Exception:
+                    pass
+                if self._socket is socket:
+                    self._socket = None
 
     def _handle_remote_packet(self, data: bytes) -> None:
         header = self._parse_header(data)
@@ -365,9 +411,13 @@ class ZeroMqGameSubDevice(DeviceBase):
 
     def _parse_controller_states(self, payload: bytes, offset: int, is_left: bool) -> np.ndarray:
         buttons, _touches, thumbstick_x, thumbstick_y, trigger = _CONTROLLER_STATES_STRUCT.unpack_from(payload, offset)
+        trigger_button_mask = getattr(self._cfg, "trigger_button_mask", 0)
+        trigger_pressed = 1.0 if trigger_button_mask and (buttons & trigger_button_mask) else 0.0
+        trigger = max(float(trigger), trigger_pressed)
         squeeze = 1.0 if (buttons & self._cfg.squeeze_button_mask) else 0.0
         button_0 = 1.0 if (buttons & self._cfg.button_0_mask) else 0.0
         button_1 = 1.0 if (buttons & self._cfg.button_1_mask) else 0.0
+        thumbstick_click = 1.0 if (buttons & self._cfg.thumbstick_button_mask) else 0.0
 
         if is_left:
             if button_0 > 0.5:
@@ -384,7 +434,9 @@ class ZeroMqGameSubDevice(DeviceBase):
                     self._additional_callbacks["RESET"]()
                 print("[IsaacLab] [ZeroMQ] Button 0 pressed")
 
-        return np.array([thumbstick_x, thumbstick_y, trigger, squeeze, button_0, button_1, 0.0], dtype=np.float32)
+        return np.array(
+            [thumbstick_x, thumbstick_y, trigger, squeeze, button_0, button_1, thumbstick_click], dtype=np.float32
+        )
 
     def _parse_hand_tracking_info(self, payload: bytes) -> dict[str, Any]:
         if len(payload) != _HAND_PAYLOAD_SIZE:
@@ -486,7 +538,9 @@ class ZeroMqGameSubDeviceCfg(DeviceCfg):
     # These bit masks map packed ``buttons`` to the 7-value Isaac Lab controller input row:
     # [thumbstick_x, thumbstick_y, trigger, squeeze, button_0, button_1, padding].
     squeeze_button_mask: int = 1 << 3
+    trigger_button_mask: int = 1 << 4
     button_0_mask: int = 1 << 0
     button_1_mask: int = 1 << 1
+    thumbstick_button_mask: int = 1 << 2
 
     class_type: type[DeviceBase] = ZeroMqGameSubDevice

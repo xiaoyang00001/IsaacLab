@@ -1,0 +1,4 @@
+Checking prims after spawning:
+Prim: /World/Robot, Type: Xform, Has ArticulationRootAPI: False, Has PhysxArticulationAPI: False
+Prim: /World/Robot/base_link, Type: Xform, Has ArticulationRootAPI: True, Has PhysxArticulationAPI: True
+Prim: /World/Robot/root_joint, Type: PhysicsFixedJoint, Has ArticulationRootAPI: False, Has PhysxArticulationAPI: False

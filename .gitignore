@@ -7,6 +7,7 @@
 # Omniverse
 **/*.dmp
 **/.thumbs
+/.robotyao_cache/
 
 # No USD files allowed in the repo
 **/*.usd

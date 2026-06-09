@@ -19,10 +19,11 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
-from isaaclab.sim.schemas.schemas_cfg import MassPropertiesCfg, RigidBodyPropertiesCfg
+from isaaclab.sim.schemas.schemas_cfg import CollisionPropertiesCfg, MassPropertiesCfg, RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
+from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
+from isaaclab.sim.spawners.shapes.shapes_cfg import CuboidCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 
 from isaaclab_tasks.manager_based.manipulation.place import mdp as place_mdp
 from isaaclab_tasks.manager_based.manipulation.stack import mdp
@@ -35,6 +36,41 @@ from isaaclab_tasks.manager_based.manipulation.stack.stack_env_cfg import Object
 from isaaclab.markers.config import FRAME_MARKER_CFG  # isort: skip
 from isaaclab_assets.robots.agibot import AGIBOT_A2D_CFG  # isort: skip
 from isaaclab.controllers.config.rmp_flow import AGIBOT_RIGHT_ARM_RMPFLOW_CFG  # isort: skip
+
+
+def _resolve_local_asset_path(*relative_paths: str) -> str | None:
+    """Resolve an asset from common local Isaac Sim asset mirror locations."""
+    candidate_roots = [
+        os.getenv("ROBOTYAO_ISAAC_ASSET_ROOT"),
+        os.getenv("ISAACSIM_ASSETS_ROOT"),
+        os.getenv("ISAAC_SIM_ASSETS_ROOT"),
+        r"D:\Omniverse\isaacsim_assets\Assets\Isaac\5.1",
+        r"D:\Omniverse\isaacsim_assets\Assets\Isaac\5.1\Isaac",
+    ]
+    for root in candidate_roots:
+        if not root:
+            continue
+        for relative_path in relative_paths:
+            candidate = os.path.join(root, relative_path)
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+    return None
+
+
+def _make_fallback_cuboid(
+    size: tuple[float, float, float],
+    color: tuple[float, float, float],
+    rigid_props: RigidBodyPropertiesCfg,
+    mass_props: MassPropertiesCfg | None = None,
+) -> CuboidCfg:
+    """Create a simple physics cuboid when the demonstration USD asset is unavailable."""
+    return CuboidCfg(
+        size=size,
+        collision_props=CollisionPropertiesCfg(),
+        rigid_props=rigid_props,
+        mass_props=mass_props,
+        visual_material=PreviewSurfaceCfg(diffuse_color=color, roughness=0.5),
+    )
 
 ##
 # Event settings
@@ -195,17 +231,67 @@ class PlaceToy2BoxEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.bounce_threshold_velocity = 0.2
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
-        self.sim.physx.friction_correlation_distance = 0.00625
 
-        # set viewer to see the whole scene
-        self.viewer.eye = [1.5, -1.0, 1.5]
-        self.viewer.lookat = [0.5, 0.0, 0.0]
 
 
 """
 Env to Replay Sim2Lab Demonstrations with JointSpaceAction
 """
+
+
+def spawn_agibot_floating(prim_path, cfg, translation=None, orientation=None, **kwargs):
+    from isaaclab.sim.spawners.from_files import spawn_from_usd
+    from isaaclab.sim.utils import get_current_stage, find_matching_prim_paths
+    from pxr import UsdPhysics, PhysxSchema
+
+    print(f"[AgiBot Spawn Debug] spawn_agibot_floating called with prim_path: {prim_path}", flush=True)
+    prim = spawn_from_usd(prim_path, cfg, translation, orientation, **kwargs)
+    stage = get_current_stage()
+
+    # Find all matching root_joint paths on the stage
+    root_joint_pattern = f"{prim_path}/root_joint"
+    root_joint_paths = find_matching_prim_paths(root_joint_pattern)
+    print(f"[AgiBot Spawn Debug] Resolved root_joint_paths: {root_joint_paths}", flush=True)
+
+    for r_joint_path in root_joint_paths:
+        root_joint_prim = stage.GetPrimAtPath(r_joint_path)
+        b_link_path = r_joint_path.replace("/root_joint", "/base_link")
+        base_link_prim = stage.GetPrimAtPath(b_link_path)
+        
+        print(f"[AgiBot Spawn Debug] Processing {r_joint_path}. root_joint valid: {root_joint_prim.IsValid() if root_joint_prim else False}, base_link valid: {base_link_prim.IsValid() if base_link_prim else False}", flush=True)
+        
+        if root_joint_prim.IsValid() and base_link_prim.IsValid():
+            # Apply APIs to base_link
+            UsdPhysics.ArticulationRootAPI.Apply(base_link_prim)
+            PhysxSchema.PhysxArticulationAPI.Apply(base_link_prim)
+            
+            # Copy values from root_joint to base_link
+            root_joint_art_api = UsdPhysics.ArticulationRootAPI(root_joint_prim)
+            base_link_art_api = UsdPhysics.ArticulationRootAPI(base_link_prim)
+            for attr_name in root_joint_art_api.GetSchemaAttributeNames():
+                attr = root_joint_prim.GetAttribute(attr_name)
+                if attr.IsValid() and attr.HasValue():
+                    base_link_prim.GetAttribute(attr_name).Set(attr.Get())
+                    
+            root_joint_physx_api = PhysxSchema.PhysxArticulationAPI(root_joint_prim)
+            base_link_physx_api = PhysxSchema.PhysxArticulationAPI(base_link_prim)
+            for attr_name in root_joint_physx_api.GetSchemaAttributeNames():
+                attr = root_joint_prim.GetAttribute(attr_name)
+                if attr.IsValid() and attr.HasValue():
+                    base_link_prim.GetAttribute(attr_name).Set(attr.Get())
+            
+            # Remove APIs from root_joint
+            root_joint_prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+            root_joint_prim.RemoveAPI(PhysxSchema.PhysxArticulationAPI)
+            
+            # Disable root_joint to ensure it is floating
+            joint_api = UsdPhysics.Joint(root_joint_prim)
+            if joint_api:
+                joint_api.GetJointEnabledAttr().Set(False)
+                
+            print(f"[AgiBot Floating Spawn] Successfully migrated ArticulationRootAPI to base_link and disabled root_joint for {r_joint_path}", flush=True)
+            
+    return prim
 
 
 class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
@@ -219,14 +305,28 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
 
         # Set Agibot as robot
         self.scene.robot = AGIBOT_A2D_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.spawn.func = spawn_agibot_floating
+        self.scene.robot.spawn.rigid_props.disable_gravity = True
+        self.scene.robot.spawn.articulation_props.fix_root_link = False
+        self.scene.robot.init_state.pos = (-0.6, 0.0, -1.04)
+        self.scene.plane = AssetBaseCfg(
+            prim_path="/World/GroundPlane",
+            init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.0, -1.06]),
+            spawn=CuboidCfg(
+                size=(20.0, 20.0, 0.02),
+                collision_props=CollisionPropertiesCfg(),
+                visual_material=PreviewSurfaceCfg(diffuse_color=(0.28, 0.30, 0.32), roughness=0.8),
+            ),
+        )
 
         # add table
         self.scene.table = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/Table",
-            init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.7], rot=[0.707, 0, 0, 0.707]),
-            spawn=UsdFileCfg(
-                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
-                scale=(1.8, 1.0, 0.30),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.70]),
+            spawn=CuboidCfg(
+                size=(1.45, 0.90, 0.08),
+                collision_props=CollisionPropertiesCfg(),
+                visual_material=PreviewSurfaceCfg(diffuse_color=(0.48, 0.50, 0.52), roughness=0.7),
             ),
         )
 
@@ -275,23 +375,51 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
         toy_mass_properties = MassPropertiesCfg(
             mass=0.05,
         )
+        toy_truck_usd_path = _resolve_local_asset_path(
+            "Isaac/IsaacLab/Objects/ToyTruck/toy_truck.usd",
+            "IsaacLab/Objects/ToyTruck/toy_truck.usd",
+            "Objects/ToyTruck/toy_truck.usd",
+        )
+        box_usd_path = _resolve_local_asset_path(
+            "Isaac/IsaacLab/Objects/Box/box.usd",
+            "IsaacLab/Objects/Box/box.usd",
+            "Objects/Box/box.usd",
+        )
 
         self.scene.toy_truck = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/ToyTruck",
             init_state=RigidObjectCfg.InitialStateCfg(),
-            spawn=UsdFileCfg(
-                usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Objects/ToyTruck/toy_truck.usd",
-                rigid_props=toy_truck_properties,
-                mass_props=toy_mass_properties,
+            spawn=(
+                UsdFileCfg(
+                    usd_path=toy_truck_usd_path,
+                    rigid_props=toy_truck_properties,
+                    mass_props=toy_mass_properties,
+                )
+                if toy_truck_usd_path is not None
+                else _make_fallback_cuboid(
+                    size=(0.18, 0.10, 0.08),
+                    color=(0.10, 0.25, 0.90),
+                    rigid_props=toy_truck_properties,
+                    mass_props=toy_mass_properties,
+                )
             ),
         )
 
         self.scene.box = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Box",
             init_state=RigidObjectCfg.InitialStateCfg(),
-            spawn=UsdFileCfg(
-                usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Objects/Box/box.usd",
-                rigid_props=box_properties,
+            spawn=(
+                UsdFileCfg(
+                    usd_path=box_usd_path,
+                    rigid_props=box_properties,
+                )
+                if box_usd_path is not None
+                else _make_fallback_cuboid(
+                    size=(0.28, 0.28, 0.20),
+                    color=(0.95, 0.05, 0.35),
+                    rigid_props=box_properties,
+                    mass_props=MassPropertiesCfg(mass=0.25),
+                )
             ),
         )
 

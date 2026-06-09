@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+import posixpath
 
 from isaacsim.core.utils.extensions import get_extension_path_from_name
 
@@ -11,7 +12,7 @@ from isaaclab.controllers.rmp_flow import RmpFlowControllerCfg
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 # Directory on Nucleus Server for RMP-Flow assets (URDFs, collision models, etc.)
-ISAACLAB_NUCLEUS_RMPFLOW_DIR = os.path.join(ISAACLAB_NUCLEUS_DIR, "Controllers", "RmpFlowAssets")
+ISAACLAB_NUCLEUS_RMPFLOW_DIR = posixpath.join(ISAACLAB_NUCLEUS_DIR, "Controllers", "RmpFlowAssets")
 
 # Note: RMP-Flow config files for supported robots are stored in the motion_generation extension
 # We need to move it here for doc building purposes.
@@ -46,14 +47,14 @@ UR10_RMPFLOW_CFG = RmpFlowControllerCfg(
 """Configuration of RMPFlow for UR10 arm (default from `isaacsim.robot_motion.motion_generation`)."""
 
 GALBOT_LEFT_ARM_RMPFLOW_CFG = RmpFlowControllerCfg(
-    config_file=os.path.join(
+    config_file=posixpath.join(
         ISAACLAB_NUCLEUS_RMPFLOW_DIR,
         "galbot_one_charlie",
         "rmpflow",
         "galbot_one_charlie_left_arm_rmpflow_config.yaml",
     ),
-    urdf_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "galbot_one_charlie", "galbot_one_charlie.urdf"),
-    collision_file=os.path.join(
+    urdf_file=posixpath.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "galbot_one_charlie", "galbot_one_charlie.urdf"),
+    collision_file=posixpath.join(
         ISAACLAB_NUCLEUS_RMPFLOW_DIR, "galbot_one_charlie", "rmpflow", "galbot_one_charlie_left_arm_gripper.yaml"
     ),
     frame_name="left_gripper_tcp_link",
@@ -62,14 +63,14 @@ GALBOT_LEFT_ARM_RMPFLOW_CFG = RmpFlowControllerCfg(
 )
 
 GALBOT_RIGHT_ARM_RMPFLOW_CFG = RmpFlowControllerCfg(
-    config_file=os.path.join(
+    config_file=posixpath.join(
         ISAACLAB_NUCLEUS_RMPFLOW_DIR,
         "galbot_one_charlie",
         "rmpflow",
         "galbot_one_charlie_right_arm_rmpflow_config.yaml",
     ),
-    urdf_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "galbot_one_charlie", "galbot_one_charlie.urdf"),
-    collision_file=os.path.join(
+    urdf_file=posixpath.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "galbot_one_charlie", "galbot_one_charlie.urdf"),
+    collision_file=posixpath.join(
         ISAACLAB_NUCLEUS_RMPFLOW_DIR, "galbot_one_charlie", "rmpflow", "galbot_one_charlie_right_arm_suction.yaml"
     ),
     frame_name="right_suction_cup_tcp_link",
@@ -80,18 +81,22 @@ GALBOT_RIGHT_ARM_RMPFLOW_CFG = RmpFlowControllerCfg(
 """Configuration of RMPFlow for Galbot humanoid."""
 
 AGIBOT_LEFT_ARM_RMPFLOW_CFG = RmpFlowControllerCfg(
-    config_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_left_arm_rmpflow_config.yaml"),
-    urdf_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "agibot.urdf"),
-    collision_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_left_arm_gripper.yaml"),
+    config_file=posixpath.join(
+        ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_left_arm_rmpflow_config.yaml"
+    ),
+    urdf_file=posixpath.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "agibot.urdf"),
+    collision_file=posixpath.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_left_arm_gripper.yaml"),
     frame_name="gripper_center",
     evaluations_per_frame=5,
     ignore_robot_state_updates=True,
 )
 
 AGIBOT_RIGHT_ARM_RMPFLOW_CFG = RmpFlowControllerCfg(
-    config_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_right_arm_rmpflow_config.yaml"),
-    urdf_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "agibot.urdf"),
-    collision_file=os.path.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_right_arm_gripper.yaml"),
+    config_file=posixpath.join(
+        ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_right_arm_rmpflow_config.yaml"
+    ),
+    urdf_file=posixpath.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "agibot.urdf"),
+    collision_file=posixpath.join(ISAACLAB_NUCLEUS_RMPFLOW_DIR, "agibot", "rmpflow", "agibot_right_arm_gripper.yaml"),
     frame_name="right_gripper_center",
     evaluations_per_frame=5,
     ignore_robot_state_updates=True,

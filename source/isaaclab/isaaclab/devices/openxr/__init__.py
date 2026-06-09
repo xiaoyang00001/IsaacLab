@@ -7,4 +7,6 @@
 
 from .manus_vive import ManusVive, ManusViveCfg
 from .openxr_device import OpenXRDevice, OpenXRDeviceCfg
+from .robotyao_xr_sub_device import RobotYaoXrSubDevice, RobotYaoXrSubDeviceCfg
+from .zeromq_game_sub_device import ZeroMqGameSubDevice, ZeroMqGameSubDeviceCfg
 from .xr_cfg import XrAnchorRotationMode, XrCfg, remove_camera_configs
