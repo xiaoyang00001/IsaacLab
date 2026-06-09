@@ -109,25 +109,18 @@ class PinkInverseKinematicsAction(ActionTerm):
 
     def _initialize_helper_tensors(self) -> None:
         """Pre-allocate tensors and cache values for performance optimization."""
-        # Cache frequently used tensor versions of joint IDs to avoid repeated creation
         self._controlled_joint_ids_tensor = torch.tensor(self._controlled_joint_ids, device=self.device)
 
-        # Cache base link index to avoid string lookup every time
         articulation_data = self._env.scene[self.cfg.controller.articulation_name].data
         self._base_link_idx = articulation_data.body_names.index(self.cfg.controller.base_link_name)
 
-        # Pre-allocate working tensors
-        # Count only FrameTask instances in variable_input_tasks (not all tasks)
         num_frame_tasks = sum(
             1 for task in self._ik_controllers[0].cfg.variable_input_tasks if isinstance(task, FrameTask)
         )
         self._num_frame_tasks = num_frame_tasks
         self._controlled_frame_poses = torch.zeros(num_frame_tasks, self.num_envs, 4, 4, device=self.device)
 
-        # Pre-allocate tensor for base frame computations
         self._base_link_frame_buffer = torch.zeros(self.num_envs, 4, 4, device=self.device)
-
-        # Pre-allocate frame positions buffer for helper logic.
         self._frame_positions_in_base = torch.zeros(self._num_frame_tasks, self.num_envs, 3, device=self.device)
 
     def _initialize_waist_yaw_assist(self) -> None:
@@ -143,6 +136,7 @@ class PinkInverseKinematicsAction(ActionTerm):
         self._waist_yaw_head_gain = 1.0
         self._waist_yaw_reference_head_yaw = None
         self._waist_yaw_head_initialized = None
+        self._waist_yaw_refresh_posture_target = None
 
         if not self._waist_yaw_assist_enabled:
             return
@@ -182,8 +176,7 @@ class PinkInverseKinematicsAction(ActionTerm):
         )
         self._waist_yaw_reference_head_yaw = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
         self._waist_yaw_head_initialized = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
-
-    # ==================== Properties ====================
+        self._waist_yaw_refresh_posture_target = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
     @property
     def hand_joint_dim(self) -> int:
@@ -208,7 +201,6 @@ class PinkInverseKinematicsAction(ActionTerm):
     @property
     def action_dim(self) -> int:
         """Dimension of the action space (based on number of tasks and pose dimension)."""
-        # Count only FrameTask instances in variable_input_tasks
         frame_tasks_count = sum(
             1 for task in self._ik_controllers[0].cfg.variable_input_tasks if isinstance(task, FrameTask)
         )
@@ -226,20 +218,7 @@ class PinkInverseKinematicsAction(ActionTerm):
 
     @property
     def IO_descriptor(self) -> GenericActionIODescriptor:
-        """The IO descriptor of the action term.
-
-        This descriptor is used to describe the action term of the pink inverse kinematics action.
-        It adds the following information to the base descriptor:
-        - scale: The scale of the action term.
-        - offset: The offset of the action term.
-        - clip: The clip of the action term.
-        - pink_controller_joint_names: The names of the pink controller joints.
-        - hand_joint_names: The names of the hand joints.
-        - controller_cfg: The configuration of the pink controller.
-
-        Returns:
-            The IO descriptor of the action term.
-        """
+        """The IO descriptor of the action term."""
         super().IO_descriptor
         self._IO_descriptor.shape = (self.action_dim,)
         self._IO_descriptor.dtype = str(self.raw_actions.dtype)
@@ -249,70 +228,38 @@ class PinkInverseKinematicsAction(ActionTerm):
         self._IO_descriptor.extras["controller_cfg"] = self.cfg.controller.__dict__
         return self._IO_descriptor
 
-    # """
-    # Operations.
-    # """
-
     def process_actions(self, actions: torch.Tensor) -> None:
-        """Process the input actions and set targets for each task.
-
-        Args:
-            actions: The input actions tensor.
-        """
-        # Store raw actions
+        """Process the input actions and set targets for each task."""
         self._raw_actions[:] = actions
-
-        # Extract hand joint positions directly (no cloning needed)
         self._target_hand_joint_positions = actions[:, -self.hand_joint_dim :]
 
-        # Get base link frame transformation
         self.base_link_frame_in_world_rf = self._get_base_link_frame_transform()
 
-        # Process controlled frame poses (pass original actions, no clone needed)
         controlled_frame_poses = self._extract_controlled_frame_poses(actions)
         transformed_poses = self._transform_poses_to_base_link_frame(controlled_frame_poses)
 
-        # Set targets for all tasks
         self._set_task_targets(transformed_poses)
-        self._update_waist_yaw_target(transformed_poses[0])
+        self._update_waist_yaw_target(*transformed_poses)
 
     def _get_base_link_frame_transform(self) -> torch.Tensor:
-        """Get the base link frame transformation matrix.
-
-        Returns:
-            Base link frame transformation matrix.
-        """
-        # Get base link frame pose in world origin using cached index
+        """Get the base link frame transformation matrix."""
         articulation_data = self._env.scene[self.cfg.controller.articulation_name].data
         base_link_frame_in_world_origin = articulation_data.body_link_state_w[:, self._base_link_idx, :7]
 
-        # Transform to environment origin frame (reuse buffer to avoid allocation)
         torch.sub(
             base_link_frame_in_world_origin[:, :3],
             self._env.scene.env_origins,
             out=self._base_link_frame_buffer[:, :3, 3],
         )
 
-        # Copy orientation (avoid clone)
         base_link_frame_quat = base_link_frame_in_world_origin[:, 3:7]
-
-        # Create transformation matrix
         return math_utils.make_pose(
             self._base_link_frame_buffer[:, :3, 3], math_utils.matrix_from_quat(base_link_frame_quat)
         )
 
     def _extract_controlled_frame_poses(self, actions: torch.Tensor) -> torch.Tensor:
-        """Extract controlled frame poses from action tensor.
-
-        Args:
-            actions: The action tensor.
-
-        Returns:
-            Stacked controlled frame poses tensor.
-        """
-        # Use pre-allocated tensor instead of list operations
+        """Extract controlled frame poses from action tensor."""
         for task_index in range(self._num_frame_tasks):
-            # Extract position and orientation for this task
             pos_start = task_index * self.pose_dim
             pos_end = pos_start + self.position_dim
             quat_start = pos_end
@@ -321,7 +268,6 @@ class PinkInverseKinematicsAction(ActionTerm):
             position = actions[:, pos_start:pos_end]
             quaternion = actions[:, quat_start:quat_end]
 
-            # Create pose matrix directly into pre-allocated tensor
             self._controlled_frame_poses[task_index] = math_utils.make_pose(
                 position, math_utils.matrix_from_quat(quaternion)
             )
@@ -329,26 +275,17 @@ class PinkInverseKinematicsAction(ActionTerm):
         return self._controlled_frame_poses
 
     def _transform_poses_to_base_link_frame(self, poses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Transform poses from world frame to base link frame.
-
-        Args:
-            poses: Poses in world frame.
-
-        Returns:
-            Tuple of (positions, rotation_matrices) in base link frame.
-        """
-        # Transform poses to base link frame
+        """Transform poses from world frame to base link frame."""
         base_link_inv = math_utils.pose_inv(self.base_link_frame_in_world_rf)
         transformed_poses = math_utils.pose_in_A_to_pose_in_B(poses, base_link_inv)
 
-        # Extract position and rotation
         positions, rotation_matrices = math_utils.unmake_pose(transformed_poses)
         self._frame_positions_in_base.copy_(positions)
 
         return positions, rotation_matrices
 
-    def _update_waist_yaw_target(self, positions: torch.Tensor) -> None:
-        """Update the separate waist-yaw helper from transformed hand target positions."""
+    def _update_waist_yaw_target(self, positions: torch.Tensor, rotation_matrices: torch.Tensor) -> None:
+        """Update the separate waist-yaw helper from transformed hand target poses."""
         if not self._waist_yaw_assist_enabled or self._waist_yaw_target is None or positions.shape[0] == 0:
             return
 
@@ -356,50 +293,45 @@ class PinkInverseKinematicsAction(ActionTerm):
             self._update_waist_yaw_target_from_head()
             return
 
-        task_indices = [index for index in self._waist_yaw_task_indices if 0 <= index < positions.shape[0]]
+        task_indices = [index for index in self._waist_yaw_task_indices if 0 <= index < rotation_matrices.shape[0]]
         if not task_indices:
             return
 
-        dominant_task_ids = None
-        if self._waist_yaw_primary_task_index is not None and self._waist_yaw_primary_task_index in task_indices:
-            lateral = positions[self._waist_yaw_primary_task_index, :, self._waist_yaw_lateral_axis]
-        else:
-            task_lateral = positions[task_indices, :, self._waist_yaw_lateral_axis]
-            dominant_task_ids = torch.argmax(task_lateral.abs(), dim=0)
+        task_yaws = []
+        for index in task_indices:
+            rot = rotation_matrices[index]
+            yaw = torch.atan2(rot[:, 1, 0], rot[:, 0, 0])
+            task_yaws.append(yaw)
 
-            inactive_mask = ~self._waist_yaw_is_active
-            if torch.any(inactive_mask):
-                self._waist_yaw_active_task_slot[inactive_mask] = dominant_task_ids[inactive_mask]
+        task_yaws = torch.stack(task_yaws, dim=0)
 
-            active_task_slot = torch.clamp(self._waist_yaw_active_task_slot, min=0)
-            lateral = task_lateral[active_task_slot, torch.arange(self.num_envs, device=self.device)]
+        mean_sin = torch.sin(task_yaws).mean(dim=0)
+        mean_cos = torch.cos(task_yaws).mean(dim=0)
+        yaw_signal = torch.atan2(mean_sin, mean_cos)
+
         self._waist_yaw_filtered_lateral = torch.lerp(
             self._waist_yaw_filtered_lateral,
-            lateral,
+            yaw_signal,
             self._waist_yaw_signal_smoothing,
         )
-        lateral = self._waist_yaw_filtered_lateral
-        lateral_abs = lateral.abs()
 
-        activate_mask = lateral_abs > self._waist_yaw_deadzone
-        keep_active_mask = lateral_abs > self._waist_yaw_release_deadzone
+        yaw_signal = self._waist_yaw_filtered_lateral
+        yaw_abs = yaw_signal.abs()
+
+        activate_mask = yaw_abs > self._waist_yaw_deadzone
+        keep_active_mask = yaw_abs > self._waist_yaw_release_deadzone
         active_mask = torch.where(self._waist_yaw_is_active, keep_active_mask, activate_mask)
 
-        if dominant_task_ids is not None:
-            newly_activated_mask = active_mask & ~self._waist_yaw_is_active
-            if torch.any(newly_activated_mask):
-                self._waist_yaw_active_task_slot[newly_activated_mask] = dominant_task_ids[newly_activated_mask]
-
-            deactivated_mask = ~active_mask
-            if torch.any(deactivated_mask):
-                self._waist_yaw_active_task_slot[deactivated_mask] = -1
+        newly_activated_mask = active_mask & ~self._waist_yaw_is_active
+        if torch.any(newly_activated_mask):
+            self._waist_yaw_refresh_posture_target[newly_activated_mask] = True
 
         self._waist_yaw_is_active = active_mask
 
-        desired_offset = torch.zeros_like(lateral)
+        desired_offset = torch.zeros_like(yaw_signal)
         if torch.any(active_mask):
-            effective_lateral = lateral[active_mask] - torch.sign(lateral[active_mask]) * self._waist_yaw_deadzone
-            desired_offset[active_mask] = effective_lateral * self._waist_yaw_scale * self._waist_yaw_direction
+            effective_yaw = yaw_signal[active_mask] - torch.sign(yaw_signal[active_mask]) * self._waist_yaw_deadzone
+            desired_offset[active_mask] = effective_yaw * self._waist_yaw_scale * self._waist_yaw_direction
 
         desired_offset = torch.clamp(desired_offset, -self._waist_yaw_max_angle, self._waist_yaw_max_angle)
         desired_waist = self._waist_yaw_default_position + desired_offset
@@ -495,11 +427,7 @@ class PinkInverseKinematicsAction(ActionTerm):
         return float(torch.atan2(siny_cosp, cosy_cosp).item())
 
     def _set_task_targets(self, transformed_poses: tuple[torch.Tensor, torch.Tensor]) -> None:
-        """Set targets for all tasks across all environments.
-
-        Args:
-            transformed_poses: Tuple of (positions, rotation_matrices) in base link frame.
-        """
+        """Set targets for all tasks across all environments."""
         positions, rotation_matrices = transformed_poses
 
         for env_index, ik_controller in enumerate(self._ik_controllers):
@@ -511,28 +439,20 @@ class PinkInverseKinematicsAction(ActionTerm):
                 else:
                     continue
 
-                # Set position and rotation targets using frame_task_index
                 target.translation = positions[frame_task_index, env_index, :].cpu().numpy()
                 target.rotation = rotation_matrices[frame_task_index, env_index, :].cpu().numpy()
-
                 task.set_target(target)
-
-    # ==================== Action Application ====================
 
     def apply_actions(self) -> None:
         """Apply the computed joint positions based on the inverse kinematics solution."""
-        # Compute IK solutions for all environments
         ik_joint_positions = self._compute_ik_solutions()
 
-        # Combine IK and hand joint positions
         all_joint_positions = torch.cat((ik_joint_positions, self._target_hand_joint_positions), dim=1)
         self._processed_actions = all_joint_positions
 
-        # Apply gravity compensation to arm joints
         if self.cfg.enable_gravity_compensation:
             self._apply_gravity_compensation()
 
-        # Apply joint position targets
         self._asset.set_joint_position_target(self._processed_actions, self._controlled_joint_ids)
         if self._waist_yaw_assist_enabled and self._waist_yaw_joint_id is not None and self._waist_yaw_target is not None:
             self._asset.set_joint_position_target(
@@ -543,52 +463,49 @@ class PinkInverseKinematicsAction(ActionTerm):
     def _apply_gravity_compensation(self) -> None:
         """Apply gravity compensation to arm joints if not disabled in props."""
         if not self._asset.cfg.spawn.rigid_props.disable_gravity:
-            # Get gravity compensation forces using cached tensor
             if self._asset.is_fixed_base:
                 gravity = torch.zeros_like(
                     self._asset.root_physx_view.get_gravity_compensation_forces()[:, self._controlled_joint_ids_tensor]
                 )
             else:
-                # If floating base, then need to skip the first 6 joints (base)
                 gravity = self._asset.root_physx_view.get_gravity_compensation_forces()[
                     :, self._controlled_joint_ids_tensor + self._physx_floating_joint_indices_offset
                 ]
 
-            # Apply gravity compensation to arm joints
             self._asset.set_joint_effort_target(gravity, self._controlled_joint_ids)
 
     def _compute_ik_solutions(self) -> torch.Tensor:
-        """Compute IK solutions for all environments.
-
-        Returns:
-            IK joint positions tensor for all environments.
-        """
+        """Compute IK solutions for all environments."""
         ik_solutions = []
 
         for env_index, ik_controller in enumerate(self._ik_controllers):
-            # Get current joint positions for this environment
             current_joint_pos = self._asset.data.joint_pos.cpu().numpy()[env_index]
 
-            # Compute IK solution
+            if (
+                self._waist_yaw_assist_enabled
+                and self._waist_yaw_refresh_posture_target is not None
+                and self._waist_yaw_refresh_posture_target[env_index]
+            ):
+                #ik_controller.update_null_space_joint_targets(current_joint_pos)
+                current_controlled_joint_pos = current_joint_pos[self._isaaclab_controlled_joint_ids]
+                current_joint_pos_pink = current_controlled_joint_pos[ik_controller.isaac_lab_to_pink_controlled_ordering]
+                ik_controller.update_null_space_joint_targets(current_joint_pos_pink)
+                self._waist_yaw_refresh_posture_target[env_index] = False
+
             joint_pos_des = ik_controller.compute(current_joint_pos, self._sim_dt)
             ik_solutions.append(joint_pos_des)
 
         return torch.stack(ik_solutions)
 
-    # ==================== Reset ====================
-
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        """Reset the action term for specified environments.
-
-        Args:
-            env_ids: A list of environment IDs to reset. If None, all environments are reset.
-        """
+        """Reset the action term for specified environments."""
         if env_ids is None:
             self._raw_actions.zero_()
             self._target_hand_joint_positions.zero_()
         else:
             self._raw_actions[env_ids] = 0.0
             self._target_hand_joint_positions[env_ids] = 0.0
+
         if self._waist_yaw_assist_enabled and self._waist_yaw_target is not None and self._waist_yaw_default_position is not None:
             if env_ids is None:
                 self._waist_yaw_target.copy_(self._waist_yaw_default_position)
@@ -597,6 +514,7 @@ class PinkInverseKinematicsAction(ActionTerm):
                 self._waist_yaw_active_task_slot.fill_(-1)
                 self._waist_yaw_reference_head_yaw.zero_()
                 self._waist_yaw_head_initialized.zero_()
+                self._waist_yaw_refresh_posture_target.zero_()
             else:
                 self._waist_yaw_target[env_ids] = self._waist_yaw_default_position[env_ids]
                 self._waist_yaw_filtered_lateral[env_ids] = 0.0
@@ -604,3 +522,4 @@ class PinkInverseKinematicsAction(ActionTerm):
                 self._waist_yaw_active_task_slot[env_ids] = -1
                 self._waist_yaw_reference_head_yaw[env_ids] = 0.0
                 self._waist_yaw_head_initialized[env_ids] = False
+                self._waist_yaw_refresh_posture_target[env_ids] = False

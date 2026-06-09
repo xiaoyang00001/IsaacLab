@@ -60,8 +60,8 @@ class G1TriHandUpperBodyZeroMqRetargeter(RetargeterBase):
     def retarget(self, data: dict) -> torch.Tensor:
         left_controller_data = data.get(DeviceBase.TrackingTarget.CONTROLLER_LEFT, np.array([]))
         right_controller_data = data.get(DeviceBase.TrackingTarget.CONTROLLER_RIGHT, np.array([]))
-        print(f"[IsaacLab] [ZeroMQ] Left controller data: {left_controller_data}")
-        print(f"[IsaacLab] [ZeroMQ] Right controller data: {right_controller_data}")
+        #print(f"[IsaacLab] [ZeroMQ] Left controller data: {left_controller_data}")
+       # print(f"[IsaacLab] [ZeroMQ] Right controller data: {right_controller_data}")
         default_wrist = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         left_wrist = self._extract_wrist_pose(left_controller_data, default_wrist)
         right_wrist = self._extract_wrist_pose(right_controller_data, default_wrist)
