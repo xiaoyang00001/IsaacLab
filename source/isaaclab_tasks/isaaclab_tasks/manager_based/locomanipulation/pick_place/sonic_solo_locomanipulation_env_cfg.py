@@ -114,8 +114,13 @@ class SonicSoloLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         """Post initialization."""
-        self.decimation = 2
+        # 物理步频对齐参考 plant：SONIC 训练 = 200Hz/decimation4，MuJoCo deploy
+        # sim2sim = 500Hz（默认 timestep 0.002）。此前 100Hz 的接触脉冲/joint_vel
+        # 噪声特性与训练分布不同——慢动作时代被时间稀释掩盖，50Hz 实时下全带宽
+        # 进入 policy 观测。控制率不变：4 × 1/200 = 0.02s = 50Hz env。
+        # ⚠️ GPU pipeline 下 4 物理子步的同步开销 ≈11ms 会掉出实时；
+        # 配合启动参数 --device cpu（单机器人 CPU PhysX ~1-2ms，绰绰有余）。
+        self.decimation = 4
         self.episode_length_s = 3600.0
-        # 与主场景一致：100Hz 物理 / 50Hz 控制 / 每 env 步渲染一次（时序均匀，见主配置注释）
-        self.sim.dt = 1 / 100
-        self.sim.render_interval = 2
+        self.sim.dt = 1 / 200
+        self.sim.render_interval = 4  # 每 env 步渲染一次（时序均匀），勿设 >decimation
