@@ -152,7 +152,10 @@ if SONIC_G1_PHYSICS_MODE:
     # retain_accelerations=True 让 PhysX 在每步结束后保留 link 加速度，
     # 使 body_com_lin_acc_w 返回真实值（用于 IMU accelerometer 计算）。
     SONIC_G1_29DOF_CFG.spawn.rigid_props.retain_accelerations = True
-SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.72)
+# Z=0.76：脚底在地面上方约 9mm。lock_root_z=False 的物理模式下 root Z 自由，
+# settle 阶段自然落地；若 spawn 时脚穿透地面（如 0.72 → 约 -3cm）会触发 PhysX
+# depenetration 向上弹射冲击。宁高勿低。
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.76)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 SONIC_G1_29DOF_CFG.init_state.joint_pos = dict(
     zip(SONIC_G1_29DOF_JOINT_ORDER, SONIC_G1_29DOF_DEFAULT_ANGLES, strict=True)

@@ -136,13 +136,19 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     """Number of steps to blend root anchoring from fully locked to fully free after unlock.
     During blending, the root pose is interpolated between the anchor and the current PhysX state,
     and velocity is ramped from zero to PhysX velocity, preventing the force discontinuity
-    of an instant unlock. Set to 0 for instant unlock (default for fixed-root; ~50 for physics mode)."""
+    of an instant unlock. Set to 0 for instant unlock (default for fixed-root; ~50 for physics mode).
+
+    Note: counted per *physics* step (in ``apply_actions``), unlike ``startup_settle_steps``
+    which counts env steps. With decimation=2 and sim dt=1/100, 50 blend steps = 0.5 s."""
 
     hold_after_unlock: bool = False
     """After unlock+blend+settle, keep the robot in default standing pose and ignore deploy
     targets. This isolates physics-only standing: if the robot stays upright, physics parameters
     (gains, init pose, foot placement) are correct and any falling is caused by open-loop deploy
-    targets. Set True in physics mode for diagnostic standing tests."""
+    targets. Set True in physics mode for diagnostic standing tests.
+
+    Requires ``startup_settle_steps > 0``: the settle phase is what drives joints back to the
+    default pose; with 0 settle steps the hold would freeze the last deploy target instead."""
 
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""

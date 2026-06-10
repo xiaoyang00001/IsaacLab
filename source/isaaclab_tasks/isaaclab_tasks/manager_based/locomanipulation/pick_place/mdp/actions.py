@@ -560,7 +560,9 @@ class SonicDeployTargetAction(ActionTerm):
                 self._unlock_blend_total = 0
                 self._unlock_blend_counter = 0
                 self._settle_step_counter = 0
-                self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+                # No final velocity write: at alpha=1 damping is already zero, and a
+                # hard velocity reset here would reintroduce the binary-switch jolt
+                # this blend exists to remove.
                 self._log_info(f"root pose unlock blend complete ({total} steps); root is now free")
             return
         if self._root_pose_anchor is None:
