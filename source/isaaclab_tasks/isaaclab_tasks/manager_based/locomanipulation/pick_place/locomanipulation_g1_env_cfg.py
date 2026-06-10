@@ -152,7 +152,7 @@ if SONIC_G1_PHYSICS_MODE:
     # retain_accelerations=True 让 PhysX 在每步结束后保留 link 加速度，
     # 使 body_com_lin_acc_w 返回真实值（用于 IMU accelerometer 计算）。
     SONIC_G1_29DOF_CFG.spawn.rigid_props.retain_accelerations = True
-SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.76)
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.72)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 SONIC_G1_29DOF_CFG.init_state.joint_pos = dict(
     zip(SONIC_G1_29DOF_JOINT_ORDER, SONIC_G1_29DOF_DEFAULT_ANGLES, strict=True)
@@ -487,11 +487,11 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # 第四个机器人：GEAR-SONIC ONNX 驱动（最小骨架，仅验证 pipeline）
     sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/SONICRobot")
 
-    # Ground plane
-    # ground = AssetBaseCfg(
-    #     prim_path="/World/GroundPlane",
-    #     spawn=GroundPlaneCfg(),
-    # )
+    # Ground plane (启用：SONIC robot 在 Y=11m 处可能在 warehouse.usd 碰撞区域外，需要显式地面)
+    ground = AssetBaseCfg(
+        prim_path="/World/GroundPlane",
+        spawn=GroundPlaneCfg(),
+    )
 
     # Lights
     # light = AssetBaseCfg(
