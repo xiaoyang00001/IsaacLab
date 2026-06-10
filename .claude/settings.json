@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ps -p 923021 -o pid,stat,cmd)",
+      "WebSearch",
+      "WebFetch(domain:docs.omniverse.nvidia.com)",
+      "Bash(kill 923021)",
+      "Bash(rm -f ~/.nvidia-omniverse/config/.omniverse.toml.swp)",
+      "Bash(cp ~/.nvidia-omniverse/config/omniverse.toml ~/.nvidia-omniverse/config/omniverse.toml.bak)",
+      "Bash(kill -9 923021)",
+      "Bash(git -C /home/nolo/xiaoyang_IssacLab/IsaacLab remote -v)",
+      "Bash(git -C /home/nolo/IsaacLab remote -v)",
+      "Bash(git -C /home/nolo/IsaacLab branch -a)",
+      "Bash(git -C /home/nolo/IsaacLab rev-parse --abbrev-ref HEAD)",
+      "Bash(git -C /home/nolo/IsaacLab status --short)",
+      "Bash(git remote *)",
+      "Bash(git fetch *)",
+      "Bash(xargs git log -1 --format=\"%h %s\")",
+      "Bash(git checkout *)",
+      "Bash(git merge *)",
+      "Bash(grep -c *)",
+      "Bash(awk '/^ *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git branch *)",
+      "Bash(git grep *)",
+      "Bash(git ls-tree *)",
+      "Bash(git show *)",
+      "Bash(git diff *)",
+      "Bash(find /home/nolo -name \"KitchenRoom.usd\" 2>/dev/null | head -5)",
+      "Read(//home/nolo/**)",
+      "WebFetch(domain:www.sidefx.com)",
+      "Bash(tar -tzf houdini-21.0.700-linux_x86_64_gcc11.2.tar.gz)",
+      "Bash(tar -xzf houdini-21.0.700-linux_x86_64_gcc11.2.tar.gz)",
+      "Bash(ls houdini-21.0.700-linux_x86_64_gcc11.2/INSTALL)",
+      "Bash(git reset *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(python3 -c \"import sys; [print\\(p\\) for p in sys.path]\")",
+      "Bash(python3 -c \"import locomanipulation_g1_env_cfg; print\\(locomanipulation_g1_env_cfg.__file__\\)\")",
+      "Bash(git cherry-pick *)"
+    ],
+    "additionalDirectories": [
+      "/home/nolo/.nvidia-omniverse/config",
+      "/tmp"
+    ]
+  }
+}

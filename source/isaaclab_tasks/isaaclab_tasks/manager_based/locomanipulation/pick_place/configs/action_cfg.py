@@ -123,6 +123,10 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     stabilize_root_pose: bool = True
     """Hold the robot root at the post-reset pose while validating deploy joint targets."""
 
+    lock_root_z: bool = True
+    """When ``stabilize_root_pose`` is active, whether to also lock root Z.
+    Set False in physics mode so PhysX can settle the robot to the correct ground height."""
+
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 

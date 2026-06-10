@@ -674,8 +674,20 @@ class SonicDeployTargetAction(ActionTerm):
                 desired_yaw = self._last_root_yaw_target + yaw_delta
             self._last_root_yaw_target = desired_yaw.clone()
             root_pose_target[:, 3:7] = self._quat_from_yaw(desired_yaw)
+        # Physics mode (lock_root_z=False): preserve PhysX Z so the robot can settle to the ground.
+        # XY and yaw are still anchored to prevent horizontal drift; Z is left to physics.
+        if not self.cfg.lock_root_z:
+            root_pose_target[:, 2] = self._asset.data.root_pos_w[:, 2]
         self._asset.write_root_pose_to_sim(root_pose_target)
-        self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+        if self.cfg.lock_root_z:
+            self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+        else:
+            # Physics mode: only damp XY + angular velocity; leave Z velocity to PhysX
+            # so the robot can fall and settle to the ground.
+            vel = self._asset.data.root_vel_w.clone()
+            vel[:, :2] = 0.0
+            vel[:, 3:] = 0.0
+            self._asset.write_root_velocity_to_sim(vel)
 
     def unlock_root_pose(self) -> None:
         if not self.cfg.stabilize_root_pose:
