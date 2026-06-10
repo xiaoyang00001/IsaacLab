@@ -535,28 +535,25 @@ class SonicDeployTargetAction(ActionTerm):
     def _stabilize_root_pose(self) -> None:
         if not self.cfg.stabilize_root_pose or self._root_pose_unlocked:
             return
-        # Unlock blending: gradually release root anchoring over N steps.
-        # Interpolate root pose/velocity from anchor → current PhysX state.
+        # Unlock blending: gradually release root velocity damping over N steps
+        # while letting PhysX control the root pose. Unlike position lerping
+        # (which is a no-op because anchor == physX_current when locked), this
+        # progressively scales down velocity damping so physics takes over smoothly.
         if self._unlock_blend_total > 0 and self._root_pose_anchor is not None:
             self._unlock_blend_counter += 1
             alpha = min(float(self._unlock_blend_counter) / float(self._unlock_blend_total), 1.0)
-            # Position: lerp anchor → PhysX current
-            physX_pos = self._asset.data.root_pos_w.clone()
-            blend_pos = self._root_pose_anchor[:, :3] + alpha * (physX_pos - self._root_pose_anchor[:, :3])
-            # Yaw: interpolate anchor yaw → PhysX current yaw
-            physX_yaw = self._yaw_from_quat(self._asset.data.root_quat_w)
-            anchor_yaw = self._yaw_from_quat(self._root_pose_anchor[:, 3:7])
-            blend_yaw = anchor_yaw + alpha * self._wrap_to_pi(physX_yaw - anchor_yaw)
-            blend_quat = self._quat_from_yaw(blend_yaw)
-            blend_pose_quat = torch.cat([blend_pos, blend_quat], dim=-1)
-            self._asset.write_root_pose_to_sim(blend_pose_quat)
-            # Velocity: ramp from zero → PhysX current, with diminishing XY/angular damping
-            physX_vel = self._asset.data.root_vel_w.clone()
-            blend_vel = alpha * physX_vel
-            damp = max(0.0, 1.0 - alpha)
-            blend_vel[:, :2] *= damp
-            blend_vel[:, 3:] *= damp
-            self._asset.write_root_velocity_to_sim(blend_vel)
+            # Get current PhysX velocity and damp it. Damping decreases from full→none.
+            # - XY linear velocity: alpha³ damping (aggressive, prevents horizontal drift at start)
+            # - Z linear velocity: alpha¹ damping (light, allows quick ground settling)
+            # - Angular velocity: alpha² damping (moderate)
+            vel = self._asset.data.root_vel_w.clone()
+            vel[:, 0] *= alpha * alpha * alpha  # X
+            vel[:, 1] *= alpha * alpha * alpha  # Y
+            vel[:, 2] *= alpha                   # Z (light damping)
+            vel[:, 3:] *= alpha * alpha          # angular
+            self._asset.write_root_velocity_to_sim(vel)
+            # Do NOT write root pose — let PhysX move the root freely.
+            # The velocity damping above prevents explosive motion at blend start.
             if self._unlock_blend_counter >= self._unlock_blend_total:
                 total = self._unlock_blend_total
                 self._root_pose_unlocked = True
@@ -733,11 +730,13 @@ class SonicDeployTargetAction(ActionTerm):
             return  # already blending
         blend = int(self.cfg.unlock_blend_steps)
         if blend > 0 and self._root_pose_anchor is not None:
-            # Start blend: gradually release root anchoring over `blend` steps.
-            # Root XY/yaw interpolate from anchor → PhysX, velocity ramps from 0 → PhysX.
+            # Start blend: gradually release root velocity damping.
+            # Also begin transitioning joints back to default standing pose
+            # so the robot isn't tracking a walking target with a freeing root.
             self._unlock_blend_total = blend
             self._unlock_blend_counter = 0
-            self._log_info(f"root pose unlock blending started ({blend} steps)")
+            self._settle_step_counter = 0
+            self._log_info(f"root pose unlock blending started ({blend} steps); joints → standing pose")
         else:
             # Instant unlock (no blending configured).
             self._root_pose_unlocked = True
@@ -747,9 +746,12 @@ class SonicDeployTargetAction(ActionTerm):
     def process_actions(self, actions: torch.Tensor):
         settle_steps = int(self.cfg.startup_settle_steps)
         if settle_steps > 0 and self._settle_step_counter < settle_steps:
-            # Startup settle: hold default pose, let PhysX settle the robot to the ground.
-            # Drain stale deploy packets to avoid queue buildup, but do not apply them.
+            # Startup/post-unlock settle: gradually transition joints to default
+            # standing pose and drain stale deploy packets. Each step moves one
+            # rate-limited increment towards default so the transition is smooth.
             self._drain_latest_packet()
+            default_target = self._default_joint_pos.clone()
+            self._processed_actions = self._apply_target_rate_limit(default_target)
             self._settle_step_counter += 1
             if self._settle_step_counter == settle_steps:
                 self._log_info(f"startup settle complete ({settle_steps} steps); begin consuming deploy targets")
