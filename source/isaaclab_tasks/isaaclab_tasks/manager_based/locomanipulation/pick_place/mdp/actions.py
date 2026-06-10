@@ -190,6 +190,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_packet_time = 0.0
         self._packet_count = 0
         self._debug_counter = 0
+        self._last_debug_wall_time = 0.0
         self._first_packet_logged = False
         self._first_target_logged = False
         self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
@@ -803,6 +804,15 @@ class SonicDeployTargetAction(ActionTerm):
                 if self._last_root_z_target is not None
                 else "<none>"
             )
+            # Wall-clock env rate: deploy paces its gait phase at wall 50 Hz, so the
+            # closed loop is only meaningful when this reads close to 50.
+            now = time.monotonic()
+            if self._last_debug_wall_time > 0.0:
+                env_hz = float(self.cfg.debug_log_interval) / max(now - self._last_debug_wall_time, 1.0e-6)
+                hz_text = f"{env_hz:.1f}"
+            else:
+                hz_text = "n/a"
+            self._last_debug_wall_time = now
             self._log_info(
                 f"step={self._debug_counter} packets={self._packet_count} "
                 f"field={self._last_target_field} ref={self._last_reference_field} "
@@ -810,7 +820,7 @@ class SonicDeployTargetAction(ActionTerm):
                 f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f} "
                 f"root_xy_step={self._last_root_xy_step_norm[0].item():.4f} "
                 f"root_src={self._last_root_motion_source} "
-                f"base_trans={bt_text} root_z={rz_text}"
+                f"base_trans={bt_text} root_z={rz_text} env_hz={hz_text}"
             )
 
     def apply_actions(self):

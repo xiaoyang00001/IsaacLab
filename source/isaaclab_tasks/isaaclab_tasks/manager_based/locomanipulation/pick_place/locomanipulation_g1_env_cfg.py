@@ -989,6 +989,11 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 100  # 100Hz（从 200Hz 降低以提升 FPS，遥操作场景足够）
         self.sim.render_interval = 2  # 每 2 步渲染一次 → 50 FPS 视觉刷新
+        if SONIC_G1_PHYSICS_MODE:
+            # 闭环 deploy 按墙钟 50Hz 推进步态相位，sim 必须接近实时（env_hz≈50）。
+            # 实测 viewport 20 FPS = 0.4× 实时 → 参考与实体时间畸变，行走必摔。
+            # 渲染降到每 4 物理步一次，换物理吞吐；配合 --rendering_mode performance。
+            self.sim.render_interval = 4
 
         # Set the URDF and mesh paths for the IK controller
         urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
