@@ -132,6 +132,12 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     In physics mode this lets PhysX settle the robot to the ground before joint tracking begins.
     Set to 0 to disable (default for fixed-root; ~50 for physics mode)."""
 
+    unlock_blend_steps: int = 0
+    """Number of steps to blend root anchoring from fully locked to fully free after unlock.
+    During blending, the root pose is interpolated between the anchor and the current PhysX state,
+    and velocity is ramped from zero to PhysX velocity, preventing the force discontinuity
+    of an instant unlock. Set to 0 for instant unlock (default for fixed-root; ~50 for physics mode)."""
+
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 
