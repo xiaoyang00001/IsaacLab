@@ -50,6 +50,7 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
     AgileBasedLowerBodyActionCfg,
     AutoWalkActionCfg,
     SonicDeployTargetActionCfg,
+    SonicRobotStatePublisherActionCfg,
     UnitreeDdsLowCmdActionCfg,
     UnitreeLowStatePublisherActionCfg,
 )
@@ -147,6 +148,10 @@ SONIC_G1_29DOF_CFG.spawn.activate_contact_sensors = SONIC_G1_PHYSICS_MODE
 SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = SONIC_G1_FIX_ROOT
 SONIC_G1_29DOF_CFG.spawn.articulation_props.enabled_self_collisions = SONIC_G1_SELF_COLLISIONS
 SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = _env_flag("SONIC_G1_DISABLE_GRAVITY", SONIC_G1_FIX_ROOT)
+if SONIC_G1_PHYSICS_MODE:
+    # retain_accelerations=True 让 PhysX 在每步结束后保留 link 加速度，
+    # 使 body_com_lin_acc_w 返回真实值（用于 IMU accelerometer 计算）。
+    SONIC_G1_29DOF_CFG.spawn.rigid_props.retain_accelerations = True
 SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.76)
 SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
 SONIC_G1_29DOF_CFG.init_state.joint_pos = dict(
@@ -574,6 +579,19 @@ class ActionsCfg:
             lowstate_topic=os.environ.get("UNITREE_LOWSTATE_TOPIC", "rt/lowstate"),
             secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
             publish_secondary_imu=_env_flag("SONIC_PUBLISH_SECONDARY_IMU", True),
+            target_order="mujoco",
+            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
+            debug_log_interval=100,
+        )
+
+    # 真实物理闭环桥：IsaacLab 用简单 ZMQ/msgpack 发布 sonic_robot 真实状态，
+    # C++ proxy 再用 Unitree C++ SDK 转成 rt/lowstate，避开 Python DDS 与 C++ deploy 不互通的问题。
+    if _env_flag("SONIC_PUBLISH_STATE_ZMQ", False):
+        sonic_state_pub = SonicRobotStatePublisherActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            bind_endpoint=os.environ.get("SONIC_STATE_ZMQ_BIND", "tcp://127.0.0.1:5560"),
+            topic=os.environ.get("SONIC_STATE_ZMQ_TOPIC", "sonic_state"),
             target_order="mujoco",
             mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
             debug_log_interval=100,

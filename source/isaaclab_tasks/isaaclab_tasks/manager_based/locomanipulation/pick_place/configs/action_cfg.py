@@ -12,6 +12,7 @@ from ..mdp.actions import (
     AgileBasedLowerBodyAction,
     AutoWalkAction,
     SonicDeployTargetAction,
+    SonicRobotStatePublisherAction,
     SONICWholeBodyAction,
     UnitreeDdsLowCmdAction,
     UnitreeLowStatePublisherAction,
@@ -282,6 +283,34 @@ class UnitreeLowStatePublisherActionCfg(ActionTermCfg):
 
     mode_machine: int = 5
     """G1 mode_machine value reported in LowState so deploy can identify the robot variant."""
+
+    debug_log_interval: int = 100
+    """Print publish statistics every N control steps. 0 disables periodic logging."""
+
+
+@configclass
+class SonicRobotStatePublisherActionCfg(ActionTermCfg):
+    """Publish simulated ``sonic_robot`` state over ZMQ/msgpack for the C++ LowState bridge."""
+
+    class_type: type[ActionTerm] = SonicRobotStatePublisherAction
+
+    asset_name: str = "sonic_robot"
+    """Articulation whose state is published."""
+
+    joint_names: list[str] = MISSING
+    """29 G1 joint names in IsaacLab/SONIC order."""
+
+    bind_endpoint: str = "tcp://127.0.0.1:5560"
+    """ZMQ PUB bind endpoint consumed by ``sonic_unitree_lowstate_cpp_proxy``."""
+
+    topic: str = "sonic_state"
+    """Topic prefix for state packets."""
+
+    target_order: str = "mujoco"
+    """Output motor order. Unitree G1 lowstate uses hardware/MuJoCo order."""
+
+    mode_machine: int = 5
+    """G1 mode_machine value forwarded to the C++ LowState bridge."""
 
     debug_log_interval: int = 100
     """Print publish statistics every N control steps. 0 disables periodic logging."""

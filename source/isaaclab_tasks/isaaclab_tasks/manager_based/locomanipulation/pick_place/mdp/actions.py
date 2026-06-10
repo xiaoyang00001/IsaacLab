@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         AutoWalkActionCfg,
         SonicDeployTargetActionCfg,
         SONICWholeBodyActionCfg,
+        SonicRobotStatePublisherActionCfg,
         UnitreeDdsLowCmdActionCfg,
         UnitreeLowStatePublisherActionCfg,
     )
@@ -775,6 +776,188 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_root_yaw_target = None
         self._last_root_z_target = None
         self._anchor_knee = None
+
+
+class SonicRobotStatePublisherAction(ActionTerm):
+    """Publish ``sonic_robot`` physical state over ZMQ/msgpack for a C++ Unitree LowState bridge."""
+
+    cfg: SonicRobotStatePublisherActionCfg
+    _asset: Articulation
+
+    def __init__(self, cfg: SonicRobotStatePublisherActionCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._asset = env.scene[cfg.asset_name]
+        self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        self._raw_actions = torch.zeros((self.num_envs, 0), device=self.device)
+        self._processed_actions = self._raw_actions
+        self._mujoco_to_isaac_index = torch.tensor(
+            SONIC_G1_MUJOCO_TO_ISAACLAB_DOF, device=self.device, dtype=torch.long
+        )
+        self._target_order = str(cfg.target_order).lower()
+        if self._target_order not in ("mujoco", "isaaclab"):
+            raise ValueError(f"target_order must be 'mujoco' or 'isaaclab', got {cfg.target_order!r}")
+
+        self._zmq = None
+        self._msgpack = None
+        self._context = None
+        self._socket = None
+        self._publisher_ready = False
+        self._packet_count = 0
+        self._debug_counter = 0
+        self._connect_publisher()
+        self._log_info(
+            f"asset={cfg.asset_name} bind={cfg.bind_endpoint} topic={cfg.topic!r} "
+            f"target_order={self._target_order} resolved={len(self._joint_ids)} joints "
+            f"publisher_ready={self._publisher_ready}"
+        )
+
+    def __del__(self):
+        if self._socket is not None:
+            try:
+                self._socket.close(0)
+            except Exception:
+                pass
+        if self._context is not None:
+            try:
+                self._context.term()
+            except Exception:
+                pass
+        try:
+            super().__del__()
+        except AttributeError:
+            pass
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    @staticmethod
+    def _format_log_message(message: str) -> str:
+        return f"[SonicRobotStatePublisher] {message}"
+
+    def _log_info(self, message: str) -> None:
+        formatted = self._format_log_message(message)
+        logger.info(formatted)
+        print(f"[IsaacLab] {formatted}")
+
+    def _log_warning(self, message: str) -> None:
+        formatted = self._format_log_message(f"WARNING {message}")
+        logger.warning(formatted)
+        print(f"[IsaacLab] {formatted}")
+
+    def _resolve_joints(self, joint_names: list[str]) -> tuple[list[int], list[str]]:
+        resolved_ids: list[int] = []
+        resolved_names: list[str] = []
+        for joint_name in joint_names:
+            joint_ids, matched_names = self._asset.find_joints([f"^{joint_name}$"])
+            if len(joint_ids) != 1:
+                raise ValueError(
+                    f"Expected exactly one joint match for '{joint_name}' on asset '{self.cfg.asset_name}', "
+                    f"but got {len(joint_ids)} matches: {matched_names}"
+                )
+            resolved_ids.append(int(joint_ids[0]))
+            resolved_names.append(matched_names[0])
+        return resolved_ids, resolved_names
+
+    def _connect_publisher(self) -> None:
+        try:
+            import msgpack
+            import zmq
+        except ModuleNotFoundError as exc:
+            self._log_warning(f"{exc.name} is not installed; sonic_robot state ZMQ publisher disabled.")
+            return
+
+        self._zmq = zmq
+        self._msgpack = msgpack
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.PUB)
+        self._socket.setsockopt(zmq.SNDHWM, 1)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        try:
+            self._socket.setsockopt(zmq.CONFLATE, 1)
+        except zmq.ZMQError:
+            pass
+        try:
+            self._socket.bind(self.cfg.bind_endpoint)
+        except Exception as exc:
+            self._log_warning(f"failed to bind {self.cfg.bind_endpoint}: {exc}")
+            return
+        self._publisher_ready = True
+
+    def _publish_state(self) -> None:
+        if not self._publisher_ready or self._socket is None or self._msgpack is None:
+            return
+
+        env_idx = 0
+        joint_pos = self._asset.data.joint_pos[env_idx, self._joint_ids].detach().cpu()
+        joint_vel = self._asset.data.joint_vel[env_idx, self._joint_ids].detach().cpu()
+        joint_acc = self._asset.data.joint_acc[env_idx, self._joint_ids].detach().cpu()
+        torque_src = getattr(self._asset.data, "applied_torque", None)
+        if torque_src is None:
+            joint_tau = torch.zeros_like(joint_pos)
+        else:
+            joint_tau = torque_src[env_idx, self._joint_ids].detach().cpu()
+        root_quat = self._asset.data.root_quat_w[env_idx].detach().cpu()
+        root_ang_vel = self._asset.data.root_ang_vel_b[env_idx].detach().cpu()
+
+        # IMU accelerometer: specific force = (a_kinematic_w - g_w) in body frame.
+        # g_w = [0,0,-9.81], so: a_imu_w = a_kinematic_w + [0,0,9.81].
+        # Requires retain_accelerations=True on the articulation (set in physics mode).
+        try:
+            a_kin_w = self._asset.data.body_com_lin_acc_w[env_idx, 0, :3].detach().cpu()
+            a_imu_w = a_kin_w + torch.tensor([0.0, 0.0, 9.81])
+            root_accel_b = quat_apply_inverse(root_quat.unsqueeze(0), a_imu_w.unsqueeze(0)).squeeze(0).tolist()
+        except Exception:
+            root_accel_b = [0.0, 0.0, 9.81]
+
+        if self._target_order == "mujoco":
+            remap = self._mujoco_to_isaac_index.cpu()
+            joint_pos = joint_pos[remap]
+            joint_vel = joint_vel[remap]
+            joint_acc = joint_acc[remap]
+            joint_tau = joint_tau[remap]
+
+        payload = {
+            "source": "isaaclab_sonic_robot_state",
+            "sequence": self._packet_count,
+            "timestamp": time.time(),
+            "mode_machine": int(self.cfg.mode_machine),
+            "target_order": self._target_order,
+            "joint_pos": joint_pos.tolist(),
+            "joint_vel": joint_vel.tolist(),
+            "joint_acc": joint_acc.tolist(),
+            "joint_tau": joint_tau.tolist(),
+            "root_quat_w": root_quat.tolist(),
+            "root_ang_vel_b": root_ang_vel.tolist(),
+            "root_accel_b": root_accel_b,
+        }
+        raw = self.cfg.topic.encode("utf-8") + self._msgpack.packb(payload, use_bin_type=True)
+        try:
+            self._socket.send(raw, flags=self._zmq.NOBLOCK)
+        except Exception as exc:
+            self._log_warning(f"failed to publish state packet: {exc}")
+            return
+        self._packet_count += 1
+
+    def process_actions(self, actions: torch.Tensor):
+        del actions
+
+    def apply_actions(self):
+        self._publish_state()
+        self._debug_counter += 1
+        if self.cfg.debug_log_interval > 0 and self._debug_counter % self.cfg.debug_log_interval == 0:
+            self._log_info(f"step={self._debug_counter} packets={self._packet_count}")
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        del env_ids
 
 
 class UnitreeDdsLowCmdAction(ActionTerm):
