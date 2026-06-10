@@ -194,6 +194,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._first_target_logged = False
         self._last_target_step_delta_absmax = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
         self._last_root_xy_step_norm = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        self._settle_step_counter = 0
         self._root_pose_anchor: torch.Tensor | None = None
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
@@ -697,9 +698,19 @@ class SonicDeployTargetAction(ActionTerm):
             return
         self._root_pose_unlocked = True
         self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+        self._settle_step_counter = 0
         self._log_info("root pose unlocked by operator")
 
     def process_actions(self, actions: torch.Tensor):
+        settle_steps = int(self.cfg.startup_settle_steps)
+        if settle_steps > 0 and self._settle_step_counter < settle_steps:
+            # Startup settle: hold default pose, let PhysX settle the robot to the ground.
+            # Drain stale deploy packets to avoid queue buildup, but do not apply them.
+            self._drain_latest_packet()
+            self._settle_step_counter += 1
+            if self._settle_step_counter == settle_steps:
+                self._log_info(f"startup settle complete ({settle_steps} steps); begin consuming deploy targets")
+            return
         payload = self._drain_latest_packet()
         if payload is not None:
             target = self._extract_target(payload)
@@ -754,6 +765,7 @@ class SonicDeployTargetAction(ActionTerm):
             self._last_root_xy_step_norm.zero_()
             self._root_pose_anchor = None
             self._root_pose_unlocked = False
+            self._settle_step_counter = 0
             self._base_trans_target = None
             self._initial_base_target_pos = None
             self._previous_base_trans_target = None
@@ -774,6 +786,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_root_xy_step_norm[env_ids] = 0.0
         self._root_pose_anchor = None
         self._root_pose_unlocked = False
+        self._settle_step_counter = 0
         self._base_trans_target = None
         self._initial_base_target_pos = None
         self._previous_base_trans_target = None

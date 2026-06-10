@@ -127,6 +127,11 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     """When ``stabilize_root_pose`` is active, whether to also lock root Z.
     Set False in physics mode so PhysX can settle the robot to the correct ground height."""
 
+    startup_settle_steps: int = 0
+    """Number of steps after reset/unlock to hold the default pose before consuming deploy targets.
+    In physics mode this lets PhysX settle the robot to the ground before joint tracking begins.
+    Set to 0 to disable (default for fixed-root; ~50 for physics mode)."""
+
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 
