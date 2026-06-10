@@ -556,7 +556,11 @@ class ActionsCfg:
             stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
             lock_root_z=SONIC_G1_FIX_ROOT,  # 物理模式放 Z 自由，让 PhysX settle 到正确地面高度
             startup_settle_steps=0 if SONIC_G1_FIX_ROOT else 50,  # 物理模式先 settle 再跟 deploy target
-            unlock_blend_steps=0 if SONIC_G1_FIX_ROOT else 50,  # 物理模式 unlock 渐变释放，防弹跳
+            # 物理模式 unlock 渐变释放（按物理步计数）。SONIC_DEPLOY_UNLOCK_BLEND_STEPS=0
+            # 可做"瞬时交接"实验（最接近 MuJoCo eval 的自由根起始状态）
+            unlock_blend_steps=int(
+                os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "50")
+            ),
             hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
             stale_timeout_s=0.5,
             fallback_to_last_action=True,

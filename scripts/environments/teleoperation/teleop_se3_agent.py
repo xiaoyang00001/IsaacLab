@@ -86,6 +86,7 @@ simulation_app = app_launcher.app
 
 import logging
 import os
+import time
 
 import gymnasium as gym
 import torch
@@ -352,6 +353,20 @@ def main() -> None:
 
     print("Teleoperation started. Press 'R' to reset the environment.")
 
+    # SONIC 闭环实时节拍器：deploy 按墙钟 50Hz 推进步态相位，sim 必须钉在 1.0× 实时。
+    # CPU 物理 + 空场景可自由跑到 ~85Hz（1.7× 超实时），policy 等效控制率掉到 ~29Hz
+    # 必摔；慢于实时同样畸变（步态相位超前于机器人）。每步睡到墙钟节拍；
+    # 落后超过 1s（卡顿/断点）则重新对齐，不补帧。SONIC_REALTIME_PACE=0 可关闭。
+    realtime_pace = deploy_target_mode and os.environ.get("SONIC_REALTIME_PACE", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    pace_dt = float(env_cfg.sim.dt) * int(env_cfg.decimation)
+    next_step_due = time.monotonic()
+    if realtime_pace:
+        print(f"[teleop_se3_agent] realtime pacing enabled: {pace_dt * 1000:.0f} ms/env step")
+
     # 主循环：AppLauncher 持有的 simulation_app 关闭前持续推进环境。
     while simulation_app.is_running():
         try:
@@ -361,6 +376,13 @@ def main() -> None:
                     # deploy 模式：零 action 只负责推进 ActionManager/Simulation。
                     # SonicDeployTargetAction 会在 process/apply 阶段自行消费最新 ZMQ/DDS 目标。
                     env.step(deploy_zero_actions)
+                    if realtime_pace:
+                        next_step_due += pace_dt
+                        sleep_s = next_step_due - time.monotonic()
+                        if sleep_s > 0.0:
+                            time.sleep(sleep_s)
+                        elif sleep_s < -1.0:
+                            next_step_due = time.monotonic()
                 else:
                     # 普通 teleop：设备 advance() 返回一个单环境 action，例如 keyboard 的 7 维 SE(3)。
                     action = teleop_interface.advance()
