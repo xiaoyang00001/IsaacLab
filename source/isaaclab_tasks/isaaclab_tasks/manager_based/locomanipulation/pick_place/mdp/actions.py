@@ -173,6 +173,12 @@ class SonicDeployTargetAction(ActionTerm):
         self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
         self._default_joint_pos = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
         self._processed_actions = self._default_joint_pos.clone()
+        # 关节限位夹紧（永远生效）：摔倒后 policy 可能饱和输出 7~8 rad 的目标
+        # （G1 关节上限 2.88），不夹紧会让 PD 以巨大偏置把关节往限位上撞（剧烈抽搐）
+        _limits = self._asset.data.soft_joint_pos_limits[:, self._joint_ids, :]
+        self._target_pos_lower = _limits[..., 0].clone()
+        self._target_pos_upper = _limits[..., 1].clone()
+        self._post_unlock_steps = 0
         self._raw_actions = torch.zeros((self.num_envs, 0), device=self.device)
         reference_joint_ids = [
             idx
@@ -522,12 +528,23 @@ class SonicDeployTargetAction(ActionTerm):
         return target
 
     def _apply_target_rate_limit(self, target: torch.Tensor) -> torch.Tensor:
+        # Always clamp targets to joint limits first: a saturated/fallen policy can
+        # emit 7+ rad targets and the PD would slam joints into their stops.
+        target = torch.clamp(target, min=self._target_pos_lower, max=self._target_pos_upper)
         max_delta = float(self.cfg.target_rate_limit_rad_per_step)
-        if self._root_pose_unlocked and bool(self.cfg.rate_limit_only_while_root_locked):
-            # Closed loop with a free root: the policy's raw action is the contract
-            # (MuJoCo deploy has no slew limiter). Slewing it here inserts unmodeled
-            # lag into the balance loop — observed pegged at the limit during a fall.
-            max_delta = 0.0
+        if bool(self.cfg.rate_limit_only_while_root_locked) and (
+            self._root_pose_unlocked or self._unlock_blend_total > 0
+        ):
+            # Closed loop handover: the policy's raw action is the contract (MuJoCo
+            # deploy has no slew limiter), but an instant bypass discharges the
+            # backlog accumulated under the locked-phase limit in one step (observed
+            # 1.8 rad snap that kicked the robot over at realtime). Release the limit
+            # exponentially instead: double the allowed step every 5 env steps,
+            # starting at unlock (blend included), fully open after ~1 s.
+            self._post_unlock_steps += 1
+            max_delta = max_delta * (2.0 ** (float(self._post_unlock_steps) / 5.0))
+            if max_delta >= 50.0:
+                max_delta = 0.0
         if max_delta <= 0.0:
             self._last_target_step_delta_absmax = torch.max(
                 torch.abs(target - self._processed_actions), dim=-1
@@ -744,10 +761,12 @@ class SonicDeployTargetAction(ActionTerm):
             # passive PD standing cannot survive that window.
             self._unlock_blend_total = blend
             self._unlock_blend_counter = 0
+            self._post_unlock_steps = 0
             self._log_info(f"root pose unlock blending started ({blend} steps); deploy targets stay live")
         else:
             # Instant unlock (no blending configured).
             self._root_pose_unlocked = True
+            self._post_unlock_steps = 0
             self._log_info("root pose unlocked by operator (instant)")
 
     def process_actions(self, actions: torch.Tensor):
@@ -837,6 +856,7 @@ class SonicDeployTargetAction(ActionTerm):
             self._unlock_blend_counter = 0
             self._unlock_blend_total = 0
             self._settle_step_counter = 0
+            self._post_unlock_steps = 0
             self._base_trans_target = None
             self._initial_base_target_pos = None
             self._previous_base_trans_target = None
@@ -860,6 +880,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._unlock_blend_counter = 0
         self._unlock_blend_total = 0
         self._settle_step_counter = 0
+        self._post_unlock_steps = 0
         self._base_trans_target = None
         self._initial_base_target_pos = None
         self._previous_base_trans_target = None
