@@ -522,6 +522,11 @@ class SonicDeployTargetAction(ActionTerm):
 
     def _apply_target_rate_limit(self, target: torch.Tensor) -> torch.Tensor:
         max_delta = float(self.cfg.target_rate_limit_rad_per_step)
+        if self._root_pose_unlocked and bool(self.cfg.rate_limit_only_while_root_locked):
+            # Closed loop with a free root: the policy's raw action is the contract
+            # (MuJoCo deploy has no slew limiter). Slewing it here inserts unmodeled
+            # lag into the balance loop — observed pegged at the limit during a fall.
+            max_delta = 0.0
         if max_delta <= 0.0:
             self._last_target_step_delta_absmax = torch.max(
                 torch.abs(target - self._processed_actions), dim=-1

@@ -539,6 +539,11 @@ class ActionsCfg:
             target_field=os.environ.get("SONIC_DEPLOY_TARGET_FIELD", "last_action"),
             target_order="mujoco",
             target_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_TARGET_RATE_LIMIT", "0.16")),
+            # 物理模式：解锁后旁路 rate limiter——软增益 policy 靠快甩目标偏置生成
+            # 扭矩，slew limiter 在平衡环里是 100-250ms 人为迟滞（实测钉死 0.04 摔倒）
+            rate_limit_only_while_root_locked=_env_flag(
+                "SONIC_DEPLOY_RATE_LIMIT_ONLY_LOCKED", not SONIC_G1_FIX_ROOT
+            ),
             stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
             lock_root_z=SONIC_G1_FIX_ROOT,  # 物理模式放 Z 自由，让 PhysX settle 到正确地面高度
             startup_settle_steps=0 if SONIC_G1_FIX_ROOT else 50,  # 物理模式先 settle 再跟 deploy target

@@ -153,6 +153,14 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     unconditionally unstable (ankle stiffness ≪ m·g·h), so falling here is expected and
     proves nothing about the closed loop."""
 
+    rate_limit_only_while_root_locked: bool = False
+    """Bypass the target rate limiter once the root is unlocked. With soft SONIC gains the
+    policy balances by swinging large target offsets quickly (torque = kp·(target−q)); the
+    MuJoCo deploy reference applies no slew limiter, so keeping one in the closed loop adds
+    100–250 ms of artificial lag inside a balance loop whose instability e-folding time is
+    ~250 ms. Set True in physics mode: the limiter still smooths the locked-phase
+    convergence from default pose to the first deploy targets, then gets out of the way."""
+
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 
