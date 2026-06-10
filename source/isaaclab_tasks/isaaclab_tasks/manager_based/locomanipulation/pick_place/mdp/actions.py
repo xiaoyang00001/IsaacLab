@@ -559,10 +559,10 @@ class SonicDeployTargetAction(ActionTerm):
                 self._root_pose_unlocked = True
                 self._unlock_blend_total = 0
                 self._unlock_blend_counter = 0
-                self._settle_step_counter = 0
-                # No final velocity write: at alpha=1 damping is already zero, and a
-                # hard velocity reset here would reintroduce the binary-switch jolt
-                # this blend exists to remove.
+                # No settle restart and no final velocity write here: once the root is
+                # free, every step without deploy targets is a step of passive PD
+                # standing, which is unconditionally unstable (ankle stiffness ≪ mgh).
+                # The policy must stay in control through the handover.
                 self._log_info(f"root pose unlock blend complete ({total} steps); root is now free")
             return
         if self._root_pose_anchor is None:
@@ -732,17 +732,16 @@ class SonicDeployTargetAction(ActionTerm):
             return  # already blending
         blend = int(self.cfg.unlock_blend_steps)
         if blend > 0 and self._root_pose_anchor is not None:
-            # Start blend: gradually release root velocity damping.
-            # Also begin transitioning joints back to default standing pose
-            # so the robot isn't tracking a walking target with a freeing root.
+            # Start blend: gradually release root velocity damping. Deploy targets
+            # keep flowing throughout — re-running the settle phase here would lock
+            # the policy out for the exact window where the root goes free, and
+            # passive PD standing cannot survive that window.
             self._unlock_blend_total = blend
             self._unlock_blend_counter = 0
-            self._settle_step_counter = 0
-            self._log_info(f"root pose unlock blending started ({blend} steps); joints → standing pose")
+            self._log_info(f"root pose unlock blending started ({blend} steps); deploy targets stay live")
         else:
             # Instant unlock (no blending configured).
             self._root_pose_unlocked = True
-            self._settle_step_counter = 0
             self._log_info("root pose unlocked by operator (instant)")
 
     def process_actions(self, actions: torch.Tensor):
@@ -756,19 +755,15 @@ class SonicDeployTargetAction(ActionTerm):
             self._processed_actions = self._apply_target_rate_limit(default_target)
             self._settle_step_counter += 1
             if self._settle_step_counter == settle_steps:
-                if self._root_pose_unlocked and self.cfg.hold_after_unlock:
-                    self._log_info(
-                        f"startup settle complete ({settle_steps} steps); "
-                        "hold_after_unlock=on — holding standing pose, deploy targets ignored"
-                    )
-                else:
-                    self._log_info(f"startup settle complete ({settle_steps} steps); begin consuming deploy targets")
+                self._log_info(f"startup settle complete ({settle_steps} steps); begin consuming deploy targets")
             return
-        # hold_after_unlock: after root is freed, ignore deploy targets and keep standing pose.
-        # This isolates physics-only standing — if the robot falls, the physics setup is wrong
-        # (not the open-loop deploy target). Drain packets to avoid queue buildup.
+        # hold_after_unlock: after root is freed, ignore deploy targets and drive joints
+        # toward the default standing pose (rate-limited). This isolates physics-only
+        # standing — with soft SONIC gains it is expected to fall (ankle stiffness ≪ mgh);
+        # use only as a diagnostic. Drain packets to avoid queue buildup.
         if self._root_pose_unlocked and self.cfg.hold_after_unlock:
             self._drain_latest_packet()
+            self._processed_actions = self._apply_target_rate_limit(self._default_joint_pos.clone())
             return
         payload = self._drain_latest_packet()
         if payload is not None:

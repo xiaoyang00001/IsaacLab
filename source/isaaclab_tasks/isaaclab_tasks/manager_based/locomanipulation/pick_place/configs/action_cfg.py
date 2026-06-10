@@ -128,9 +128,13 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     Set False in physics mode so PhysX can settle the robot to the correct ground height."""
 
     startup_settle_steps: int = 0
-    """Number of steps after reset/unlock to hold the default pose before consuming deploy targets.
+    """Number of env steps after *reset* to hold the default pose before consuming deploy targets.
     In physics mode this lets PhysX settle the robot to the ground before joint tracking begins.
-    Set to 0 to disable (default for fixed-root; ~50 for physics mode)."""
+    Set to 0 to disable (default for fixed-root; ~50 for physics mode).
+
+    Note: runs only while the root is still locked (after reset). Unlock does NOT re-trigger
+    settle — once the root is free, any joint-target blackout means passive PD standing,
+    which is unconditionally unstable with SONIC soft gains (ankle stiffness ≪ m·g·h)."""
 
     unlock_blend_steps: int = 0
     """Number of steps to blend root anchoring from fully locked to fully free after unlock.
@@ -139,16 +143,15 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     of an instant unlock. Set to 0 for instant unlock (default for fixed-root; ~50 for physics mode).
 
     Note: counted per *physics* step (in ``apply_actions``), unlike ``startup_settle_steps``
-    which counts env steps. With decimation=2 and sim dt=1/100, 50 blend steps = 0.5 s."""
+    which counts env steps. With decimation=2 and sim dt=1/100, 50 blend steps = 0.5 s.
+    Deploy targets keep flowing during the blend: in closed loop the policy must stay in
+    control through the handover, so the blend only ramps root velocity damping."""
 
     hold_after_unlock: bool = False
-    """After unlock+blend+settle, keep the robot in default standing pose and ignore deploy
-    targets. This isolates physics-only standing: if the robot stays upright, physics parameters
-    (gains, init pose, foot placement) are correct and any falling is caused by open-loop deploy
-    targets. Set True in physics mode for diagnostic standing tests.
-
-    Requires ``startup_settle_steps > 0``: the settle phase is what drives joints back to the
-    default pose; with 0 settle steps the hold would freeze the last deploy target instead."""
+    """After unlock, ignore deploy targets and drive joints toward the default standing pose
+    (rate-limited). Diagnostic only: with SONIC soft gains, passive PD standing is
+    unconditionally unstable (ankle stiffness ≪ m·g·h), so falling here is expected and
+    proves nothing about the closed loop."""
 
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
