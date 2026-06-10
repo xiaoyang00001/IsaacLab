@@ -138,6 +138,12 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     and velocity is ramped from zero to PhysX velocity, preventing the force discontinuity
     of an instant unlock. Set to 0 for instant unlock (default for fixed-root; ~50 for physics mode)."""
 
+    hold_after_unlock: bool = False
+    """After unlock+blend+settle, keep the robot in default standing pose and ignore deploy
+    targets. This isolates physics-only standing: if the robot stays upright, physics parameters
+    (gains, init pose, foot placement) are correct and any falling is caused by open-loop deploy
+    targets. Set True in physics mode for diagnostic standing tests."""
+
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 

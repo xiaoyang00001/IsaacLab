@@ -754,7 +754,19 @@ class SonicDeployTargetAction(ActionTerm):
             self._processed_actions = self._apply_target_rate_limit(default_target)
             self._settle_step_counter += 1
             if self._settle_step_counter == settle_steps:
-                self._log_info(f"startup settle complete ({settle_steps} steps); begin consuming deploy targets")
+                if self._root_pose_unlocked and self.cfg.hold_after_unlock:
+                    self._log_info(
+                        f"startup settle complete ({settle_steps} steps); "
+                        "hold_after_unlock=on — holding standing pose, deploy targets ignored"
+                    )
+                else:
+                    self._log_info(f"startup settle complete ({settle_steps} steps); begin consuming deploy targets")
+            return
+        # hold_after_unlock: after root is freed, ignore deploy targets and keep standing pose.
+        # This isolates physics-only standing — if the robot falls, the physics setup is wrong
+        # (not the open-loop deploy target). Drain packets to avoid queue buildup.
+        if self._root_pose_unlocked and self.cfg.hold_after_unlock:
+            self._drain_latest_packet()
             return
         payload = self._drain_latest_packet()
         if payload is not None:
