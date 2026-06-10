@@ -223,6 +223,16 @@ parser.add_argument("--max-forward-speed", type=float, default=1.0, help="Left s
 parser.add_argument("--max-lateral-speed", type=float, default=0.6, help="Left stick X lateral walking speed in m/s. Use 0 to disable strafe.")
 parser.add_argument("--max-yaw-rate", type=float, default=1.2, help="Right stick X yaw rate in rad/s.")
 parser.add_argument("--arm-delta-scale", type=float, default=1.0, help="Scale for incremental controller-to-arm deltas.")
+parser.add_argument(
+    "--arm-rmpflow-axis-map",
+    type=str,
+    default="y,-x,z",
+    help=(
+        "Comma-separated scene-delta axes used for the Agibot RMPFlow xyz action. "
+        "Default y,-x,z maps controller/scene +X right to robot/RMPFlow -Y right, "
+        "+Y forward to +X forward, and +Z up to +Z up."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -316,6 +326,45 @@ def _spawn_shape(path: str, cfg, translation: tuple[float, float, float]):
 
 def _preview_material(color: tuple[float, float, float], metallic: float = 0.0, roughness: float = 0.35):
     return sim_utils.PreviewSurfaceCfg(diffuse_color=color, metallic=metallic, roughness=roughness)
+
+
+def _parse_axis_map(spec: str) -> list[tuple[int, float, str]]:
+    """Parse a comma-separated xyz axis map with optional signs."""
+    axis_indices = {"x": 0, "y": 1, "z": 2}
+    raw = spec.strip().lower().replace(" ", "")
+    tokens = raw.split(",") if "," in raw else list(raw)
+    if len(tokens) != 3:
+        raise ValueError(
+            f"Invalid --arm-rmpflow-axis-map '{spec}'. Expected three axes, for example 'y,-x,z' or 'y,x,z'."
+        )
+
+    axis_map: list[tuple[int, float, str]] = []
+    for token in tokens:
+        if not token:
+            raise ValueError(f"Invalid --arm-rmpflow-axis-map '{spec}': empty axis token.")
+        sign = -1.0 if token.startswith("-") else 1.0
+        axis = token[1:] if token.startswith("-") else token
+        if axis not in axis_indices:
+            raise ValueError(
+                f"Invalid --arm-rmpflow-axis-map '{spec}': axis token '{token}' is not one of x, y, z, -x, -y, -z."
+            )
+        axis_map.append((axis_indices[axis], sign, f"{'-' if sign < 0 else ''}{axis}"))
+    return axis_map
+
+
+def _format_axis_map(axis_map: list[tuple[int, float, str]]) -> str:
+    return ",".join(token for _, _, token in axis_map)
+
+
+def _apply_axis_map_tensor(delta: torch.Tensor, axis_map: list[tuple[int, float, str]]) -> torch.Tensor:
+    return torch.stack([delta[index] * sign for index, sign, _ in axis_map]).to(delta)
+
+
+def _fisheye_full_frame_poly_b(width: int, height: int, fisheye_fov: float) -> float:
+    """Return the linear f-theta coefficient that maps max FOV to the image radius."""
+    image_radius_px = max(min(float(width), float(height)) * 0.5, 1.0)
+    max_theta_rad = math.radians(float(fisheye_fov) * 0.5)
+    return max_theta_rad / image_radius_px
 
 
 def _design_scene(width: int, height: int, baseline: float, fisheye_fov: float, show_camera_lenses: bool) -> Camera:
@@ -440,6 +489,7 @@ def _design_scene(width: int, height: int, baseline: float, fisheye_fov: float, 
             (stereo_x + 0.04, -baseline * 0.5, stereo_z),
         )
 
+    fisheye_poly_b = _fisheye_full_frame_poly_b(width, height, fisheye_fov)
     camera_cfg = CameraCfg(
         prim_path="/World/Robot/Stereo/.*/Fisheye",
         update_period=0.0,
@@ -458,6 +508,12 @@ def _design_scene(width: int, height: int, baseline: float, fisheye_fov: float, 
             fisheye_optical_centre_x=float(width) * 0.5,
             fisheye_optical_centre_y=float(height) * 0.5,
             fisheye_max_fov=float(fisheye_fov),
+            fisheye_polynomial_a=0.0,
+            fisheye_polynomial_b=fisheye_poly_b,
+            fisheye_polynomial_c=0.0,
+            fisheye_polynomial_d=0.0,
+            fisheye_polynomial_e=0.0,
+            fisheye_polynomial_f=0.0,
         ),
         offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0), convention="world"),
     )
@@ -696,6 +752,7 @@ def _make_task_fisheye_camera_cfg(
     offset_pos: tuple[float, float, float],
     offset_rot: tuple[float, float, float, float],
 ) -> CameraCfg:
+    fisheye_poly_b = _fisheye_full_frame_poly_b(width, height, fisheye_fov)
     return CameraCfg(
         prim_path=prim_path,
         update_period=0.0,
@@ -715,6 +772,12 @@ def _make_task_fisheye_camera_cfg(
             fisheye_optical_centre_x=float(width) * 0.5,
             fisheye_optical_centre_y=float(height) * 0.5,
             fisheye_max_fov=float(fisheye_fov),
+            fisheye_polynomial_a=0.0,
+            fisheye_polynomial_b=fisheye_poly_b,
+            fisheye_polynomial_c=0.0,
+            fisheye_polynomial_d=0.0,
+            fisheye_polynomial_e=0.0,
+            fisheye_polynomial_f=0.0,
         ),
         offset=CameraCfg.OffsetCfg(pos=offset_pos, rot=offset_rot, convention="world"),
     )
@@ -908,6 +971,15 @@ class RobotYaoSceneController:
         self._base_position += world_delta
 
         if arm_follow_active:
+            raw_right_delta = command_np[RobotYaoWheeledXrRetargeter.RAW_RIGHT_DELTA_START : RobotYaoWheeledXrRetargeter.RAW_RIGHT_DELTA_START + 3]
+            scene_right_delta = command_np[RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START : RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START + 3]
+            if np.any(raw_right_delta != 0.0):
+                print(
+                    f"[DEBUG SimpleController] Right Hand Delta - "
+                    f"Controller (Isaac xyz): [{raw_right_delta[0]:.6f}, {raw_right_delta[1]:.6f}, {raw_right_delta[2]:.6f}], "
+                    f"Scaled scene delta: [{scene_right_delta[0]:.6f}, {scene_right_delta[1]:.6f}, {scene_right_delta[2]:.6f}]",
+                    flush=True
+                )
             self._left_hand_position = np.clip(self._left_hand_position + command_np[4:7], self._arm_min, self._arm_max)
             self._right_hand_position = np.clip(
                 self._right_hand_position + command_np[7:10], self._arm_min, self._arm_max
@@ -945,6 +1017,16 @@ class RobotYaoTaskSceneController:
         self._root_pos = None
         self._root_yaw = None
         self._zero_root_velocity = torch.zeros((1, 6), dtype=torch.float32, device=env.device)
+        self._rmpflow_axis_map = _parse_axis_map(args_cli.arm_rmpflow_axis_map)
+        self._previous_right_gripper_pos_w: torch.Tensor | None = None
+        self._right_gripper_body_id = None
+        self._debug_follow_was_active = False
+        self._debug_cum_right_rmpflow_delta = torch.zeros(3, dtype=torch.float32, device=env.device)
+        self._debug_cum_right_ee_delta_w = torch.zeros(3, dtype=torch.float32, device=env.device)
+        right_gripper_body_ids, right_gripper_body_names = self._robot.find_bodies(["right_gripper_center"])
+        if len(right_gripper_body_ids) > 0:
+            self._right_gripper_body_id = right_gripper_body_ids[0]
+        fisheye_poly_b = _fisheye_full_frame_poly_b(args_cli.width, args_cli.height, args_cli.fisheye_fov)
         if self._camera_mount == "head_link":
             print(
                 "[RobotYao] Task stereo rig mount: "
@@ -958,7 +1040,8 @@ class RobotYaoTaskSceneController:
                 f"baseline={args_cli.baseline:.3f} m, "
                 f"left_local_y={-args_cli.baseline * 0.5:.3f} m, "
                 f"right_local_y={args_cli.baseline * 0.5:.3f} m, "
-                f"local_look_down={args_cli.task_camera_head_look_down_deg:.1f} deg",
+                f"local_look_down={args_cli.task_camera_head_look_down_deg:.1f} deg, "
+                f"fisheye_poly_b={fisheye_poly_b:.9f}",
                 flush=True,
             )
         else:
@@ -967,11 +1050,19 @@ class RobotYaoTaskSceneController:
                 f"root_forward={args_cli.task_camera_forward_offset:.3f} m, "
                 f"root_height={args_cli.task_camera_height_offset:.3f} m, "
                 f"baseline={args_cli.baseline:.3f} m, "
-                f"look_down={args_cli.task_camera_look_down_deg:.1f} deg",
+                f"look_down={args_cli.task_camera_look_down_deg:.1f} deg, "
+                f"fisheye_poly_b={fisheye_poly_b:.9f}",
                 flush=True,
             )
         print(f"[DEBUG] Articulation root_pos_w at init: {self._robot.data.root_pos_w[0].tolist()}", flush=True)
         print(f"[DEBUG] Articulation root_quat_w at init: {self._robot.data.root_quat_w[0].tolist()}", flush=True)
+        print(
+            "[RobotYao] Arm RMPFlow delta axis map: "
+            f"controller_delta_already_in_isaac_xyz -> rmpflow[{_format_axis_map(self._rmpflow_axis_map)}], "
+            f"arm_delta_scale={args_cli.arm_delta_scale:.3f}, "
+            f"right_ee_body={right_gripper_body_names[0] if len(right_gripper_body_names) > 0 else 'not_found'}",
+            flush=True,
+        )
         self._left_arm_joint_ids, self._left_arm_joint_names = self._robot.find_joints(["left_arm_joint.*"])
         self._right_arm_joint_ids, self._right_arm_joint_names = self._robot.find_joints(["right_arm_joint.*"])
         self.update_camera_xforms()
@@ -1018,18 +1109,72 @@ class RobotYaoTaskSceneController:
         yaw_rate = max(-1.57, min(1.57, yaw_rate))
 
         is_moving = (abs(forward) > 0.01 or abs(lateral) > 0.01 or abs(yaw_rate) > 0.01)
+        follow_active = command_tensor[RobotYaoWheeledXrRetargeter.ARM_FOLLOW_ACTIVE] > 0.5
+        left_delta_start = RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START
+        right_delta_start = RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START
+        left_scene_delta = command_tensor[left_delta_start : left_delta_start + 3]
+        right_scene_delta = command_tensor[right_delta_start : right_delta_start + 3]
+        raw_right_delta_start = RobotYaoWheeledXrRetargeter.RAW_RIGHT_DELTA_START
+        right_controller_delta = command_tensor[raw_right_delta_start : raw_right_delta_start + 3]
+        right_rmpflow_delta = _apply_axis_map_tensor(right_scene_delta, self._rmpflow_axis_map)
+        if follow_active and torch.any(right_controller_delta != 0.0):
+            print(
+                f"[DEBUG TaskController] Right Hand Delta - "
+                f"Controller (Isaac xyz): [{right_controller_delta[0].item():.6f}, {right_controller_delta[1].item():.6f}, {right_controller_delta[2].item():.6f}], "
+                f"Scaled scene delta: [{right_scene_delta[0].item():.6f}, {right_scene_delta[1].item():.6f}, {right_scene_delta[2].item():.6f}], "
+                f"RMPFlow Action: [{right_rmpflow_delta[0].item():.6f}, {right_rmpflow_delta[1].item():.6f}, {right_rmpflow_delta[2].item():.6f}]",
+                flush=True
+            )
+
+        actual_right_ee_delta_w = None
+        if self._right_gripper_body_id is not None:
+            right_gripper_pos_w = self._robot.data.body_pos_w[0, self._right_gripper_body_id].clone()
+            if self._previous_right_gripper_pos_w is not None:
+                actual_right_ee_delta_w = right_gripper_pos_w - self._previous_right_gripper_pos_w
+            self._previous_right_gripper_pos_w = right_gripper_pos_w
+        follow_active_bool = bool(follow_active.item())
+        if follow_active_bool:
+            if not self._debug_follow_was_active:
+                self._debug_cum_right_rmpflow_delta.zero_()
+                self._debug_cum_right_ee_delta_w.zero_()
+                actual_right_ee_delta_w = None
+            self._debug_cum_right_rmpflow_delta += right_rmpflow_delta.detach()
+            if actual_right_ee_delta_w is not None:
+                self._debug_cum_right_ee_delta_w += actual_right_ee_delta_w.detach()
+        else:
+            self._debug_cum_right_rmpflow_delta.zero_()
+            self._debug_cum_right_ee_delta_w.zero_()
+        self._debug_follow_was_active = follow_active_bool
 
         if not hasattr(self, "_step_count"):
             self._step_count = 0
         self._step_count += 1
-        if self._step_count % 10 == 0:
-            print(f"[DEBUG] Step {self._step_count} - command BASE: {command_tensor[0:3].tolist()}, is_moving: {is_moving}, _root_pos: {current_root_pos.tolist()}, actions: {actions[0].tolist()}", flush=True)
+        if args_cli.debug_task_loop and self._step_count % 10 == 0:
+            print(
+                f"[DEBUG] Step {self._step_count} - "
+                f"base={command_tensor[0:3].tolist()}, "
+                f"follow={bool(follow_active.item())}, "
+                f"right_controller_delta_isaac={right_controller_delta.tolist()}, "
+                f"left_scene_delta={left_scene_delta.tolist()}, "
+                f"right_scene_delta={right_scene_delta.tolist()}, "
+                f"right_rmpflow_delta={right_rmpflow_delta.tolist()}, "
+                f"axis_map={_format_axis_map(self._rmpflow_axis_map)}, "
+                f"actual_right_ee_delta_w={None if actual_right_ee_delta_w is None else actual_right_ee_delta_w.tolist()}, "
+                f"right_rmpflow_cum={self._debug_cum_right_rmpflow_delta.tolist()}, "
+                f"actual_right_ee_cum_w={self._debug_cum_right_ee_delta_w.tolist()}, "
+                f"is_moving={is_moving}, root_pos={current_root_pos.tolist()}",
+                flush=True,
+            )
 
         # Check if environment was reset
         if hasattr(self._env, "reset_buf") and self._env.reset_buf is not None:
             if self._env.reset_buf[0].item():
                 self._root_pos = None
                 self._root_yaw = None
+                self._previous_right_gripper_pos_w = None
+                self._debug_follow_was_active = False
+                self._debug_cum_right_rmpflow_delta.zero_()
+                self._debug_cum_right_ee_delta_w.zero_()
 
         if self._root_pos is None or torch.any(torch.isnan(self._root_pos)):
             self._root_pos = current_root_pos.clone()
@@ -1049,20 +1194,18 @@ class RobotYaoTaskSceneController:
         # Always write the target pose to simulator to hold the base kinematically
         self._write_root_pose()
 
-        follow_active = command_tensor[RobotYaoWheeledXrRetargeter.ARM_FOLLOW_ACTIVE] > 0.5
         if follow_active and actions.shape[1] >= 6:
-            # Toy2Box task only controls the right arm. The right controller delta is mapped to RMPFlow relative xyz.
-            right_delta_start = RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START
-            actions[:, 0:3] = command_tensor[right_delta_start : right_delta_start + 3].unsqueeze(0)
+            # Toy2Box task only controls the right arm. Agibot Lula/RMPFlow uses a different axis order.
+            actions[:, 0:3] = right_rmpflow_delta.unsqueeze(0)
             self._apply_direct_arm_delta(
-                command_tensor, self._left_arm_joint_ids, RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START
+                command_tensor, self._left_arm_joint_ids, left_delta_start
             )
         elif follow_active:
             self._apply_direct_arm_delta(
-                command_tensor, self._left_arm_joint_ids, RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START
+                command_tensor, self._left_arm_joint_ids, left_delta_start
             )
             self._apply_direct_arm_delta(
-                command_tensor, self._right_arm_joint_ids, RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START
+                command_tensor, self._right_arm_joint_ids, right_delta_start
             )
 
         if actions.shape[1] > 0:
@@ -1426,6 +1569,13 @@ def run_task_scene_simulator(
                     "cx": float(args_cli.width) * 0.5,
                     "cy": float(args_cli.height) * 0.5,
                     "radius": min(float(args_cli.width), float(args_cli.height)) * 0.5,
+                    "radius_px": min(float(args_cli.width), float(args_cli.height)) * 0.5,
+                    "poly_a": 0.0,
+                    "poly_b": _fisheye_full_frame_poly_b(args_cli.width, args_cli.height, args_cli.fisheye_fov),
+                    "poly_c": 0.0,
+                    "poly_d": 0.0,
+                    "poly_e": 0.0,
+                    "poly_f": 0.0,
                 },
                 "scene": {
                     "mode": "task",
@@ -1623,6 +1773,13 @@ def run_simulator(
                     "cx": float(args_cli.width) * 0.5,
                     "cy": float(args_cli.height) * 0.5,
                     "radius": min(float(args_cli.width), float(args_cli.height)) * 0.5,
+                    "radius_px": min(float(args_cli.width), float(args_cli.height)) * 0.5,
+                    "poly_a": 0.0,
+                    "poly_b": _fisheye_full_frame_poly_b(args_cli.width, args_cli.height, args_cli.fisheye_fov),
+                    "poly_c": 0.0,
+                    "poly_d": 0.0,
+                    "poly_e": 0.0,
+                    "poly_f": 0.0,
                 },
             }
             publisher.send(header, left_payload, right_payload)

@@ -40,15 +40,21 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         right_thumbstick_click,
         left_trigger,
         right_trigger,
+        unscaled_left_delta_x,
+        unscaled_left_delta_y,
+        unscaled_left_delta_z,
+        unscaled_right_delta_x,
+        unscaled_right_delta_y,
+        unscaled_right_delta_z,
     ]``
 
-    Right-hand B starts arm-follow, right-hand A stops arm-follow. Unity
-    controller position deltas are converted from Unity tracking axes (x right,
-    y up, z forward) to the RobotYao Isaac scene axes (x forward, y left,
-    z up) before they are emitted.
+    Right-hand B starts arm-follow, right-hand A stops arm-follow. Controller
+    poses are expected to already be converted to Isaac Lab coordinates by
+    ``ZeroMqGameSubDevice``; this retargeter only differences consecutive
+    controller positions and applies ``arm_delta_scale``.
     """
 
-    OUTPUT_SIZE = 20
+    OUTPUT_SIZE = 26
     BASE_FORWARD = 0
     BASE_LATERAL = 1
     BASE_YAW = 2
@@ -65,6 +71,8 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
     RIGHT_THUMBSTICK_CLICK = 17
     LEFT_TRIGGER = 18
     RIGHT_TRIGGER = 19
+    RAW_LEFT_DELTA_START = 20
+    RAW_RIGHT_DELTA_START = 23
 
     def __init__(self, cfg: RobotYaoWheeledXrRetargeterCfg):
         super().__init__(cfg)
@@ -101,29 +109,49 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         follow_stop_button = right_inputs[DeviceBase.MotionControllerInputIndex.BUTTON_0.value] > 0.5
         self._update_follow_state(follow_start_button, follow_stop_button)
 
+        left_raw_delta = np.zeros(3, dtype=np.float32)
+        right_raw_delta = np.zeros(3, dtype=np.float32)
         left_delta = np.zeros(3, dtype=np.float32)
         right_delta = np.zeros(3, dtype=np.float32)
         left_position = self._extract_position(left_controller)
         right_position = self._extract_position(right_controller)
 
-        if self._arm_follow_active and left_position is not None and right_position is not None:
+        if left_position is not None:
             if self._previous_left_controller_position is not None:
-                left_delta = self._unity_delta_to_isaac(left_position - self._previous_left_controller_position)
-            if self._previous_right_controller_position is not None:
-                right_delta = self._unity_delta_to_isaac(right_position - self._previous_right_controller_position)
+                left_raw_delta = left_position - self._previous_left_controller_position
+                left_delta = left_raw_delta.copy()
             self._previous_left_controller_position = left_position.copy()
-            self._previous_right_controller_position = right_position.copy()
         else:
             self._previous_left_controller_position = None
+
+        if right_position is not None:
+            if self._previous_right_controller_position is not None:
+                right_raw_delta = right_position - self._previous_right_controller_position
+                right_delta = right_raw_delta.copy()
+            self._previous_right_controller_position = right_position.copy()
+        else:
             self._previous_right_controller_position = None
+
+        if np.any(right_raw_delta != 0.0):
+            print(
+                f"[DEBUG Retargeter] Right Hand Delta - "
+                f"Controller (Isaac xyz): [{right_raw_delta[0]:.6f}, {right_raw_delta[1]:.6f}, {right_raw_delta[2]:.6f}], "
+                f"Arm delta before scale: [{right_delta[0]:.6f}, {right_delta[1]:.6f}, {right_delta[2]:.6f}], "
+                f"FollowActive: {self._arm_follow_active}",
+                flush=True
+            )
 
         output = np.zeros(self.OUTPUT_SIZE, dtype=np.float32)
         output[self.BASE_FORWARD] = forward * self._max_forward_speed
         output[self.BASE_LATERAL] = lateral * self._max_lateral_speed
         output[self.BASE_YAW] = yaw * self._max_yaw_rate
         output[self.ARM_FOLLOW_ACTIVE] = 1.0 if self._arm_follow_active else 0.0
-        output[self.LEFT_ARM_DELTA_START : self.LEFT_ARM_DELTA_START + 3] = left_delta * self._arm_delta_scale
-        output[self.RIGHT_ARM_DELTA_START : self.RIGHT_ARM_DELTA_START + 3] = right_delta * self._arm_delta_scale
+        output[self.LEFT_ARM_DELTA_START : self.LEFT_ARM_DELTA_START + 3] = (
+            left_delta * self._arm_delta_scale if self._arm_follow_active else 0.0
+        )
+        output[self.RIGHT_ARM_DELTA_START : self.RIGHT_ARM_DELTA_START + 3] = (
+            right_delta * self._arm_delta_scale if self._arm_follow_active else 0.0
+        )
         output[self.LEFT_GRIP] = left_inputs[DeviceBase.MotionControllerInputIndex.SQUEEZE.value]
         output[self.RIGHT_GRIP] = right_inputs[DeviceBase.MotionControllerInputIndex.SQUEEZE.value]
         output[self.LEFT_PRIMARY] = left_inputs[DeviceBase.MotionControllerInputIndex.BUTTON_0.value]
@@ -134,6 +162,8 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         output[self.RIGHT_THUMBSTICK_CLICK] = right_inputs[DeviceBase.MotionControllerInputIndex.PADDING.value]
         output[self.LEFT_TRIGGER] = left_inputs[DeviceBase.MotionControllerInputIndex.TRIGGER.value]
         output[self.RIGHT_TRIGGER] = right_inputs[DeviceBase.MotionControllerInputIndex.TRIGGER.value]
+        output[self.RAW_LEFT_DELTA_START : self.RAW_LEFT_DELTA_START + 3] = left_raw_delta
+        output[self.RAW_RIGHT_DELTA_START : self.RAW_RIGHT_DELTA_START + 3] = right_raw_delta
         return torch.tensor(output, dtype=torch.float32, device=self._sim_device)
 
     def get_requirements(self) -> list[RetargeterBase.Requirement]:
@@ -181,10 +211,6 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         if abs(value) < self._dead_zone:
             return 0.0
         return float(np.clip(value, -1.0, 1.0))
-
-    @staticmethod
-    def _unity_delta_to_isaac(delta: np.ndarray) -> np.ndarray:
-        return np.array([delta[2], -delta[0], delta[1]], dtype=np.float32)
 
 
 @dataclass

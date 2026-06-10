@@ -111,19 +111,37 @@ _WHOLE_BODY_PAYLOAD_SIZE = 4 + XR_WHOLE_BODY_JOINT_COUNT * _POSE_STRUCT.size
 
 def _pose_xyzw_to_wxyz(values: tuple[float, ...]) -> np.ndarray:
     """Convert C++ XrPosef layout xyz + quaternion xyzw to Isaac Lab xyz + qwxyz.
-    
-    Coordinate system conversion is not needed.
+
+    Applies coordinate system conversion:
+    MGXR/OpenXR convention: +X = right, +Y = up, -Z = forward
+    Isaac Lab convention:   +X = right, +Y = forward, +Z = up
     """
     px, py, pz, qx, qy, qz, qw = values
-    
+
+    oxr_quat = Gf.Quatd(qw, qx, qy, qz)
+    oxr_pos = Gf.Vec3d(px, py, pz)
+
+    oxr_matrix = Gf.Matrix4d()
+    oxr_matrix.SetTransform(Gf.Rotation(oxr_quat), oxr_pos)
+
+    # +X -> +X, +Y -> +Z, -Z -> +Y: +90 degrees around X.
+    transform_matrix = Gf.Matrix4d()
+    transform_matrix.SetRotate(Gf.Rotation(Gf.Vec3d(1.0, 0.0, 0.0), 90.0))
+
+    # In pxr, row-vectors are used, so M_world = M_local * M_transform.
+    pose = oxr_matrix * transform_matrix
+
+    position = pose.ExtractTranslation()
+    quat = pose.ExtractRotationQuat()
+
     return np.array([
-        px,
-        py,
-        pz,
-        qw,
-        qx,
-        qy,
-        qz
+        position[0],
+        position[1],
+        position[2],
+        quat.GetReal(),
+        quat.GetImaginary()[0],
+        quat.GetImaginary()[1],
+        quat.GetImaginary()[2],
     ], dtype=np.float32)
 
 
