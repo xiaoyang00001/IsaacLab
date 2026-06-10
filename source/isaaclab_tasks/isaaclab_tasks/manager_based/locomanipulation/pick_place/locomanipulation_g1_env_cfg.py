@@ -491,9 +491,18 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/SONICRobot")
 
     # Ground plane (启用：SONIC robot 在 Y=11m 处可能在 warehouse.usd 碰撞区域外，需要显式地面)
+    # 摩擦 μ=1.0 + combine=max：对齐 MuJoCo deploy 参考环境（floor 默认 μ_slide=1.0）。
+    # IsaacLab 默认 0.5/average 行走蹬地会打滑——步态像滑冰且推进相易摔。
     ground = AssetBaseCfg(
         prim_path="/World/GroundPlane",
-        spawn=GroundPlaneCfg(),
+        spawn=GroundPlaneCfg(
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+                friction_combine_mode="max",
+            ),
+        ),
     )
 
     # Lights
