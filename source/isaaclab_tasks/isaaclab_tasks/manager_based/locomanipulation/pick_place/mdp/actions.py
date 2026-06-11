@@ -542,7 +542,10 @@ class SonicDeployTargetAction(ActionTerm):
             # exponentially instead: double the allowed step every 5 env steps,
             # starting at unlock (blend included), fully open after ~1 s.
             self._post_unlock_steps += 1
-            max_delta = max_delta * (2.0 ** (float(self._post_unlock_steps) / 5.0))
+            # Cap the exponent: the counter keeps running for the rest of the episode
+            # and float pow overflows at 2**1024 (OverflowError ~102 s after unlock).
+            exponent = min(float(self._post_unlock_steps) / 5.0, 64.0)
+            max_delta = max_delta * (2.0 ** exponent)
             if max_delta >= 50.0:
                 max_delta = 0.0
         if max_delta <= 0.0:
