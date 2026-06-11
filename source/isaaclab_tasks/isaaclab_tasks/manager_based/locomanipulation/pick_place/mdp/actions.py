@@ -835,6 +835,12 @@ class SonicDeployTargetAction(ActionTerm):
             else:
                 hz_text = "n/a"
             self._last_debug_wall_time = now
+            # Measured robot state, not the deploy target: base_trans above is the
+            # commanded base pose and never falls — a real fall is only visible here.
+            rp = self._asset.data.root_pos_w[0]
+            gb = self._asset.data.projected_gravity_b[0]
+            tilt_deg = math.degrees(math.acos(max(-1.0, min(1.0, -gb[2].item()))))
+            real_text = f"({rp[0].item():+.3f},{rp[1].item():+.3f},{rp[2].item():+.3f}) tilt={tilt_deg:.1f}deg"
             self._log_info(
                 f"step={self._debug_counter} packets={self._packet_count} "
                 f"field={self._last_target_field} ref={self._last_reference_field} "
@@ -842,7 +848,7 @@ class SonicDeployTargetAction(ActionTerm):
                 f"step_delta_absmax={self._last_target_step_delta_absmax[0].item():.4f} "
                 f"root_xy_step={self._last_root_xy_step_norm[0].item():.4f} "
                 f"root_src={self._last_root_motion_source} "
-                f"base_trans={bt_text} root_z={rz_text} env_hz={hz_text}"
+                f"base_trans={bt_text} root_z={rz_text} real_root={real_text} env_hz={hz_text}"
             )
 
     def apply_actions(self):
