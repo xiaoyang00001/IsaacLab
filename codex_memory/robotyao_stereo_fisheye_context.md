@@ -336,13 +336,25 @@ Further axis audit:
 
 New diagnostic/flexibility added:
 
-- `RobotYaoWheeledXrRetargeter` now appends unscaled Isaac-frame controller deltas to its command tensor:
+- `RobotYaoWheeledXrRetargeter` now appends unscaled Isaac-frame controller position deltas and scaled controller orientation deltas to its command tensor:
 
 ```text
 RAW_LEFT_DELTA_START = 20
 RAW_RIGHT_DELTA_START = 23
-OUTPUT_SIZE = 26
+LEFT_ARM_ROT_DELTA_START = 26
+RIGHT_ARM_ROT_DELTA_START = 29
+OUTPUT_SIZE = 32
 ```
+
+- Orientation is computed as a relative quaternion delta (`current * previous^-1`) and converted to axis-angle radians.
+- New CLI option:
+
+```powershell
+--arm-rotation-delta-scale 1.0
+```
+
+- In the task-scene RMPFlow path, `actions[:, 0:3]` receives mapped position delta and `actions[:, 3:6]` receives mapped axis-angle rotation delta.
+- The same `--arm-rmpflow-axis-map y,-x,z` is used for both position vectors and rotation vectors.
 
 - `--debug-task-loop` now also prints:
 
@@ -350,8 +362,11 @@ OUTPUT_SIZE = 26
 right_controller_delta_isaac=[...]
 right_scene_delta=[...]
 right_rmpflow_delta=[...]
+right_scene_rot_delta=[...]
+right_rmpflow_rot_delta=[...]
 actual_right_ee_delta_w=[...]
 right_rmpflow_cum=[...]
+right_rmpflow_rot_cum=[...]
 actual_right_ee_cum_w=[...]
 ```
 
@@ -359,6 +374,19 @@ Recommended live calibration:
 
 1. Press B to enter follow mode.
 2. Move the right controller only right/left, then only up/down, then only forward/back.
-3. Check which component changes in `right_controller_delta_isaac`, then which component changes in `right_scene_delta`, then which world component changes in `actual_right_ee_delta_w`.
-4. If `right_controller_delta_isaac` is wrong, inspect Unity handedness conversion and `ZeroMqGameSubDevice._pose_xyzw_to_wxyz()`.
-5. If `right_controller_delta_isaac` and `right_scene_delta` are correct but `right_rmpflow_delta` or `actual_right_ee_delta_w` is wrong, change `--arm-rmpflow-axis-map`.
+3. Rotate the right controller around one local/visible axis at a time and check `right_scene_rot_delta` and `right_rmpflow_rot_delta`.
+4. Check which component changes in `right_controller_delta_isaac`, then which component changes in `right_scene_delta`, then which world component changes in `actual_right_ee_delta_w`.
+5. If `right_controller_delta_isaac` is wrong, inspect Unity handedness conversion and `ZeroMqGameSubDevice._pose_xyzw_to_wxyz()`.
+6. If `right_controller_delta_isaac`/`right_scene_rot_delta` are correct but `right_rmpflow_delta`/`right_rmpflow_rot_delta` or `actual_right_ee_delta_w` is wrong, change `--arm-rmpflow-axis-map`.
+
+### Robot torso/body height control
+A new vertical sliding height control feature has been implemented:
+- **Condition**: Left-hand controller grip button (`left_inputs[SQUEEZE]`) is pressed (value > 0.5).
+- **Control**: Left-hand thumbstick Y-axis (`THUMBSTICK_Y`) controls the sliding velocity of the robot torso along the wheeled base's slide rail (`joint_lift_body` joint target), overriding the default behavior of controlling forward/backward base translation. Meanwhile, the base forward and lateral translations are completely disabled and set to `0.0`.
+- **Safety Constraints**: The slide rail joint target (`self._lift_joint_pos`) is dynamically updated and clamped to the robot's soft joint limits `self._robot.data.soft_joint_pos_limits[:, self._lift_joint_id]` retrieved at runtime to prevent exceeding physical rail limits.
+- **Base Stability**: The wheeled base root Z coordinate (`self._root_pos[2]`) is kept strictly at its initial spawned height (`self._init_root_z`) to prevent gravity/penetration drift.
+- **Default Behavior**: When the left grip button is not pressed, the left-hand thumbstick Y-axis and X-axis control the forward/backward and lateral translation of the wheeled robot base, preserving the original functionality.
+- **Command Layout**:
+  - `BASE_HEIGHT_VEL = 34` index added to the retargeter output.
+  - `OUTPUT_SIZE` increased to `35`.
+

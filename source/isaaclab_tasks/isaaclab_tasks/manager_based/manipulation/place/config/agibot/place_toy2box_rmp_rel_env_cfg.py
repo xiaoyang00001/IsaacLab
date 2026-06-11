@@ -35,7 +35,7 @@ from isaaclab_tasks.manager_based.manipulation.stack.stack_env_cfg import Object
 ##
 from isaaclab.markers.config import FRAME_MARKER_CFG  # isort: skip
 from isaaclab_assets.robots.agibot import AGIBOT_A2D_CFG  # isort: skip
-from isaaclab.controllers.config.rmp_flow import AGIBOT_RIGHT_ARM_RMPFLOW_CFG  # isort: skip
+from isaaclab.controllers.config.rmp_flow import AGIBOT_LEFT_ARM_RMPFLOW_CFG, AGIBOT_RIGHT_ARM_RMPFLOW_CFG  # isort: skip
 
 
 def _resolve_local_asset_path(*relative_paths: str) -> str | None:
@@ -178,8 +178,13 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     # will be set by agent env cfg
-    arm_action: mdp.JointPositionActionCfg = MISSING
-    gripper_action: mdp.BinaryJointPositionActionCfg = MISSING
+    arm_action: mdp.JointPositionActionCfg = None
+    gripper_action: mdp.BinaryJointPositionActionCfg = None
+
+    left_arm_action: mdp.JointPositionActionCfg = None
+    right_arm_action: mdp.JointPositionActionCfg = None
+    left_gripper_action: mdp.BinaryJointPositionActionCfg = None
+    right_gripper_action: mdp.BinaryJointPositionActionCfg = None
 
 
 @configclass
@@ -352,6 +357,27 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
             open_command_expr={"right_hand_joint1": 0.994, "right_.*_Support_Joint": 0.994},
             close_command_expr={"right_hand_joint1": 0.20, "right_.*_Support_Joint": 0.20},
         )
+
+        # Concurrent Bimanual Action Terms (using RMPFlow for both arms)
+        self.actions.left_arm_action = RMPFlowActionCfg(
+            asset_name="robot",
+            joint_names=["left_arm_joint.*"],
+            body_name="gripper_center",
+            controller=AGIBOT_LEFT_ARM_RMPFLOW_CFG,
+            scale=1.0,
+            body_offset=RMPFlowActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.0], rot=[0.7071, 0.0, -0.7071, 0.0]),
+            articulation_prim_expr="/World/envs/env_.*/Robot",
+            use_relative_mode=self.use_relative_mode,
+        )
+        self.actions.right_arm_action = self.actions.arm_action
+
+        self.actions.left_gripper_action = mdp.BinaryJointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["left_hand_joint1", "left_.*_Support_Joint"],
+            open_command_expr={"left_hand_joint1": 0.994, "left_.*_Support_Joint": 0.994},
+            close_command_expr={"left_hand_joint1": 0.0, "left_.*_Support_Joint": 0.0},
+        )
+        self.actions.right_gripper_action = self.actions.gripper_action
 
         # find joint ids for grippers
         self.gripper_joint_names = ["right_hand_joint1", "right_Right_1_Joint"]

@@ -176,6 +176,12 @@ parser.add_argument(
     default=65.0,
     help="Root-mount fallback stereo rig downward look angle in degrees. 0 keeps the camera level.",
 )
+parser.add_argument(
+    "--task-box-drop-reset-height",
+    type=float,
+    default=-0.85,
+    help="Reset the task scene when the box root height drops below this world Z value.",
+)
 parser.add_argument("--debug-task-loop", action="store_true", help="Print detailed task-loop diagnostics.")
 parser.add_argument(
     "--debug-save-frame-dir",
@@ -217,12 +223,36 @@ parser.add_argument(
     dest="unity_follow_mode",
     choices=["toggle", "hold"],
     default="toggle",
-    help="Right-hand B/A arm-follow mode. Default: B starts following, A stops. Hold mode follows only while B is held.",
+    help="Arm-follow mode for left Y/X and right B/A. Default: Y/B starts following, X/A stops.",
 )
 parser.add_argument("--max-forward-speed", type=float, default=1.0, help="Left stick Y forward speed in m/s.")
 parser.add_argument("--max-lateral-speed", type=float, default=0.6, help="Left stick X lateral walking speed in m/s. Use 0 to disable strafe.")
 parser.add_argument("--max-yaw-rate", type=float, default=1.2, help="Right stick X yaw rate in rad/s.")
 parser.add_argument("--arm-delta-scale", type=float, default=1.0, help="Scale for incremental controller-to-arm deltas.")
+parser.add_argument(
+    "--arm-rotation-delta-scale",
+    type=float,
+    default=1.0,
+    help="Scale for incremental controller orientation deltas, in axis-angle radians.",
+)
+parser.add_argument(
+    "--arm-command-position-deadband",
+    type=float,
+    default=0.0015,
+    help="Ignore arm position delta commands whose mapped xyz norm is below this value in meters.",
+)
+parser.add_argument(
+    "--arm-command-rotation-deadband",
+    type=float,
+    default=0.006,
+    help="Ignore arm rotation delta commands whose mapped axis-angle norm is below this value in radians.",
+)
+parser.add_argument(
+    "--arm-follow-start-warmup-frames",
+    type=int,
+    default=5,
+    help="Hold arm joints for this many frames after pressing Y/B before accepting arm deltas.",
+)
 parser.add_argument(
     "--arm-rmpflow-axis-map",
     type=str,
@@ -232,6 +262,18 @@ parser.add_argument(
         "Default y,-x,z maps controller/scene +X right to robot/RMPFlow -Y right, "
         "+Y forward to +X forward, and +Z up to +Z up."
     ),
+)
+parser.add_argument(
+    "--left-arm-rmpflow-axis-map",
+    type=str,
+    default=None,
+    help="Axis mapping for the left arm RMPFlow action. If None, defaults to --arm-rmpflow-axis-map."
+)
+parser.add_argument(
+    "--right-arm-rmpflow-axis-map",
+    type=str,
+    default=None,
+    help="Axis mapping for the right arm RMPFlow action. If None, defaults to --arm-rmpflow-axis-map."
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -303,6 +345,7 @@ simulation_app = app_launcher.app
 import numpy as np
 import torch
 
+from isaaclab.utils.math import subtract_frame_transforms, apply_delta_pose
 import gymnasium as gym
 import isaaclab.sim as sim_utils
 from isaaclab.sensors.camera import Camera, CameraCfg
@@ -319,6 +362,8 @@ from isaaclab.devices.openxr.retargeters.robotyao_wheeled_xr_retargeter import (
     RobotYaoWheeledXrRetargeterCfg,
 )
 
+_ROBOTYAO_LEGACY_COMMAND_SIZE = RobotYaoWheeledXrRetargeter.RIGHT_ARM_ROT_DELTA_START + 3
+
 
 def _spawn_shape(path: str, cfg, translation: tuple[float, float, float]):
     cfg.func(path, cfg, translation=translation)
@@ -326,6 +371,20 @@ def _spawn_shape(path: str, cfg, translation: tuple[float, float, float]):
 
 def _preview_material(color: tuple[float, float, float], metallic: float = 0.0, roughness: float = 0.35):
     return sim_utils.PreviewSurfaceCfg(diffuse_color=color, metallic=metallic, roughness=roughness)
+
+
+def _kinematic_robot_physics(mass: float) -> dict:
+    return {
+        "collision_props": sim_utils.CollisionPropertiesCfg(collision_enabled=True, contact_offset=0.01, rest_offset=0.0),
+        "rigid_props": sim_utils.RigidBodyPropertiesCfg(
+            rigid_body_enabled=True,
+            kinematic_enabled=True,
+            disable_gravity=True,
+            max_depenetration_velocity=2.0,
+            solver_position_iteration_count=4,
+        ),
+        "mass_props": sim_utils.MassPropertiesCfg(mass=mass),
+    }
 
 
 def _parse_axis_map(spec: str) -> list[tuple[int, float, str]]:
@@ -360,6 +419,28 @@ def _apply_axis_map_tensor(delta: torch.Tensor, axis_map: list[tuple[int, float,
     return torch.stack([delta[index] * sign for index, sign, _ in axis_map]).to(delta)
 
 
+def _np_arm_follow_flags(command_np: np.ndarray) -> tuple[bool, bool, bool]:
+    follow_active = bool(command_np[RobotYaoWheeledXrRetargeter.ARM_FOLLOW_ACTIVE] > 0.5)
+    if command_np.size > RobotYaoWheeledXrRetargeter.RIGHT_ARM_FOLLOW_ACTIVE:
+        left_follow_active = bool(command_np[RobotYaoWheeledXrRetargeter.LEFT_ARM_FOLLOW_ACTIVE] > 0.5)
+        right_follow_active = bool(command_np[RobotYaoWheeledXrRetargeter.RIGHT_ARM_FOLLOW_ACTIVE] > 0.5)
+    else:
+        left_follow_active = follow_active
+        right_follow_active = follow_active
+    return left_follow_active, right_follow_active, follow_active
+
+
+def _torch_arm_follow_flags(command_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    follow_active = command_tensor[RobotYaoWheeledXrRetargeter.ARM_FOLLOW_ACTIVE] > 0.5
+    if command_tensor.numel() > RobotYaoWheeledXrRetargeter.RIGHT_ARM_FOLLOW_ACTIVE:
+        left_follow_active = command_tensor[RobotYaoWheeledXrRetargeter.LEFT_ARM_FOLLOW_ACTIVE] > 0.5
+        right_follow_active = command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_ARM_FOLLOW_ACTIVE] > 0.5
+    else:
+        left_follow_active = follow_active
+        right_follow_active = follow_active
+    return left_follow_active, right_follow_active, follow_active
+
+
 def _fisheye_full_frame_poly_b(width: int, height: int, fisheye_fov: float) -> float:
     """Return the linear f-theta coefficient that maps max FOV to the image radius."""
     image_radius_px = max(min(float(width), float(height)) * 0.5, 1.0)
@@ -378,24 +459,40 @@ def _design_scene(width: int, height: int, baseline: float, fisheye_fov: float, 
     sim_utils.create_prim("/World/Robot", "Xform", translation=(0.0, 0.0, 0.0))
     _spawn_shape(
         "/World/Robot/body",
-        sim_utils.CuboidCfg(size=(1.15, 0.72, 0.28), visual_material=_preview_material((0.12, 0.18, 0.22))),
+        sim_utils.CuboidCfg(
+            size=(1.15, 0.72, 0.28),
+            visual_material=_preview_material((0.12, 0.18, 0.22)),
+            **_kinematic_robot_physics(42.0),
+        ),
         (0.0, 0.0, 0.42),
     )
     _spawn_shape(
         "/World/Robot/top_plate",
-        sim_utils.CuboidCfg(size=(0.72, 0.48, 0.08), visual_material=_preview_material((0.20, 0.26, 0.30))),
+        sim_utils.CuboidCfg(
+            size=(0.72, 0.48, 0.08),
+            visual_material=_preview_material((0.20, 0.26, 0.30)),
+            **_kinematic_robot_physics(8.0),
+        ),
         (0.1, 0.0, 0.64),
     )
     _spawn_shape(
         "/World/Robot/neck",
         sim_utils.CylinderCfg(
-            radius=0.055, height=0.32, axis="Z", visual_material=_preview_material((0.26, 0.28, 0.28))
+            radius=0.055,
+            height=0.32,
+            axis="Z",
+            visual_material=_preview_material((0.26, 0.28, 0.28)),
+            **_kinematic_robot_physics(2.0),
         ),
         (0.38, 0.0, 0.82),
     )
     _spawn_shape(
         "/World/Robot/head",
-        sim_utils.CuboidCfg(size=(0.28, 0.26, 0.18), visual_material=_preview_material((0.08, 0.11, 0.13))),
+        sim_utils.CuboidCfg(
+            size=(0.28, 0.26, 0.18),
+            visual_material=_preview_material((0.08, 0.11, 0.13)),
+            **_kinematic_robot_physics(3.0),
+        ),
         (0.46, 0.0, 1.03),
     )
     for side_name, side_sign, color in (
@@ -406,17 +503,29 @@ def _design_scene(width: int, height: int, baseline: float, fisheye_fov: float, 
         hand_y = 0.58 * side_sign
         _spawn_shape(
             f"/World/Robot/{side_name}_shoulder",
-            sim_utils.SphereCfg(radius=0.055, visual_material=_preview_material((0.52, 0.55, 0.58), metallic=0.2)),
+            sim_utils.SphereCfg(
+                radius=0.055,
+                visual_material=_preview_material((0.52, 0.55, 0.58), metallic=0.2),
+                **_kinematic_robot_physics(1.0),
+            ),
             (0.24, shoulder_y, 0.72),
         )
         _spawn_shape(
             f"/World/Robot/{side_name}_arm_link",
-            sim_utils.CuboidCfg(size=(0.32, 0.045, 0.045), visual_material=_preview_material((0.18, 0.22, 0.26))),
+            sim_utils.CuboidCfg(
+                size=(0.32, 0.045, 0.045),
+                visual_material=_preview_material((0.18, 0.22, 0.26)),
+                **_kinematic_robot_physics(1.6),
+            ),
             (0.39, (shoulder_y + hand_y) * 0.5, 0.65),
         )
         _spawn_shape(
             f"/World/Robot/{side_name}_hand_target",
-            sim_utils.SphereCfg(radius=0.07, visual_material=_preview_material(color, metallic=0.05)),
+            sim_utils.SphereCfg(
+                radius=0.07,
+                visual_material=_preview_material(color, metallic=0.05),
+                **_kinematic_robot_physics(0.8),
+            ),
             (0.54, hand_y, 0.62),
         )
 
@@ -427,12 +536,24 @@ def _design_scene(width: int, height: int, baseline: float, fisheye_fov: float, 
             wheel_path = f"/World/Robot/wheel_{index}_{side}"
             _spawn_shape(
                 wheel_path,
-                sim_utils.CylinderCfg(radius=0.16, height=0.11, axis="Y", visual_material=wheel_mat),
+                sim_utils.CylinderCfg(
+                    radius=0.16,
+                    height=0.11,
+                    axis="Y",
+                    visual_material=wheel_mat,
+                    **_kinematic_robot_physics(4.0),
+                ),
                 (x, y, 0.28),
             )
             _spawn_shape(
                 f"{wheel_path}_hub",
-                sim_utils.CylinderCfg(radius=0.07, height=0.125, axis="Y", visual_material=hub_mat),
+                sim_utils.CylinderCfg(
+                    radius=0.07,
+                    height=0.125,
+                    axis="Y",
+                    visual_material=hub_mat,
+                    **_kinematic_robot_physics(1.2),
+                ),
                 (x, y, 0.28),
             )
 
@@ -940,10 +1061,18 @@ class RobotYaoSceneController:
     def __init__(self):
         self._base_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self._base_yaw = 0.0
+        self._lift_offset = 0.0
+        self._lift_min = 0.0
+        self._lift_max = 0.45
+        self._lift_speed_scale = 0.30
+        self._stereo_x = 0.61
+        self._stereo_z = 1.06
+        self._left_shoulder_base = np.array([0.24, 0.38, 0.72], dtype=np.float32)
+        self._right_shoulder_base = np.array([0.24, -0.38, 0.72], dtype=np.float32)
         self._left_hand_position = np.array([0.54, 0.58, 0.62], dtype=np.float32)
         self._right_hand_position = np.array([0.54, -0.58, 0.62], dtype=np.float32)
-        self._arm_min = np.array([0.05, -0.85, 0.25], dtype=np.float32)
-        self._arm_max = np.array([0.95, 0.85, 1.15], dtype=np.float32)
+        self._arm_min_base = np.array([0.05, -0.85, 0.25], dtype=np.float32)
+        self._arm_max_base = np.array([0.95, 0.85, 1.15], dtype=np.float32)
 
     def apply(self, command: torch.Tensor | np.ndarray | None, dt: float) -> None:
         if command is None:
@@ -952,13 +1081,19 @@ class RobotYaoSceneController:
             command_np = command.detach().cpu().numpy()
         else:
             command_np = np.asarray(command, dtype=np.float32)
-        if command_np.size < RobotYaoWheeledXrRetargeter.OUTPUT_SIZE:
+        if command_np.size < _ROBOTYAO_LEGACY_COMMAND_SIZE:
             return
 
         forward = float(command_np[0])
         lateral = float(command_np[1])
         yaw_rate = float(command_np[2])
-        arm_follow_active = command_np[3] > 0.5
+        height_vel = (
+            float(command_np[RobotYaoWheeledXrRetargeter.BASE_HEIGHT_VEL])
+            if command_np.size > RobotYaoWheeledXrRetargeter.BASE_HEIGHT_VEL
+            else 0.0
+        )
+        body_lift_mode = command_np[RobotYaoWheeledXrRetargeter.LEFT_GRIP] > 0.5
+        left_follow_active, right_follow_active, _ = _np_arm_follow_flags(command_np)
 
         self._base_yaw += yaw_rate * dt
         local_delta = np.array([forward * dt, lateral * dt, 0.0], dtype=np.float32)
@@ -969,8 +1104,43 @@ class RobotYaoSceneController:
             dtype=np.float32,
         )
         self._base_position += world_delta
+        if math.isfinite(height_vel) and abs(height_vel) > 0.0:
+            previous_lift_offset = self._lift_offset
+            self._lift_offset = float(
+                np.clip(self._lift_offset + height_vel * self._lift_speed_scale * dt, self._lift_min, self._lift_max)
+            )
+            lift_delta = self._lift_offset - previous_lift_offset
+            if lift_delta != 0.0:
+                lift_delta_vec = np.array([0.0, 0.0, lift_delta], dtype=np.float32)
+                self._left_hand_position += lift_delta_vec
+                self._right_hand_position += lift_delta_vec
 
-        if arm_follow_active:
+        arm_min, arm_max = self._current_arm_limits()
+
+        if left_follow_active and not body_lift_mode:
+            raw_left_delta = command_np[
+                RobotYaoWheeledXrRetargeter.RAW_LEFT_DELTA_START : RobotYaoWheeledXrRetargeter.RAW_LEFT_DELTA_START + 3
+            ]
+            scene_left_delta = command_np[
+                RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START : RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START + 3
+            ]
+            if np.any(raw_left_delta != 0.0):
+                print(
+                    f"[DEBUG SimpleController] Left Hand Delta - "
+                    f"Controller (Isaac xyz): [{raw_left_delta[0]:.6f}, {raw_left_delta[1]:.6f}, {raw_left_delta[2]:.6f}], "
+                    f"Scaled scene delta: [{scene_left_delta[0]:.6f}, {scene_left_delta[1]:.6f}, {scene_left_delta[2]:.6f}]",
+                    flush=True
+                )
+            self._left_hand_position = np.clip(
+                self._left_hand_position
+                + command_np[
+                    RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START : RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START + 3
+                ],
+                arm_min,
+                arm_max,
+            )
+
+        if right_follow_active and not body_lift_mode:
             raw_right_delta = command_np[RobotYaoWheeledXrRetargeter.RAW_RIGHT_DELTA_START : RobotYaoWheeledXrRetargeter.RAW_RIGHT_DELTA_START + 3]
             scene_right_delta = command_np[RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START : RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START + 3]
             if np.any(raw_right_delta != 0.0):
@@ -980,17 +1150,49 @@ class RobotYaoSceneController:
                     f"Scaled scene delta: [{scene_right_delta[0]:.6f}, {scene_right_delta[1]:.6f}, {scene_right_delta[2]:.6f}]",
                     flush=True
                 )
-            self._left_hand_position = np.clip(self._left_hand_position + command_np[4:7], self._arm_min, self._arm_max)
             self._right_hand_position = np.clip(
-                self._right_hand_position + command_np[7:10], self._arm_min, self._arm_max
+                self._right_hand_position
+                + command_np[
+                    RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START : RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START + 3
+                ],
+                arm_min,
+                arm_max,
             )
+        self._left_hand_position = np.clip(self._left_hand_position, arm_min, arm_max)
+        self._right_hand_position = np.clip(self._right_hand_position, arm_min, arm_max)
 
         _set_xform_common("/World/Robot", self._base_position, self._base_yaw)
-        self._set_arm_visuals("left", np.array([0.24, 0.38, 0.72], dtype=np.float32), self._left_hand_position)
-        self._set_arm_visuals("right", np.array([0.24, -0.38, 0.72], dtype=np.float32), self._right_hand_position)
+        self._set_lift_visuals()
+        left_shoulder = self._left_shoulder_base + self._lift_vector()
+        right_shoulder = self._right_shoulder_base + self._lift_vector()
+        self._set_arm_visuals("left", left_shoulder, self._left_hand_position)
+        self._set_arm_visuals("right", right_shoulder, self._right_hand_position)
+
+    def _lift_vector(self) -> np.ndarray:
+        return np.array([0.0, 0.0, self._lift_offset], dtype=np.float32)
+
+    def _current_arm_limits(self) -> tuple[np.ndarray, np.ndarray]:
+        lift_vector = self._lift_vector()
+        return self._arm_min_base + lift_vector, self._arm_max_base + lift_vector
+
+    def _set_lift_visuals(self) -> None:
+        lift = self._lift_offset
+        _set_xform_common("/World/Robot/top_plate", np.array([0.1, 0.0, 0.64 + lift], dtype=np.float32))
+        _set_xform_common("/World/Robot/neck", np.array([0.38, 0.0, 0.82 + lift], dtype=np.float32))
+        _set_xform_common("/World/Robot/head", np.array([0.46, 0.0, 1.03 + lift], dtype=np.float32))
+        _set_xform_common("/World/Robot/Stereo", np.array([0.0, 0.0, lift], dtype=np.float32))
+        _set_xform_common(
+            "/World/Robot/left_lens_visual",
+            np.array([self._stereo_x + 0.04, args_cli.baseline * 0.5, self._stereo_z + lift], dtype=np.float32),
+        )
+        _set_xform_common(
+            "/World/Robot/right_lens_visual",
+            np.array([self._stereo_x + 0.04, -args_cli.baseline * 0.5, self._stereo_z + lift], dtype=np.float32),
+        )
 
     def _set_arm_visuals(self, side: str, shoulder: np.ndarray, hand: np.ndarray) -> None:
         midpoint = (shoulder + hand) * 0.5
+        _set_xform_common(f"/World/Robot/{side}_shoulder", shoulder)
         _set_xform_common(f"/World/Robot/{side}_hand_target", hand)
         _set_xform_common(f"/World/Robot/{side}_arm_link", midpoint)
 
@@ -1016,16 +1218,87 @@ class RobotYaoTaskSceneController:
         self._env_ids = torch.tensor([0], dtype=torch.long, device=env.device)
         self._root_pos = None
         self._root_yaw = None
+        self._lift_joint_pos = None
+        self._lift_joint_id = None
+        self._body_lift_mode = False
+        self._previous_body_lift_mode = False
+        self._left_arm_hold_after_lift = False
+        self._right_arm_hold_after_lift = False
+        self._left_arm_follow_warmup_frames = 0
+        self._right_arm_follow_warmup_frames = 0
+        self._previous_left_follow_start_button = False
+        self._previous_right_follow_start_button = False
+        self._previous_right_grip_pressed = False
+        self._reset_requested = False
+        self._reset_reason = ""
+        self._enabled_arm_action_terms: set[str] = set()
         self._zero_root_velocity = torch.zeros((1, 6), dtype=torch.float32, device=env.device)
-        self._rmpflow_axis_map = _parse_axis_map(args_cli.arm_rmpflow_axis_map)
+        self._action_slices = self._resolve_action_slices()
+        # Resolve concurrent bimanual action slices
+        self._left_arm_action_slice = self._action_slices.get("left_arm_action")
+        self._right_arm_action_slice = self._action_slices.get("right_arm_action")
+        self._left_gripper_action_slice = self._action_slices.get("left_gripper_action")
+        self._right_gripper_action_slice = self._action_slices.get("right_gripper_action")
+
+        # Resolve legacy/asymmetric action slices
+        self._arm_action_slice = self._action_slices.get("arm_action")
+        self._gripper_action_slice = self._action_slices.get("gripper_action")
+        self._arm_action_side = self._infer_action_term_side("arm_action")
+        self._gripper_action_side = self._infer_action_term_side("gripper_action")
+        self._patch_arm_action_terms_for_lift_hold()
+        left_map_str = args_cli.left_arm_rmpflow_axis_map or args_cli.arm_rmpflow_axis_map
+        right_map_str = args_cli.right_arm_rmpflow_axis_map or args_cli.arm_rmpflow_axis_map
+        self._left_rmpflow_axis_map = _parse_axis_map(left_map_str)
+        self._right_rmpflow_axis_map = _parse_axis_map(right_map_str)
+        self._previous_left_gripper_pos_w: torch.Tensor | None = None
         self._previous_right_gripper_pos_w: torch.Tensor | None = None
+        self._left_gripper_body_id = None
         self._right_gripper_body_id = None
         self._debug_follow_was_active = False
+        self._debug_cum_left_rmpflow_delta = torch.zeros(3, dtype=torch.float32, device=env.device)
+        self._debug_cum_left_rmpflow_rot_delta = torch.zeros(3, dtype=torch.float32, device=env.device)
+        self._debug_cum_left_ee_delta_w = torch.zeros(3, dtype=torch.float32, device=env.device)
         self._debug_cum_right_rmpflow_delta = torch.zeros(3, dtype=torch.float32, device=env.device)
+        self._debug_cum_right_rmpflow_rot_delta = torch.zeros(3, dtype=torch.float32, device=env.device)
         self._debug_cum_right_ee_delta_w = torch.zeros(3, dtype=torch.float32, device=env.device)
+        left_gripper_body_ids, left_gripper_body_names = self._robot.find_bodies(["gripper_center"])
+        if len(left_gripper_body_ids) > 0:
+            self._left_gripper_body_id = left_gripper_body_ids[0]
         right_gripper_body_ids, right_gripper_body_names = self._robot.find_bodies(["right_gripper_center"])
         if len(right_gripper_body_ids) > 0:
             self._right_gripper_body_id = right_gripper_body_ids[0]
+
+        # Fallback RMPFlow controller initialization
+        self._fallback_rmpflow_controller = None
+        self._fallback_rmpflow_side = None
+        self._fallback_joint_ids = []
+        self._fallback_ee_body_id = None
+
+        if args_cli.task_use_rmpflow and (self._left_arm_action_slice is None or self._right_arm_action_slice is None) and self._arm_action_side is not None:
+            fallback_side = "left" if self._arm_action_side == "right" else "right"
+            self._fallback_rmpflow_side = fallback_side
+            print(f"[RobotYao] Initializing fallback RmpFlowController for {fallback_side} arm.", flush=True)
+            try:
+                from isaaclab.controllers.config.rmp_flow import AGIBOT_LEFT_ARM_RMPFLOW_CFG, AGIBOT_RIGHT_ARM_RMPFLOW_CFG
+                from isaaclab.controllers.rmp_flow import RmpFlowController
+
+                fallback_cfg = AGIBOT_LEFT_ARM_RMPFLOW_CFG if fallback_side == "left" else AGIBOT_RIGHT_ARM_RMPFLOW_CFG
+                self._fallback_ee_body_id = self._left_gripper_body_id if fallback_side == "left" else self._right_gripper_body_id
+
+                self._fallback_rmpflow_controller = RmpFlowController(cfg=fallback_cfg, device=env.device)
+
+                active_term = self._env.action_manager.get_term("arm_action")
+                prim_expr = getattr(active_term.cfg, "articulation_prim_expr", None) or "/World/envs/env_.*/Robot"
+                self._fallback_rmpflow_controller.initialize(prim_expr)
+
+                active_dof_names = self._fallback_rmpflow_controller.active_dof_names
+                self._fallback_joint_ids, _ = self._robot.find_joints(active_dof_names)
+                print(f"[RobotYao] Fallback RMPFlow controller initialized with joints: {active_dof_names} (IDs: {self._fallback_joint_ids})", flush=True)
+            except Exception as exc:
+                print(f"[RobotYao] [ERROR] Failed to initialize fallback RmpFlowController: {exc}", flush=True)
+                traceback.print_exc()
+                self._fallback_rmpflow_controller = None
+                self._fallback_rmpflow_side = None
         fisheye_poly_b = _fisheye_full_frame_poly_b(args_cli.width, args_cli.height, args_cli.fisheye_fov)
         if self._camera_mount == "head_link":
             print(
@@ -1057,22 +1330,258 @@ class RobotYaoTaskSceneController:
         print(f"[DEBUG] Articulation root_pos_w at init: {self._robot.data.root_pos_w[0].tolist()}", flush=True)
         print(f"[DEBUG] Articulation root_quat_w at init: {self._robot.data.root_quat_w[0].tolist()}", flush=True)
         print(
-            "[RobotYao] Arm RMPFlow delta axis map: "
-            f"controller_delta_already_in_isaac_xyz -> rmpflow[{_format_axis_map(self._rmpflow_axis_map)}], "
+            "[RobotYao] Arm RMPFlow delta axis maps: "
+            f"left_axis_map={_format_axis_map(self._left_rmpflow_axis_map)}, "
+            f"right_axis_map={_format_axis_map(self._right_rmpflow_axis_map)}, "
             f"arm_delta_scale={args_cli.arm_delta_scale:.3f}, "
+            f"arm_rotation_delta_scale={args_cli.arm_rotation_delta_scale:.3f}, "
+            f"arm_command_position_deadband={args_cli.arm_command_position_deadband:.4f}, "
+            f"arm_command_rotation_deadband={args_cli.arm_command_rotation_deadband:.4f}, "
+            f"arm_follow_start_warmup_frames={args_cli.arm_follow_start_warmup_frames}, "
+            f"left_ee_body={left_gripper_body_names[0] if len(left_gripper_body_names) > 0 else 'not_found'}, "
             f"right_ee_body={right_gripper_body_names[0] if len(right_gripper_body_names) > 0 else 'not_found'}",
             flush=True,
         )
         self._left_arm_joint_ids, self._left_arm_joint_names = self._robot.find_joints(["left_arm_joint.*"])
         self._right_arm_joint_ids, self._right_arm_joint_names = self._robot.find_joints(["right_arm_joint.*"])
+        self._left_gripper_joint_ids, self._left_gripper_joint_names = self._robot.find_joints(
+            ["left_hand_joint1", "left_.*_Support_Joint"]
+        )
+        self._right_gripper_joint_ids, self._right_gripper_joint_names = self._robot.find_joints(
+            ["right_hand_joint1", "right_.*_Support_Joint"]
+        )
+        lift_joint_ids, lift_joint_names = self._robot.find_joints(["joint_lift_body"])
+        if len(lift_joint_ids) > 0:
+            self._lift_joint_id = lift_joint_ids[0]
+            print(f"[RobotYao] Found lift joint: {lift_joint_names[0]} (ID: {self._lift_joint_id})", flush=True)
+        else:
+            print("[RobotYao] [WARNING] lift joint 'joint_lift_body' not found!", flush=True)
+        self._left_gripper_open_targets = self._make_gripper_joint_targets("left", closed=False)
+        self._left_gripper_close_targets = self._make_gripper_joint_targets("left", closed=True)
+        self._right_gripper_open_targets = self._make_gripper_joint_targets("right", closed=False)
+        self._right_gripper_close_targets = self._make_gripper_joint_targets("right", closed=True)
+        print(
+            "[RobotYao] Task action ownership: "
+            f"terms={self._action_slices}, "
+            f"arm_action_side={self._arm_action_side or 'unknown'}, "
+            f"gripper_action_side={self._gripper_action_side or 'unknown'}, "
+            f"left_gripper_joints={self._left_gripper_joint_names}, "
+            f"right_gripper_joints={self._right_gripper_joint_names}",
+            flush=True,
+        )
         self.update_camera_xforms()
+
+    def _resolve_action_slices(self) -> dict[str, slice]:
+        action_slices: dict[str, slice] = {}
+        start = 0
+        for term_name, term_dim in zip(self._env.action_manager.active_terms, self._env.action_manager.action_term_dim):
+            stop = start + int(term_dim)
+            action_slices[term_name] = slice(start, stop)
+            start = stop
+        return action_slices
+
+    def _infer_action_term_side(self, term_name: str) -> str | None:
+        if term_name not in self._env.action_manager.active_terms:
+            return None
+        try:
+            term = self._env.action_manager.get_term(term_name)
+        except Exception:
+            return None
+        joint_names = list(getattr(term, "_joint_names", []) or [])
+        cfg_joint_names = list(getattr(getattr(term, "cfg", None), "joint_names", []) or [])
+        names = joint_names + cfg_joint_names
+        has_left = any("left_" in name or name.startswith("left") for name in names)
+        has_right = any("right_" in name or name.startswith("right") for name in names)
+        if has_left and not has_right:
+            return "left"
+        if has_right and not has_left:
+            return "right"
+        return None
+
+    def _patch_arm_action_terms_for_lift_hold(self) -> None:
+        """Prevent task-space arm terms from writing targets unless explicitly enabled."""
+        for term_name in ("arm_action", "left_arm_action", "right_arm_action"):
+            if term_name not in self._env.action_manager.active_terms:
+                continue
+            try:
+                term = self._env.action_manager.get_term(term_name)
+            except Exception:
+                continue
+            if getattr(term, "_robotyao_lift_hold_patched", False):
+                continue
+
+            original_apply_actions = term.apply_actions
+
+            def apply_actions_with_lift_hold(
+                *_args,
+                _term_name=term_name,
+                _original_apply_actions=original_apply_actions,
+                _controller=self,
+            ):
+                if not _controller._is_arm_action_term_enabled(_term_name):
+                    return None
+                return _original_apply_actions()
+
+            setattr(term, "_robotyao_original_apply_actions", original_apply_actions)
+            setattr(term, "apply_actions", apply_actions_with_lift_hold)
+            setattr(term, "_robotyao_lift_hold_patched", True)
+
+    def _is_arm_action_term_enabled(self, term_name: str) -> bool:
+        return term_name in self._enabled_arm_action_terms
+
+    def _enable_arm_action_term(self, term_name: str) -> None:
+        self._enabled_arm_action_terms.add(term_name)
+        side = self._infer_action_term_side(term_name)
+        if side is None:
+            return
+        for candidate_name in ("arm_action", "left_arm_action", "right_arm_action"):
+            if self._infer_action_term_side(candidate_name) == side:
+                self._enabled_arm_action_terms.add(candidate_name)
+
+    def _make_gripper_joint_targets(self, side: str, closed: bool) -> torch.Tensor:
+        if side == "left":
+            joint_names = self._left_gripper_joint_names
+            close_value = 0.0
+        elif side == "right":
+            joint_names = self._right_gripper_joint_names
+            close_value = 0.20
+        else:
+            raise ValueError(f"Unsupported gripper side: {side}")
+        value = close_value if closed else 0.994
+        targets = torch.full(
+            (self._env.num_envs, len(joint_names)), float(value), dtype=torch.float32, device=self._env.device
+        )
+        return targets
+
+    def _apply_direct_gripper_target(self, side: str, closed: bool) -> None:
+        if side == "left":
+            joint_ids = self._left_gripper_joint_ids
+            targets = self._left_gripper_close_targets if closed else self._left_gripper_open_targets
+        elif side == "right":
+            joint_ids = self._right_gripper_joint_ids
+            targets = self._right_gripper_close_targets if closed else self._right_gripper_open_targets
+        else:
+            raise ValueError(f"Unsupported gripper side: {side}")
+        if len(joint_ids) == 0:
+            return
+        self._robot.set_joint_position_target(targets, joint_ids=joint_ids)
+
+    def _apply_arm_action_delta(
+        self,
+        actions: torch.Tensor,
+        action_slice: slice,
+        position_delta: torch.Tensor,
+        rotation_delta: torch.Tensor,
+    ) -> None:
+        action_width = action_slice.stop - action_slice.start
+        if action_width < 6:
+            return
+        actions[:, action_slice.start : action_slice.start + 3] = position_delta.unsqueeze(0)
+        actions[:, action_slice.start + 3 : action_slice.start + 6] = rotation_delta.unsqueeze(0)
+
+    def _hold_arm_joint_targets(self, hold_left: bool = True, hold_right: bool = True) -> None:
+        """Keep selected arm joint angles fixed while they are not actively controlled."""
+        for should_hold, joint_ids in (
+            (hold_left, self._left_arm_joint_ids),
+            (hold_right, self._right_arm_joint_ids),
+        ):
+            if not should_hold:
+                continue
+            if len(joint_ids) == 0:
+                continue
+            joint_targets = self._robot.data.joint_pos[:, joint_ids].clone()
+            velocity_targets = torch.zeros_like(joint_targets)
+            self._robot.set_joint_position_target(joint_targets, joint_ids=joint_ids)
+            self._robot.set_joint_velocity_target(velocity_targets, joint_ids=joint_ids)
+
+    def _clear_runtime_state_after_reset(self, *, hold_arms: bool) -> None:
+        self._root_pos = None
+        self._root_yaw = None
+        self._lift_joint_pos = None
+        self._body_lift_mode = False
+        self._previous_body_lift_mode = False
+        self._left_arm_hold_after_lift = hold_arms
+        self._right_arm_hold_after_lift = hold_arms
+        self._left_arm_follow_warmup_frames = 0
+        self._right_arm_follow_warmup_frames = 0
+        self._previous_left_follow_start_button = False
+        self._previous_right_follow_start_button = False
+        self._enabled_arm_action_terms.clear()
+        self._previous_left_gripper_pos_w = None
+        self._previous_right_gripper_pos_w = None
+        self._debug_follow_was_active = False
+        self._debug_cum_left_rmpflow_delta.zero_()
+        self._debug_cum_left_rmpflow_rot_delta.zero_()
+        self._debug_cum_left_ee_delta_w.zero_()
+        self._debug_cum_right_rmpflow_delta.zero_()
+        self._debug_cum_right_rmpflow_rot_delta.zero_()
+        self._debug_cum_right_ee_delta_w.zero_()
+        if self._fallback_rmpflow_controller is not None:
+            self._fallback_rmpflow_controller.reset_idx()
+
+    def after_env_reset(self, reason: str = "") -> None:
+        self._clear_runtime_state_after_reset(hold_arms=True)
+        self.update_camera_xforms()
+        if reason:
+            print(f"[RobotYao] Task controller state reset after env reset: {reason}", flush=True)
+
+    def request_env_reset(self, reason: str) -> None:
+        if self._reset_requested:
+            return
+        self._reset_requested = True
+        self._reset_reason = reason
+
+    def consume_env_reset_request(self) -> str | None:
+        if not self._reset_requested:
+            return None
+        reason = self._reset_reason or "unspecified"
+        self._reset_requested = False
+        self._reset_reason = ""
+        return reason
+
+    def request_reset_if_box_dropped(self) -> None:
+        try:
+            box = self._env.scene["box"]
+            box_pos_w = box.data.root_pos_w
+        except Exception:
+            return
+        if box_pos_w is None or box_pos_w.shape[0] < 1:
+            return
+        box_z = float(box_pos_w[0, 2].item())
+        if not math.isfinite(box_z):
+            self.request_env_reset("box pose invalid")
+        elif box_z < float(args_cli.task_box_drop_reset_height):
+            self.request_env_reset(
+                f"box dropped below table threshold: z={box_z:.3f} < {args_cli.task_box_drop_reset_height:.3f}"
+            )
 
     def apply_before_step(self, command: torch.Tensor | np.ndarray | None, dt: float) -> torch.Tensor:
         """Move the Agibot root and build a task action tensor for env.step()."""
         actions = torch.zeros((self._env.num_envs, self._env.action_manager.total_action_dim), device=self._env.device)
-        if actions.shape[1] > 0:
-            # The last binary gripper action is positive=open, negative=close.
-            actions[:, -1] = 1.0
+        self._body_lift_mode = False
+        self._enabled_arm_action_terms.clear()
+        has_left_gripper_action = (
+            self._left_gripper_action_slice is not None
+            and self._left_gripper_action_slice.stop <= actions.shape[1]
+            and self._left_gripper_action_slice.stop > self._left_gripper_action_slice.start
+        )
+        has_right_gripper_action = (
+            self._right_gripper_action_slice is not None
+            and self._right_gripper_action_slice.stop <= actions.shape[1]
+            and self._right_gripper_action_slice.stop > self._right_gripper_action_slice.start
+        )
+        has_gripper_action = (
+            self._gripper_action_slice is not None
+            and self._gripper_action_slice.stop <= actions.shape[1]
+            and self._gripper_action_slice.stop > self._gripper_action_slice.start
+        )
+        if has_gripper_action:
+            # Binary gripper action is positive=open, negative=close.
+            actions[:, self._gripper_action_slice] = 1.0
+        if has_left_gripper_action:
+            actions[:, self._left_gripper_action_slice] = 1.0
+        if has_right_gripper_action:
+            actions[:, self._right_gripper_action_slice] = 1.0
 
         if command is None:
             command_tensor = torch.zeros(RobotYaoWheeledXrRetargeter.OUTPUT_SIZE, dtype=torch.float32, device=self._env.device)
@@ -1081,7 +1590,7 @@ class RobotYaoTaskSceneController:
                 command_tensor = command.to(device=self._env.device, dtype=torch.float32).flatten()
             else:
                 command_tensor = torch.tensor(command, dtype=torch.float32, device=self._env.device).flatten()
-            if command_tensor.numel() < RobotYaoWheeledXrRetargeter.OUTPUT_SIZE:
+            if command_tensor.numel() < _ROBOTYAO_LEGACY_COMMAND_SIZE:
                 self.update_camera_xforms()
                 return actions
 
@@ -1097,54 +1606,187 @@ class RobotYaoTaskSceneController:
         forward = float(command_tensor[RobotYaoWheeledXrRetargeter.BASE_FORWARD])
         lateral = float(command_tensor[RobotYaoWheeledXrRetargeter.BASE_LATERAL])
         yaw_rate = float(command_tensor[RobotYaoWheeledXrRetargeter.BASE_YAW])
-        if not math.isfinite(forward) or not math.isfinite(lateral) or not math.isfinite(yaw_rate):
-            print(f"[WARNING] Invalid base command (NaN/Inf): forward={forward}, lateral={lateral}, yaw_rate={yaw_rate}", flush=True)
+        height_vel = float(command_tensor[RobotYaoWheeledXrRetargeter.BASE_HEIGHT_VEL]) if command_tensor.numel() > RobotYaoWheeledXrRetargeter.BASE_HEIGHT_VEL else 0.0
+        if not math.isfinite(forward) or not math.isfinite(lateral) or not math.isfinite(yaw_rate) or not math.isfinite(height_vel):
+            print(f"[WARNING] Invalid base command (NaN/Inf): forward={forward}, lateral={lateral}, yaw_rate={yaw_rate}, height_vel={height_vel}", flush=True)
             forward = 0.0
             lateral = 0.0
             yaw_rate = 0.0
+            height_vel = 0.0
 
         # Clamp command to physical limits (speeds)
         forward = max(-2.0, min(2.0, forward))
         lateral = max(-2.0, min(2.0, lateral))
         yaw_rate = max(-1.57, min(1.57, yaw_rate))
+        height_vel = max(-1.0, min(1.0, height_vel))
 
-        is_moving = (abs(forward) > 0.01 or abs(lateral) > 0.01 or abs(yaw_rate) > 0.01)
-        follow_active = command_tensor[RobotYaoWheeledXrRetargeter.ARM_FOLLOW_ACTIVE] > 0.5
+        is_moving = (abs(forward) > 0.01 or abs(lateral) > 0.01 or abs(yaw_rate) > 0.01 or abs(height_vel) > 0.01)
+        left_follow_active, right_follow_active, follow_active = _torch_arm_follow_flags(command_tensor)
+        left_follow_active_bool = bool(left_follow_active.item())
+        right_follow_active_bool = bool(right_follow_active.item())
+        follow_active_bool = bool(follow_active.item())
+        body_lift_mode = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_GRIP].item() > 0.5)
+        self._body_lift_mode = body_lift_mode
+        right_grip_pressed = bool(command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_GRIP].item() > 0.5)
+        if right_grip_pressed and not self._previous_right_grip_pressed:
+            self.request_env_reset("right Grip pressed")
+        left_follow_start_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_SECONDARY].item() > 0.5)
+        right_follow_start_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_SECONDARY].item() > 0.5)
+        left_follow_start_pressed = left_follow_start_button and not self._previous_left_follow_start_button
+        right_follow_start_pressed = right_follow_start_button and not self._previous_right_follow_start_button
+        if self._previous_body_lift_mode and not body_lift_mode:
+            self._left_arm_hold_after_lift = True
+            self._right_arm_hold_after_lift = True
+            self._left_arm_follow_warmup_frames = 0
+            self._right_arm_follow_warmup_frames = 0
+        start_warmup_frames = max(0, int(args_cli.arm_follow_start_warmup_frames))
+        if left_follow_start_pressed:
+            self._left_arm_hold_after_lift = False
+            self._left_arm_follow_warmup_frames = start_warmup_frames
+        if right_follow_start_pressed:
+            self._right_arm_hold_after_lift = False
+            self._right_arm_follow_warmup_frames = start_warmup_frames
+        if not left_follow_active_bool:
+            self._left_arm_follow_warmup_frames = 0
+        if not right_follow_active_bool:
+            self._right_arm_follow_warmup_frames = 0
         left_delta_start = RobotYaoWheeledXrRetargeter.LEFT_ARM_DELTA_START
         right_delta_start = RobotYaoWheeledXrRetargeter.RIGHT_ARM_DELTA_START
         left_scene_delta = command_tensor[left_delta_start : left_delta_start + 3]
         right_scene_delta = command_tensor[right_delta_start : right_delta_start + 3]
+        left_rot_delta_start = RobotYaoWheeledXrRetargeter.LEFT_ARM_ROT_DELTA_START
+        right_rot_delta_start = RobotYaoWheeledXrRetargeter.RIGHT_ARM_ROT_DELTA_START
+        left_scene_rot_delta = command_tensor[left_rot_delta_start : left_rot_delta_start + 3]
+        right_scene_rot_delta = command_tensor[right_rot_delta_start : right_rot_delta_start + 3]
+        if body_lift_mode:
+            left_scene_delta = torch.zeros_like(left_scene_delta)
+            right_scene_delta = torch.zeros_like(right_scene_delta)
+            left_scene_rot_delta = torch.zeros_like(left_scene_rot_delta)
+            right_scene_rot_delta = torch.zeros_like(right_scene_rot_delta)
+        raw_left_delta_start = RobotYaoWheeledXrRetargeter.RAW_LEFT_DELTA_START
         raw_right_delta_start = RobotYaoWheeledXrRetargeter.RAW_RIGHT_DELTA_START
+        left_controller_delta = command_tensor[raw_left_delta_start : raw_left_delta_start + 3]
         right_controller_delta = command_tensor[raw_right_delta_start : raw_right_delta_start + 3]
-        right_rmpflow_delta = _apply_axis_map_tensor(right_scene_delta, self._rmpflow_axis_map)
-        if follow_active and torch.any(right_controller_delta != 0.0):
+        left_rmpflow_delta = _apply_axis_map_tensor(left_scene_delta, self._left_rmpflow_axis_map)
+        left_rmpflow_rot_delta = _apply_axis_map_tensor(left_scene_rot_delta, self._left_rmpflow_axis_map)
+        right_rmpflow_delta = _apply_axis_map_tensor(right_scene_delta, self._right_rmpflow_axis_map)
+        right_rmpflow_rot_delta = _apply_axis_map_tensor(right_scene_rot_delta, self._right_rmpflow_axis_map)
+        arm_position_deadband = max(0.0, float(args_cli.arm_command_position_deadband))
+        arm_rotation_deadband = max(0.0, float(args_cli.arm_command_rotation_deadband))
+        left_position_command_norm = float(torch.linalg.norm(left_rmpflow_delta).item())
+        left_rotation_command_norm = float(torch.linalg.norm(left_rmpflow_rot_delta).item())
+        right_position_command_norm = float(torch.linalg.norm(right_rmpflow_delta).item())
+        right_rotation_command_norm = float(torch.linalg.norm(right_rmpflow_rot_delta).item())
+        if left_position_command_norm <= arm_position_deadband:
+            left_scene_delta = torch.zeros_like(left_scene_delta)
+            left_rmpflow_delta = torch.zeros_like(left_rmpflow_delta)
+        if left_rotation_command_norm <= arm_rotation_deadband:
+            left_scene_rot_delta = torch.zeros_like(left_scene_rot_delta)
+            left_rmpflow_rot_delta = torch.zeros_like(left_rmpflow_rot_delta)
+        if right_position_command_norm <= arm_position_deadband:
+            right_scene_delta = torch.zeros_like(right_scene_delta)
+            right_rmpflow_delta = torch.zeros_like(right_rmpflow_delta)
+        if right_rotation_command_norm <= arm_rotation_deadband:
+            right_scene_rot_delta = torch.zeros_like(right_scene_rot_delta)
+            right_rmpflow_rot_delta = torch.zeros_like(right_rmpflow_rot_delta)
+        left_has_arm_command = bool(
+            left_position_command_norm > arm_position_deadband
+            or left_rotation_command_norm > arm_rotation_deadband
+        )
+        right_has_arm_command = bool(
+            right_position_command_norm > arm_position_deadband
+            or right_rotation_command_norm > arm_rotation_deadband
+        )
+        left_in_follow_warmup = self._left_arm_follow_warmup_frames > 0
+        right_in_follow_warmup = self._right_arm_follow_warmup_frames > 0
+        drive_left_follow_active_bool = (
+            left_follow_active_bool
+            and not body_lift_mode
+            and not self._left_arm_hold_after_lift
+            and not left_in_follow_warmup
+            and left_has_arm_command
+        )
+        drive_right_follow_active_bool = (
+            right_follow_active_bool
+            and not body_lift_mode
+            and not self._right_arm_hold_after_lift
+            and not right_in_follow_warmup
+            and right_has_arm_command
+        )
+        if self._left_arm_follow_warmup_frames > 0:
+            self._left_arm_follow_warmup_frames -= 1
+        if self._right_arm_follow_warmup_frames > 0:
+            self._right_arm_follow_warmup_frames -= 1
+        drive_follow_active_bool = drive_left_follow_active_bool or drive_right_follow_active_bool
+        if drive_left_follow_active_bool and (torch.any(left_controller_delta != 0.0) or torch.any(left_scene_rot_delta != 0.0)):
+            print(
+                f"[DEBUG TaskController] Left Hand Delta - "
+                f"Controller (Isaac xyz): [{left_controller_delta[0].item():.6f}, {left_controller_delta[1].item():.6f}, {left_controller_delta[2].item():.6f}], "
+                f"Scaled scene delta: [{left_scene_delta[0].item():.6f}, {left_scene_delta[1].item():.6f}, {left_scene_delta[2].item():.6f}], "
+                f"Scene rot delta: [{left_scene_rot_delta[0].item():.6f}, {left_scene_rot_delta[1].item():.6f}, {left_scene_rot_delta[2].item():.6f}], "
+                f"Mapped arm action: pos=[{left_rmpflow_delta[0].item():.6f}, {left_rmpflow_delta[1].item():.6f}, {left_rmpflow_delta[2].item():.6f}], "
+                f"rot=[{left_rmpflow_rot_delta[0].item():.6f}, {left_rmpflow_rot_delta[1].item():.6f}, {left_rmpflow_rot_delta[2].item():.6f}]",
+                flush=True
+            )
+        if drive_right_follow_active_bool and (torch.any(right_controller_delta != 0.0) or torch.any(right_scene_rot_delta != 0.0)):
             print(
                 f"[DEBUG TaskController] Right Hand Delta - "
                 f"Controller (Isaac xyz): [{right_controller_delta[0].item():.6f}, {right_controller_delta[1].item():.6f}, {right_controller_delta[2].item():.6f}], "
                 f"Scaled scene delta: [{right_scene_delta[0].item():.6f}, {right_scene_delta[1].item():.6f}, {right_scene_delta[2].item():.6f}], "
-                f"RMPFlow Action: [{right_rmpflow_delta[0].item():.6f}, {right_rmpflow_delta[1].item():.6f}, {right_rmpflow_delta[2].item():.6f}]",
+                f"Scene rot delta: [{right_scene_rot_delta[0].item():.6f}, {right_scene_rot_delta[1].item():.6f}, {right_scene_rot_delta[2].item():.6f}], "
+                f"RMPFlow Action: pos=[{right_rmpflow_delta[0].item():.6f}, {right_rmpflow_delta[1].item():.6f}, {right_rmpflow_delta[2].item():.6f}], "
+                f"rot=[{right_rmpflow_rot_delta[0].item():.6f}, {right_rmpflow_rot_delta[1].item():.6f}, {right_rmpflow_rot_delta[2].item():.6f}]",
                 flush=True
             )
 
+        actual_left_ee_delta_w = None
+        if self._left_gripper_body_id is not None:
+            left_gripper_pos_w = self._robot.data.body_pos_w[0, self._left_gripper_body_id].clone()
+            if self._previous_left_gripper_pos_w is not None:
+                actual_left_ee_delta_w = left_gripper_pos_w - self._previous_left_gripper_pos_w
+            self._previous_left_gripper_pos_w = left_gripper_pos_w
         actual_right_ee_delta_w = None
         if self._right_gripper_body_id is not None:
             right_gripper_pos_w = self._robot.data.body_pos_w[0, self._right_gripper_body_id].clone()
             if self._previous_right_gripper_pos_w is not None:
                 actual_right_ee_delta_w = right_gripper_pos_w - self._previous_right_gripper_pos_w
             self._previous_right_gripper_pos_w = right_gripper_pos_w
-        follow_active_bool = bool(follow_active.item())
-        if follow_active_bool:
+        if drive_follow_active_bool:
             if not self._debug_follow_was_active:
+                self._debug_cum_left_rmpflow_delta.zero_()
+                self._debug_cum_left_rmpflow_rot_delta.zero_()
+                self._debug_cum_left_ee_delta_w.zero_()
                 self._debug_cum_right_rmpflow_delta.zero_()
+                self._debug_cum_right_rmpflow_rot_delta.zero_()
                 self._debug_cum_right_ee_delta_w.zero_()
+                actual_left_ee_delta_w = None
                 actual_right_ee_delta_w = None
-            self._debug_cum_right_rmpflow_delta += right_rmpflow_delta.detach()
-            if actual_right_ee_delta_w is not None:
-                self._debug_cum_right_ee_delta_w += actual_right_ee_delta_w.detach()
+            if drive_left_follow_active_bool:
+                self._debug_cum_left_rmpflow_delta += left_rmpflow_delta.detach()
+                self._debug_cum_left_rmpflow_rot_delta += left_rmpflow_rot_delta.detach()
+                if actual_left_ee_delta_w is not None:
+                    self._debug_cum_left_ee_delta_w += actual_left_ee_delta_w.detach()
+            else:
+                self._debug_cum_left_rmpflow_delta.zero_()
+                self._debug_cum_left_rmpflow_rot_delta.zero_()
+                self._debug_cum_left_ee_delta_w.zero_()
+            if drive_right_follow_active_bool:
+                self._debug_cum_right_rmpflow_delta += right_rmpflow_delta.detach()
+                self._debug_cum_right_rmpflow_rot_delta += right_rmpflow_rot_delta.detach()
+                if actual_right_ee_delta_w is not None:
+                    self._debug_cum_right_ee_delta_w += actual_right_ee_delta_w.detach()
+            else:
+                self._debug_cum_right_rmpflow_delta.zero_()
+                self._debug_cum_right_rmpflow_rot_delta.zero_()
+                self._debug_cum_right_ee_delta_w.zero_()
         else:
+            self._debug_cum_left_rmpflow_delta.zero_()
+            self._debug_cum_left_rmpflow_rot_delta.zero_()
+            self._debug_cum_left_ee_delta_w.zero_()
             self._debug_cum_right_rmpflow_delta.zero_()
+            self._debug_cum_right_rmpflow_rot_delta.zero_()
             self._debug_cum_right_ee_delta_w.zero_()
-        self._debug_follow_was_active = follow_active_bool
+        self._debug_follow_was_active = drive_follow_active_bool
 
         if not hasattr(self, "_step_count"):
             self._step_count = 0
@@ -1153,14 +1795,32 @@ class RobotYaoTaskSceneController:
             print(
                 f"[DEBUG] Step {self._step_count} - "
                 f"base={command_tensor[0:3].tolist()}, "
-                f"follow={bool(follow_active.item())}, "
+                f"follow={follow_active_bool}, "
+                f"left_follow={left_follow_active_bool}, right_follow={right_follow_active_bool}, "
+                f"drive_left_follow={drive_left_follow_active_bool}, drive_right_follow={drive_right_follow_active_bool}, "
+                f"left_hold_after_lift={self._left_arm_hold_after_lift}, right_hold_after_lift={self._right_arm_hold_after_lift}, "
+                f"left_follow_warmup={self._left_arm_follow_warmup_frames}, right_follow_warmup={self._right_arm_follow_warmup_frames}, "
+                f"arm_position_deadband={arm_position_deadband:.6f}, arm_rotation_deadband={arm_rotation_deadband:.6f}, "
+                f"left_command_norms=({left_position_command_norm:.6f}, {left_rotation_command_norm:.6f}), "
+                f"right_command_norms=({right_position_command_norm:.6f}, {right_rotation_command_norm:.6f}), "
+                f"left_controller_delta_isaac={left_controller_delta.tolist()}, "
                 f"right_controller_delta_isaac={right_controller_delta.tolist()}, "
                 f"left_scene_delta={left_scene_delta.tolist()}, "
                 f"right_scene_delta={right_scene_delta.tolist()}, "
+                f"left_rmpflow_delta={left_rmpflow_delta.tolist()}, "
                 f"right_rmpflow_delta={right_rmpflow_delta.tolist()}, "
-                f"axis_map={_format_axis_map(self._rmpflow_axis_map)}, "
+                f"left_scene_rot_delta={left_scene_rot_delta.tolist()}, "
+                f"right_scene_rot_delta={right_scene_rot_delta.tolist()}, "
+                f"left_rmpflow_rot_delta={left_rmpflow_rot_delta.tolist()}, "
+                f"right_rmpflow_rot_delta={right_rmpflow_rot_delta.tolist()}, "
+                f"left_axis_map={_format_axis_map(self._left_rmpflow_axis_map)}, right_axis_map={_format_axis_map(self._right_rmpflow_axis_map)}, "
+                f"actual_left_ee_delta_w={None if actual_left_ee_delta_w is None else actual_left_ee_delta_w.tolist()}, "
                 f"actual_right_ee_delta_w={None if actual_right_ee_delta_w is None else actual_right_ee_delta_w.tolist()}, "
+                f"left_rmpflow_cum={self._debug_cum_left_rmpflow_delta.tolist()}, "
+                f"left_rmpflow_rot_cum={self._debug_cum_left_rmpflow_rot_delta.tolist()}, "
+                f"actual_left_ee_cum_w={self._debug_cum_left_ee_delta_w.tolist()}, "
                 f"right_rmpflow_cum={self._debug_cum_right_rmpflow_delta.tolist()}, "
+                f"right_rmpflow_rot_cum={self._debug_cum_right_rmpflow_rot_delta.tolist()}, "
                 f"actual_right_ee_cum_w={self._debug_cum_right_ee_delta_w.tolist()}, "
                 f"is_moving={is_moving}, root_pos={current_root_pos.tolist()}",
                 flush=True,
@@ -1169,17 +1829,16 @@ class RobotYaoTaskSceneController:
         # Check if environment was reset
         if hasattr(self._env, "reset_buf") and self._env.reset_buf is not None:
             if self._env.reset_buf[0].item():
-                self._root_pos = None
-                self._root_yaw = None
-                self._previous_right_gripper_pos_w = None
-                self._debug_follow_was_active = False
-                self._debug_cum_right_rmpflow_delta.zero_()
-                self._debug_cum_right_ee_delta_w.zero_()
+                self._clear_runtime_state_after_reset(hold_arms=True)
 
         if self._root_pos is None or torch.any(torch.isnan(self._root_pos)):
             self._root_pos = current_root_pos.clone()
             self._root_yaw = _yaw_from_quat_wxyz(current_root_quat)
             self._init_root_z = current_root_pos[2].item()
+
+        if self._lift_joint_id is not None:
+            if self._lift_joint_pos is None or self._lift_joint_pos.shape[0] != self._env.num_envs:
+                self._lift_joint_pos = self._robot.data.joint_pos[:, [self._lift_joint_id]].clone()
 
         if is_moving:
             self._root_yaw += yaw_rate * dt
@@ -1187,34 +1846,103 @@ class RobotYaoTaskSceneController:
             s = math.sin(self._root_yaw)
             self._root_pos[0] += (c * forward - s * lateral) * dt
             self._root_pos[1] += (s * forward + c * lateral) * dt
+            if self._lift_joint_id is not None and self._lift_joint_pos is not None:
+                self._lift_joint_pos += height_vel * 0.3 * dt
 
-        # Always enforce the initial Z height to prevent gravity/penetration drift
+        # Enforce base root Z stays strictly at initial spawned height to keep the base on the floor
         self._root_pos[2] = self._init_root_z
 
         # Always write the target pose to simulator to hold the base kinematically
         self._write_root_pose()
 
-        if follow_active and actions.shape[1] >= 6:
-            # Toy2Box task only controls the right arm. Agibot Lula/RMPFlow uses a different axis order.
-            actions[:, 0:3] = right_rmpflow_delta.unsqueeze(0)
-            self._apply_direct_arm_delta(
-                command_tensor, self._left_arm_joint_ids, left_delta_start
-            )
-        elif follow_active:
-            self._apply_direct_arm_delta(
-                command_tensor, self._left_arm_joint_ids, left_delta_start
-            )
-            self._apply_direct_arm_delta(
-                command_tensor, self._right_arm_joint_ids, right_delta_start
-            )
+        # Clamp and write target position for the lift joint
+        if self._lift_joint_id is not None and self._lift_joint_pos is not None:
+            min_lift = self._robot.data.soft_joint_pos_limits[:, self._lift_joint_id, 0].unsqueeze(-1)
+            max_lift = self._robot.data.soft_joint_pos_limits[:, self._lift_joint_id, 1].unsqueeze(-1)
+            self._lift_joint_pos = torch.clamp(self._lift_joint_pos, min=min_lift, max=max_lift)
+            self._robot.set_joint_position_target(self._lift_joint_pos, joint_ids=[self._lift_joint_id])
 
-        if actions.shape[1] > 0:
-            left_grip = command_tensor[RobotYaoWheeledXrRetargeter.LEFT_GRIP]
-            right_grip = command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_GRIP]
-            left_trigger = command_tensor[RobotYaoWheeledXrRetargeter.LEFT_TRIGGER]
-            right_trigger = command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_TRIGGER]
-            gripper_close = max(left_grip, right_grip, left_trigger, right_trigger) > 0.5
-            actions[:, -1] = -1.0 if gripper_close else 1.0
+        hold_left_arm = body_lift_mode or not drive_left_follow_active_bool
+        hold_right_arm = body_lift_mode or not drive_right_follow_active_bool
+        self._hold_arm_joint_targets(hold_left=hold_left_arm, hold_right=hold_right_arm)
+
+        has_concurrent_arms = (
+            self._left_arm_action_slice is not None
+            and self._right_arm_action_slice is not None
+        )
+        has_concurrent_grippers = (
+            self._left_gripper_action_slice is not None
+            and self._right_gripper_action_slice is not None
+        )
+
+        # 1. Drive arms
+        if has_concurrent_arms:
+            if not body_lift_mode:
+                if drive_left_follow_active_bool:
+                    self._apply_arm_action_delta(actions, self._left_arm_action_slice, left_rmpflow_delta, left_rmpflow_rot_delta)
+                    self._enable_arm_action_term("left_arm_action")
+                if drive_right_follow_active_bool:
+                    self._apply_arm_action_delta(actions, self._right_arm_action_slice, right_rmpflow_delta, right_rmpflow_rot_delta)
+                    self._enable_arm_action_term("right_arm_action")
+        else:
+            arm_action_slice = self._arm_action_slice
+            if (
+                arm_action_slice is None
+                and actions.shape[1] >= 6
+                and not (has_gripper_action or has_left_gripper_action or has_right_gripper_action)
+            ):
+                arm_action_slice = slice(0, 6)
+            has_arm_action = (
+                arm_action_slice is not None
+                and arm_action_slice.stop <= actions.shape[1]
+                and arm_action_slice.stop - arm_action_slice.start >= 6
+            )
+            arm_action_side = self._arm_action_side or ("right" if has_arm_action else None)
+
+            if has_arm_action and not body_lift_mode:
+                if arm_action_side == "left" and drive_left_follow_active_bool:
+                    self._apply_arm_action_delta(actions, arm_action_slice, left_rmpflow_delta, left_rmpflow_rot_delta)
+                    self._enable_arm_action_term("arm_action")
+                elif arm_action_side == "right" and drive_right_follow_active_bool:
+                    self._apply_arm_action_delta(actions, arm_action_slice, right_rmpflow_delta, right_rmpflow_rot_delta)
+                    self._enable_arm_action_term("arm_action")
+
+            if not body_lift_mode and arm_action_side != "left" and drive_left_follow_active_bool:
+                if self._fallback_rmpflow_controller is not None and self._fallback_rmpflow_side == "left":
+                    self._apply_fallback_rmpflow_delta(left_rmpflow_delta, left_rmpflow_rot_delta)
+                else:
+                    self._apply_direct_arm_delta(left_scene_delta, self._left_arm_joint_ids)
+            if not body_lift_mode and arm_action_side != "right" and drive_right_follow_active_bool:
+                if self._fallback_rmpflow_controller is not None and self._fallback_rmpflow_side == "right":
+                    self._apply_fallback_rmpflow_delta(right_rmpflow_delta, right_rmpflow_rot_delta)
+                else:
+                    self._apply_direct_arm_delta(right_scene_delta, self._right_arm_joint_ids)
+
+        # 2. Drive grippers
+        left_trigger = command_tensor[RobotYaoWheeledXrRetargeter.LEFT_TRIGGER]
+        right_trigger = command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_TRIGGER]
+        left_gripper_close = float(left_trigger) > 0.5
+        right_gripper_close = float(right_trigger) > 0.5
+
+        if has_concurrent_grippers:
+            actions[:, self._left_gripper_action_slice] = -1.0 if left_gripper_close else 1.0
+            actions[:, self._right_gripper_action_slice] = -1.0 if right_gripper_close else 1.0
+        else:
+            managed_gripper_side = self._gripper_action_side or ("right" if has_gripper_action else None)
+            if has_gripper_action:
+                if managed_gripper_side == "left":
+                    actions[:, self._gripper_action_slice] = -1.0 if left_gripper_close else 1.0
+                else:
+                    actions[:, self._gripper_action_slice] = -1.0 if right_gripper_close else 1.0
+            if managed_gripper_side != "left":
+                self._apply_direct_gripper_target("left", left_gripper_close)
+            if managed_gripper_side != "right":
+                self._apply_direct_gripper_target("right", right_gripper_close)
+
+        self._previous_body_lift_mode = body_lift_mode
+        self._previous_left_follow_start_button = left_follow_start_button
+        self._previous_right_follow_start_button = right_follow_start_button
+        self._previous_right_grip_pressed = right_grip_pressed
 
         self.update_camera_xforms()
         return actions
@@ -1318,21 +2046,56 @@ class RobotYaoTaskSceneController:
         self._robot.write_root_pose_to_sim(root_pose, env_ids=self._env_ids)
         self._robot.write_root_velocity_to_sim(self._zero_root_velocity, env_ids=self._env_ids)
 
-    def _apply_direct_arm_delta(self, command_tensor: torch.Tensor, joint_ids: list[int], delta_start: int) -> None:
+    def _apply_fallback_rmpflow_delta(
+        self,
+        position_delta: torch.Tensor,
+        rotation_delta: torch.Tensor,
+    ) -> None:
+        if self._fallback_rmpflow_controller is None:
+            return
+
+        # Obtain current end-effector pose in world frame
+        ee_pos_w = self._robot.data.body_pos_w[:, self._fallback_ee_body_id]
+        ee_quat_w = self._robot.data.body_quat_w[:, self._fallback_ee_body_id]
+
+        # Base/root pose in world frame
+        root_pos_w = self._robot.data.root_pos_w
+        root_quat_w = self._robot.data.root_quat_w
+
+        # Compute the pose of the body in the base/root frame
+        ee_pose_b, ee_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
+
+        # Construct delta pose actions: [1, 6] (delta_x, delta_y, delta_z, delta_roll, delta_pitch, delta_yaw)
+        delta_action = torch.cat([position_delta, rotation_delta]).unsqueeze(0)
+
+        # Apply delta to get target end-effector pose in root frame
+        ee_pos_des, ee_quat_des = apply_delta_pose(ee_pose_b, ee_quat_b, delta_action)
+        ee_pose_des = torch.cat([ee_pos_des, ee_quat_des], dim=1)
+
+        # Pass absolute target pose command to controller
+        self._fallback_rmpflow_controller.set_command(ee_pose_des)
+
+        # Compute target joint positions/velocities via motion policy step
+        joint_pos_des, joint_vel_des = self._fallback_rmpflow_controller.compute()
+
+        # Set target joints directly in simulator
+        self._robot.set_joint_position_target(joint_pos_des, joint_ids=self._fallback_joint_ids)
+        self._robot.set_joint_velocity_target(joint_vel_des, joint_ids=self._fallback_joint_ids)
+
+    def _apply_direct_arm_delta(self, hand_delta: torch.Tensor, joint_ids: list[int]) -> None:
         """Apply a lightweight joint-space fallback when RMPFlow assets are not available."""
         if len(joint_ids) == 0:
             return
 
-        hand_delta = command_tensor[delta_start : delta_start + 3]
         if torch.any(torch.isnan(hand_delta)) or torch.any(torch.isinf(hand_delta)):
-            print(f"[WARNING] Invalid arm hand_delta (NaN/Inf) at start {delta_start}!", flush=True)
+            print("[WARNING] Invalid arm hand_delta (NaN/Inf)!", flush=True)
             hand_delta = torch.zeros_like(hand_delta)
 
         joint_delta = torch.zeros(
             (self._env.num_envs, len(joint_ids)), dtype=torch.float32, device=self._env.device
         )
 
-        # 这里是测试用的轻量增量映射，不伪装成完整 IK；真实双臂遥操作后续应接入双臂 IK/RMPFlow。
+        # Lightweight fallback mapping; task-space arms should use IK/RMPFlow when available.
         if joint_delta.shape[1] > 0:
             joint_delta[:, 0] = hand_delta[1] * 2.5
         if joint_delta.shape[1] > 1:
@@ -1352,6 +2115,9 @@ def _create_unity_control_device() -> RobotYaoXrSubDevice:
         max_lateral_speed=args_cli.max_lateral_speed,
         max_yaw_rate=args_cli.max_yaw_rate,
         arm_delta_scale=args_cli.arm_delta_scale,
+        arm_rotation_delta_scale=args_cli.arm_rotation_delta_scale,
+        arm_position_delta_dead_zone=args_cli.arm_command_position_deadband,
+        arm_rotation_delta_dead_zone=args_cli.arm_command_rotation_deadband,
         follow_button_mode=args_cli.unity_follow_mode,
     )
     retargeter = RobotYaoWheeledXrRetargeter(retargeter_cfg)
@@ -1399,13 +2165,15 @@ def _create_task_scene_env():
             ):
                 if hasattr(policy_obs, term_name):
                     setattr(policy_obs, term_name, None)
-    if not use_task_rmpflow and hasattr(env_cfg, "actions") and hasattr(env_cfg.actions, "arm_action"):
-        env_cfg.actions.arm_action = None
+    if not use_task_rmpflow and hasattr(env_cfg, "actions"):
+        for arm_action_name in ("arm_action", "left_arm_action", "right_arm_action"):
+            if hasattr(env_cfg.actions, arm_action_name):
+                setattr(env_cfg.actions, arm_action_name, None)
         if hasattr(env_cfg.scene, "ee_frame"):
             env_cfg.scene.ee_frame = None
         if hasattr(env_cfg.scene, "contact_grasp"):
             env_cfg.scene.contact_grasp = None
-        print("[RobotYao] Task RMPFlow action disabled; using direct right-arm joint fallback.", flush=True)
+        print("[RobotYao] Task RMPFlow actions disabled; using direct bimanual joint fallback.", flush=True)
     print("[RobotYao] Creating Gym task environment.", flush=True)
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
     print("[RobotYao] Resetting Gym task environment.", flush=True)
@@ -1426,6 +2194,20 @@ def _create_task_scene_env():
         raise
     print("[RobotYao] Gym task environment created.", flush=True)
     return env
+
+
+def _reset_task_scene_runtime(
+    env,
+    camera: Camera | tuple[Camera, Camera],
+    task_controller: RobotYaoTaskSceneController | None,
+    reason: str,
+) -> None:
+    print(f"[RobotYao] Resetting task environment: {reason}", flush=True)
+    with torch.inference_mode():
+        env.reset()
+    if task_controller is not None:
+        task_controller.after_env_reset(reason)
+    _reset_camera_or_pair(camera)
 
 
 def run_task_scene_simulator(
@@ -1468,11 +2250,23 @@ def run_task_scene_simulator(
                 if task_controller is not None
                 else torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
             )
+            reset_reason = task_controller.consume_env_reset_request() if task_controller is not None else None
+            if reset_reason is not None:
+                _reset_task_scene_runtime(env, camera, task_controller, reset_reason)
+                next_publish_time = time.perf_counter()
+                continue
 
             if args_cli.debug_task_loop and frame_id < 2:
                 print(f"[RobotYao] Task loop frame {frame_id + 1}: env.step.", flush=True)
             with torch.inference_mode():
                 env.step(actions)
+            if task_controller is not None:
+                task_controller.request_reset_if_box_dropped()
+                reset_reason = task_controller.consume_env_reset_request()
+                if reset_reason is not None:
+                    _reset_task_scene_runtime(env, camera, task_controller, reset_reason)
+                    next_publish_time = time.perf_counter()
+                    continue
             if args_cli.debug_task_loop and frame_id < 2:
                 print(f"[RobotYao] Task loop frame {frame_id + 1}: update camera xforms.", flush=True)
             if task_controller is not None:
