@@ -10,31 +10,38 @@ py-spy 实测（2026-06-10）：完整 locomanipulation 场景 env_hz≈18.5（0
 deploy 按墙钟 50Hz 推进步态相位，sim 必须接近实时行走才有意义。
 
 本场景只保留：sonic_robot + 高摩擦 GroundPlane + 天光 + SONIC deploy/发布 action 项，
-裁掉仓库 USD、其余 3 台 G1、传送带、pick-place 全套机构。任务 id 含
-"Locomanipulation" 以复用 teleop_se3_agent.py 的 deploy_target_mode 与 U 键回调。
+以及一个可关闭的轻量抱取演示物体。裁掉仓库 USD、其余 3 台 G1、传送带、
+pick-place 全套机构。任务 id 含 "Locomanipulation" 以复用 teleop_se3_agent.py
+的 deploy_target_mode 与 U 键回调。
 
 SONIC 相关 action 项直接从主配置 `ActionsCfg` 实例摘取，保证两个场景的
 环境变量行为（transport 选择、发布开关、全部调参）永远一致，不会漂移。
 """
 
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs import mdp
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 import isaaclab.sim as sim_utils
+from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 
 from . import locomanipulation_g1_env_cfg as _main
 
 # 主配置的 ActionsCfg 在类体执行时已按环境变量决定 transport 与发布 term；
 # 实例化一份并摘取 SONIC 相关项（dataclass 实例化时 deepcopy 默认值，互不影响）。
 _MAIN_ACTIONS = _main.ActionsCfg()
+_ENABLE_DEMO_OBJECT = _main._env_flag("SONIC_SOLO_DEMO_OBJECT", True)
+_DEMO_OBJECT_POS = (-0.95, 11.008, 0.72)
+_DEMO_STAND_POS = (-0.95, 11.008, 0.25)
 
 
 @configclass
@@ -62,6 +69,49 @@ class SonicSoloSceneCfg(InteractiveSceneCfg):
         prim_path="/World/Light",
         spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
     )
+
+    if _ENABLE_DEMO_OBJECT:
+        # Teleop demo prop: in front of SONICRobot (+X), at waist/chest height.
+        # Reuse the main scene cardboard-box USD, but keep it lighter for arm teleop.
+        hug_box_stand = RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/HugBoxStand",
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos=_DEMO_STAND_POS,
+                rot=(1.0, 0.0, 0.0, 0.0),
+            ),
+            spawn=sim_utils.CuboidCfg(
+                size=(0.46, 0.56, 0.50),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    kinematic_enabled=True,
+                    disable_gravity=True,
+                ),
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.18, 0.18, 0.18),
+                    roughness=0.85,
+                ),
+            ),
+        )
+
+        hug_box = RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/HugBox",
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos=_DEMO_OBJECT_POS,
+                rot=(1.0, 0.0, 0.0, 0.0),
+            ),
+            spawn=UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    contact_offset=0.01,
+                    rest_offset=0.0,
+                ),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    solver_position_iteration_count=12,
+                    solver_velocity_iteration_count=2,
+                    max_depenetration_velocity=3.0,
+                ),
+            ),
+        )
 
 
 @configclass
@@ -100,12 +150,31 @@ class SonicSoloTerminationsCfg:
 
 
 @configclass
+class SonicSoloEventsCfg:
+    """Startup fixes for USD demo props."""
+
+    if _ENABLE_DEMO_OBJECT:
+        setup_hug_box_physics = EventTerm(
+            func=locomanip_mdp.setup_usd_rigid_object_physics,
+            mode="prestartup",
+            params={
+                "prim_path_template": "/World/envs/env_{}/HugBox",
+                "mass": 0.8,
+                "linear_damping": 3.0,
+                "angular_damping": 0.4,
+                "mesh_approximation": "convexHull",
+            },
+        )
+
+
+@configclass
 class SonicSoloLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
     """SONIC 闭环物理调试极简环境。"""
 
-    scene: SonicSoloSceneCfg = SonicSoloSceneCfg(num_envs=1, env_spacing=8.0)
+    scene: SonicSoloSceneCfg = SonicSoloSceneCfg(num_envs=1, env_spacing=8.0, replicate_physics=False)
     observations: SonicSoloObservationsCfg = SonicSoloObservationsCfg()
     actions: SonicSoloActionsCfg = SonicSoloActionsCfg()
+    events: SonicSoloEventsCfg = SonicSoloEventsCfg()
     terminations: SonicSoloTerminationsCfg = SonicSoloTerminationsCfg()
 
     commands = None
