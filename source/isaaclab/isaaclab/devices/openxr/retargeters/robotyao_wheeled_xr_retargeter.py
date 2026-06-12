@@ -150,6 +150,7 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         self._arm_position_delta_dead_zone = max(0.0, float(cfg.arm_position_delta_dead_zone))
         self._arm_rotation_delta_dead_zone = max(0.0, float(cfg.arm_rotation_delta_dead_zone))
         self._follow_button_mode = cfg.follow_button_mode
+        self._debug_deltas = bool(cfg.debug_deltas)
 
         self._left_arm_follow_active = False
         self._right_arm_follow_active = False
@@ -246,7 +247,7 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         left_rot_delta = self._apply_vector_dead_zone(left_rot_delta, self._arm_rotation_delta_dead_zone)
         right_rot_delta = self._apply_vector_dead_zone(right_rot_delta, self._arm_rotation_delta_dead_zone)
 
-        if np.any(left_raw_delta != 0.0) or np.any(left_rot_delta != 0.0):
+        if self._debug_deltas and (np.any(left_raw_delta != 0.0) or np.any(left_rot_delta != 0.0)):
             print(
                 f"[DEBUG Retargeter] Left Hand Delta - "
                 f"Controller (Isaac xyz): [{left_raw_delta[0]:.6f}, {left_raw_delta[1]:.6f}, {left_raw_delta[2]:.6f}], "
@@ -255,7 +256,7 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
                 f"FollowActive: {self._left_arm_follow_active}",
                 flush=True
             )
-        if np.any(right_raw_delta != 0.0) or np.any(right_rot_delta != 0.0):
+        if self._debug_deltas and (np.any(right_raw_delta != 0.0) or np.any(right_rot_delta != 0.0)):
             print(
                 f"[DEBUG Retargeter] Right Hand Delta - "
                 f"Controller (Isaac xyz): [{right_raw_delta[0]:.6f}, {right_raw_delta[1]:.6f}, {right_raw_delta[2]:.6f}], "
@@ -402,4 +403,5 @@ class RobotYaoWheeledXrRetargeterCfg(RetargeterCfg):
     arm_position_delta_dead_zone: float = 0.0015
     arm_rotation_delta_dead_zone: float = 0.006
     follow_button_mode: str = "toggle"
+    debug_deltas: bool = False
     retargeter_type: type[RetargeterBase] = RobotYaoWheeledXrRetargeter
