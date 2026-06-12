@@ -121,3 +121,36 @@ def object_a_is_into_b(
             raise ValueError("No gripper_joint_names found in environment config")
 
     return success
+
+
+def objects_are_inside_box(
+    env: ManagerBasedRLEnv,
+    object_cfgs: tuple[SceneEntityCfg, ...],
+    box_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    xy_threshold: float | None = None,
+    x_threshold: float = 0.15,
+    y_threshold: float = 0.31,
+    z_min: float = -0.09,
+    z_max: float = 0.08,
+) -> torch.Tensor:
+    """Check that all specified objects are inside a box/container.
+
+    The check is intentionally geometric and relative to the box root so it works
+    even if the container is moved slightly during teleoperation.
+    """
+
+    box: RigidObject = env.scene[box_cfg.name]
+    box_pos_w = box.data.root_pos_w
+    success = torch.ones(box_pos_w.shape[0], dtype=torch.bool, device=box_pos_w.device)
+    if xy_threshold is not None:
+        x_threshold = xy_threshold
+        y_threshold = xy_threshold
+
+    for object_cfg in object_cfgs:
+        obj: RigidObject = env.scene[object_cfg.name]
+        delta = obj.data.root_pos_w - box_pos_w
+        inside_xy = torch.logical_and(torch.abs(delta[:, 0]) < x_threshold, torch.abs(delta[:, 1]) < y_threshold)
+        inside_z = torch.logical_and(delta[:, 2] > z_min, delta[:, 2] < z_max)
+        success = torch.logical_and(success, torch.logical_and(inside_xy, inside_z))
+
+    return success

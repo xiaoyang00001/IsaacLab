@@ -182,6 +182,42 @@ parser.add_argument(
     default=-0.85,
     help="Reset the task scene when the box root height drops below this world Z value.",
 )
+parser.add_argument(
+    "--task-cube-drop-reset-height",
+    type=float,
+    default=-0.85,
+    help="Reset the task scene when any task cube root height drops below this world Z value.",
+)
+parser.add_argument(
+    "--task-cube-box-success-xy-threshold",
+    type=float,
+    default=None,
+    help="Optional legacy square XY threshold for cube-in-box success. Overrides the separate X/Y thresholds.",
+)
+parser.add_argument(
+    "--task-cube-box-success-x-threshold",
+    type=float,
+    default=0.15,
+    help="Count a cube as inside the task box when its X offset from the box center is below this value in meters.",
+)
+parser.add_argument(
+    "--task-cube-box-success-y-threshold",
+    type=float,
+    default=0.31,
+    help="Count a cube as inside the task box when its Y offset from the box center is below this value in meters.",
+)
+parser.add_argument(
+    "--task-cube-box-success-z-min",
+    type=float,
+    default=-0.09,
+    help="Minimum cube Z offset relative to the box root for cube-in-box success.",
+)
+parser.add_argument(
+    "--task-cube-box-success-z-max",
+    type=float,
+    default=0.08,
+    help="Maximum cube Z offset relative to the box root for cube-in-box success.",
+)
 parser.add_argument("--debug-task-loop", action="store_true", help="Print detailed task-loop diagnostics.")
 parser.add_argument(
     "--debug-save-frame-dir",
@@ -1231,6 +1267,7 @@ class RobotYaoTaskSceneController:
         self._previous_right_grip_pressed = False
         self._reset_requested = False
         self._reset_reason = ""
+        self._task_cube_names = ("cube_1", "cube_2", "cube_3")
         self._enabled_arm_action_terms: set[str] = set()
         self._zero_root_velocity = torch.zeros((1, 6), dtype=torch.float32, device=env.device)
         self._action_slices = self._resolve_action_slices()
@@ -1539,21 +1576,67 @@ class RobotYaoTaskSceneController:
         self._reset_reason = ""
         return reason
 
-    def request_reset_if_box_dropped(self) -> None:
+    def _asset_root_pos(self, name: str) -> torch.Tensor | None:
         try:
-            box = self._env.scene["box"]
-            box_pos_w = box.data.root_pos_w
+            asset = self._env.scene[name]
+            root_pos_w = asset.data.root_pos_w
         except Exception:
+            return None
+        if root_pos_w is None or root_pos_w.shape[0] < 1:
+            return None
+        return root_pos_w[0]
+
+    def request_reset_if_box_dropped(self) -> None:
+        box_pos = self._asset_root_pos("box")
+        if box_pos is None:
             return
-        if box_pos_w is None or box_pos_w.shape[0] < 1:
-            return
-        box_z = float(box_pos_w[0, 2].item())
+        box_z = float(box_pos[2].item())
         if not math.isfinite(box_z):
             self.request_env_reset("box pose invalid")
-        elif box_z < float(args_cli.task_box_drop_reset_height):
+            return
+        if box_z < float(args_cli.task_box_drop_reset_height):
             self.request_env_reset(
                 f"box dropped below table threshold: z={box_z:.3f} < {args_cli.task_box_drop_reset_height:.3f}"
             )
+            return
+
+        success_x_threshold = float(args_cli.task_cube_box_success_x_threshold)
+        success_y_threshold = float(args_cli.task_cube_box_success_y_threshold)
+        if args_cli.task_cube_box_success_xy_threshold is not None:
+            success_x_threshold = float(args_cli.task_cube_box_success_xy_threshold)
+            success_y_threshold = float(args_cli.task_cube_box_success_xy_threshold)
+
+        inside_count = 0
+        for cube_name in self._task_cube_names:
+            cube_pos = self._asset_root_pos(cube_name)
+            if cube_pos is None:
+                return
+            cube_z = float(cube_pos[2].item())
+            if not math.isfinite(cube_z):
+                self.request_env_reset(f"{cube_name} pose invalid")
+                return
+            if cube_z < float(args_cli.task_cube_drop_reset_height):
+                self.request_env_reset(
+                    f"{cube_name} dropped below table threshold: "
+                    f"z={cube_z:.3f} < {args_cli.task_cube_drop_reset_height:.3f}"
+                )
+                return
+
+            delta = cube_pos - box_pos
+            inside_xy = (
+                abs(float(delta[0].item())) < success_x_threshold
+                and abs(float(delta[1].item())) < success_y_threshold
+            )
+            inside_z = (
+                float(args_cli.task_cube_box_success_z_min)
+                < float(delta[2].item())
+                < float(args_cli.task_cube_box_success_z_max)
+            )
+            if inside_xy and inside_z:
+                inside_count += 1
+
+        if inside_count == len(self._task_cube_names):
+            self.request_env_reset(f"success: all {inside_count} cubes are inside the box")
 
     def apply_before_step(self, command: torch.Tensor | np.ndarray | None, dt: float) -> torch.Tensor:
         """Move the Agibot root and build a task action tensor for env.step()."""
@@ -2157,6 +2240,12 @@ def _create_task_scene_env():
             for term_name in (
                 "toy_truck_positions",
                 "toy_truck_orientations",
+                "cube_1_positions",
+                "cube_1_orientations",
+                "cube_2_positions",
+                "cube_2_orientations",
+                "cube_3_positions",
+                "cube_3_orientations",
                 "box_positions",
                 "box_orientations",
                 "eef_pos",
