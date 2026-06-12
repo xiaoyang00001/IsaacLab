@@ -19,10 +19,13 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
+import isaaclab.sim as sim_utils
+from isaaclab.sim import schemas
 from isaaclab.sim.schemas.schemas_cfg import CollisionPropertiesCfg, MassPropertiesCfg, RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.sim.spawners.materials import PreviewSurfaceCfg
 from isaaclab.sim.spawners.shapes.shapes_cfg import CuboidCfg
+from isaaclab.sim.utils import clone
 from isaaclab.utils import configclass
 
 from isaaclab_tasks.manager_based.manipulation.place import mdp as place_mdp
@@ -36,6 +39,28 @@ from isaaclab_tasks.manager_based.manipulation.stack.stack_env_cfg import Object
 from isaaclab.markers.config import FRAME_MARKER_CFG  # isort: skip
 from isaaclab_assets.robots.agibot import AGIBOT_A2D_CFG  # isort: skip
 from isaaclab.controllers.config.rmp_flow import AGIBOT_LEFT_ARM_RMPFLOW_CFG, AGIBOT_RIGHT_ARM_RMPFLOW_CFG  # isort: skip
+
+
+_TASK_ROBOT_ROOT_POS = (-0.6, 0.0, -1.04)
+_TASK_LIFT_BODY_LOWEST_POS = 0.0
+_TASK_TABLE_POS = (0.58, 0.0, -0.70)
+_TASK_CUBE_Z = -0.62
+_TASK_BOX_Z = -0.54
+_TASK_CUBE_DEFAULT_POSES = {
+    "cube_1": (0.02, -0.22, _TASK_CUBE_Z),
+    "cube_2": (0.14, -0.08, _TASK_CUBE_Z),
+    "cube_3": (0.26, -0.22, _TASK_CUBE_Z),
+}
+_TASK_BOX_DEFAULT_POSE = (0.40, 0.18, _TASK_BOX_Z)
+
+
+def _fixed_pose_range(x: float, y: float, z: float, yaw: float = 0.0) -> dict[str, tuple[float, float]]:
+    return {
+        "x": (x, x),
+        "y": (y, y),
+        "z": (z, z),
+        "yaw": (yaw, yaw),
+    }
 
 
 def _resolve_local_asset_path(*relative_paths: str) -> str | None:
@@ -72,6 +97,59 @@ def _make_fallback_cuboid(
         visual_material=PreviewSurfaceCfg(diffuse_color=color, roughness=0.5),
     )
 
+
+def _configure_task_robot_init_pose(robot_cfg) -> None:
+    """Set the task reset pose with the lift at the bottom and symmetric arm poses."""
+    joint_pos = dict(robot_cfg.init_state.joint_pos)
+    joint_pos["joint_lift_body"] = _TASK_LIFT_BODY_LOWEST_POS
+    for joint_index in range(1, 8):
+        right_joint = f"right_arm_joint{joint_index}"
+        left_joint = f"left_arm_joint{joint_index}"
+        if right_joint in joint_pos and left_joint in joint_pos:
+            joint_pos[left_joint] = -float(joint_pos[right_joint])
+    robot_cfg.init_state.joint_pos = joint_pos
+
+
+@clone
+def spawn_open_container_box(prim_path: str, cfg: CuboidCfg, translation=None, orientation=None, **kwargs):
+    """Spawn a single rigid open-top box made from five cuboid collision pieces."""
+
+    stage = sim_utils.get_current_stage()
+    if stage.GetPrimAtPath(prim_path).IsValid():
+        raise ValueError(f"A prim already exists at path: '{prim_path}'.")
+
+    sim_utils.create_prim(prim_path, "Xform", translation=translation, orientation=orientation, stage=stage)
+
+    size_x, size_y, size_z = cfg.size
+    wall_thickness = min(size_x, size_y) * 0.08
+    bottom_thickness = min(size_z * 0.18, wall_thickness)
+    half_x = size_x * 0.5
+    half_y = size_y * 0.5
+    half_z = size_z * 0.5
+
+    common = {
+        "collision_props": cfg.collision_props,
+        "visual_material": cfg.visual_material,
+        "physics_material": cfg.physics_material,
+        "semantic_tags": cfg.semantic_tags,
+    }
+    pieces = (
+        ("bottom", (size_x, size_y, bottom_thickness), (0.0, 0.0, -half_z + bottom_thickness * 0.5)),
+        ("front_wall", (size_x, wall_thickness, size_z), (0.0, half_y - wall_thickness * 0.5, 0.0)),
+        ("back_wall", (size_x, wall_thickness, size_z), (0.0, -half_y + wall_thickness * 0.5, 0.0)),
+        ("left_wall", (wall_thickness, size_y, size_z), (-half_x + wall_thickness * 0.5, 0.0, 0.0)),
+        ("right_wall", (wall_thickness, size_y, size_z), (half_x - wall_thickness * 0.5, 0.0, 0.0)),
+    )
+    for name, piece_size, local_pos in pieces:
+        piece_cfg = CuboidCfg(size=piece_size, **common)
+        piece_cfg.func(f"{prim_path}/{name}", piece_cfg, translation=local_pos)
+
+    if cfg.mass_props is not None:
+        schemas.define_mass_properties(prim_path, cfg.mass_props, stage=stage)
+    if cfg.rigid_props is not None:
+        schemas.define_rigid_body_properties(prim_path, cfg.rigid_props, stage=stage)
+    return stage.GetPrimAtPath(prim_path)
+
 ##
 # Event settings
 ##
@@ -83,29 +161,35 @@ class EventCfgPlaceToy2Box:
 
     reset_all = EventTerm(func=mdp.reset_scene_to_default, mode="reset", params={"reset_joint_targets": True})
 
-    init_toy_position = EventTerm(
+    init_cube_1_position = EventTerm(
         func=franka_stack_events.randomize_object_pose,
         mode="reset",
         params={
-            "pose_range": {
-                "x": (-0.15, 0.20),
-                "y": (-0.3, -0.15),
-                "z": (-0.65, -0.65),
-                "yaw": (-3.14, 3.14),
-            },
-            "asset_cfgs": [SceneEntityCfg("toy_truck")],
+            "pose_range": _fixed_pose_range(*_TASK_CUBE_DEFAULT_POSES["cube_1"]),
+            "asset_cfgs": [SceneEntityCfg("cube_1")],
+        },
+    )
+    init_cube_2_position = EventTerm(
+        func=franka_stack_events.randomize_object_pose,
+        mode="reset",
+        params={
+            "pose_range": _fixed_pose_range(*_TASK_CUBE_DEFAULT_POSES["cube_2"]),
+            "asset_cfgs": [SceneEntityCfg("cube_2")],
+        },
+    )
+    init_cube_3_position = EventTerm(
+        func=franka_stack_events.randomize_object_pose,
+        mode="reset",
+        params={
+            "pose_range": _fixed_pose_range(*_TASK_CUBE_DEFAULT_POSES["cube_3"]),
+            "asset_cfgs": [SceneEntityCfg("cube_3")],
         },
     )
     init_box_position = EventTerm(
         func=franka_stack_events.randomize_object_pose,
         mode="reset",
         params={
-            "pose_range": {
-                "x": (0.25, 0.35),
-                "y": (0.0, 0.10),
-                "z": (-0.55, -0.55),
-                "yaw": (-3.14, 3.14),
-            },
+            "pose_range": _fixed_pose_range(*_TASK_BOX_DEFAULT_POSE),
             "asset_cfgs": [SceneEntityCfg("box")],
         },
     )
@@ -127,13 +211,29 @@ class ObservationsCfg:
         actions = ObsTerm(func=mdp.last_action)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
-        toy_truck_positions = ObsTerm(
+        cube_1_positions = ObsTerm(
             func=place_mdp.object_poses_in_base_frame,
-            params={"object_cfg": SceneEntityCfg("toy_truck"), "return_key": "pos"},
+            params={"object_cfg": SceneEntityCfg("cube_1"), "return_key": "pos"},
         )
-        toy_truck_orientations = ObsTerm(
+        cube_1_orientations = ObsTerm(
             func=place_mdp.object_poses_in_base_frame,
-            params={"object_cfg": SceneEntityCfg("toy_truck"), "return_key": "quat"},
+            params={"object_cfg": SceneEntityCfg("cube_1"), "return_key": "quat"},
+        )
+        cube_2_positions = ObsTerm(
+            func=place_mdp.object_poses_in_base_frame,
+            params={"object_cfg": SceneEntityCfg("cube_2"), "return_key": "pos"},
+        )
+        cube_2_orientations = ObsTerm(
+            func=place_mdp.object_poses_in_base_frame,
+            params={"object_cfg": SceneEntityCfg("cube_2"), "return_key": "quat"},
+        )
+        cube_3_positions = ObsTerm(
+            func=place_mdp.object_poses_in_base_frame,
+            params={"object_cfg": SceneEntityCfg("cube_3"), "return_key": "pos"},
+        )
+        cube_3_orientations = ObsTerm(
+            func=place_mdp.object_poses_in_base_frame,
+            params={"object_cfg": SceneEntityCfg("cube_3"), "return_key": "quat"},
         )
         box_positions = ObsTerm(
             func=place_mdp.object_poses_in_base_frame, params={"object_cfg": SceneEntityCfg("box"), "return_key": "pos"}
@@ -159,7 +259,7 @@ class ObservationsCfg:
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
                 "ee_frame_cfg": SceneEntityCfg("ee_frame"),
-                "object_cfg": SceneEntityCfg("toy_truck"),
+                "object_cfg": SceneEntityCfg("cube_1"),
                 "diff_threshold": 0.05,
             },
         )
@@ -193,19 +293,24 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
-    toy_truck_dropping = DoneTerm(
-        func=mdp.root_height_below_minimum, params={"minimum_height": -0.85, "asset_cfg": SceneEntityCfg("toy_truck")}
+    cube_1_dropping = DoneTerm(
+        func=mdp.root_height_below_minimum, params={"minimum_height": -0.85, "asset_cfg": SceneEntityCfg("cube_1")}
+    )
+    cube_2_dropping = DoneTerm(
+        func=mdp.root_height_below_minimum, params={"minimum_height": -0.85, "asset_cfg": SceneEntityCfg("cube_2")}
+    )
+    cube_3_dropping = DoneTerm(
+        func=mdp.root_height_below_minimum, params={"minimum_height": -0.85, "asset_cfg": SceneEntityCfg("cube_3")}
     )
 
     success = DoneTerm(
-        func=place_mdp.object_a_is_into_b,
+        func=place_mdp.objects_are_inside_box,
         params={
-            "robot_cfg": SceneEntityCfg("robot"),
-            "object_a_cfg": SceneEntityCfg("toy_truck"),
-            "object_b_cfg": SceneEntityCfg("box"),
-            "xy_threshold": 0.10,
-            "height_diff": 0.06,
-            "height_threshold": 0.04,
+            "object_cfgs": (SceneEntityCfg("cube_1"), SceneEntityCfg("cube_2"), SceneEntityCfg("cube_3")),
+            "box_cfg": SceneEntityCfg("box"),
+            "xy_threshold": 0.14,
+            "z_min": -0.08,
+            "z_max": 0.16,
         },
     )
 
@@ -313,7 +418,8 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
         self.scene.robot.spawn.func = spawn_agibot_floating
         self.scene.robot.spawn.rigid_props.disable_gravity = True
         self.scene.robot.spawn.articulation_props.fix_root_link = False
-        self.scene.robot.init_state.pos = (-0.6, 0.0, -1.04)
+        self.scene.robot.init_state.pos = _TASK_ROBOT_ROOT_POS
+        _configure_task_robot_init_pose(self.scene.robot)
         self.scene.plane = AssetBaseCfg(
             prim_path="/World/GroundPlane",
             init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.0, -1.06]),
@@ -327,7 +433,7 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
         # add table
         self.scene.table = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/Table",
-            init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.70]),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=_TASK_TABLE_POS),
             spawn=CuboidCfg(
                 size=(1.45, 0.90, 0.08),
                 collision_props=CollisionPropertiesCfg(),
@@ -384,8 +490,8 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
         self.gripper_open_val = 0.994
         self.gripper_threshold = 0.2
 
-        # Rigid body properties of toy_truck and box
-        toy_truck_properties = RigidBodyPropertiesCfg(
+        # Rigid body properties of cubes and the target container.
+        cube_properties = RigidBodyPropertiesCfg(
             solver_position_iteration_count=16,
             solver_velocity_iteration_count=1,
             max_angular_velocity=1000.0,
@@ -394,58 +500,46 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
             disable_gravity=False,
         )
 
-        box_properties = toy_truck_properties.copy()
+        box_properties = cube_properties.copy()
 
-        # Notes: remember to add Physics/Mass properties to the toy_truck mesh to make grasping successful,
-        # then you can use below MassPropertiesCfg to set the mass of the toy_truck
-        toy_mass_properties = MassPropertiesCfg(
+        cube_mass_properties = MassPropertiesCfg(
             mass=0.05,
         )
-        toy_truck_usd_path = _resolve_local_asset_path(
-            "Isaac/IsaacLab/Objects/ToyTruck/toy_truck.usd",
-            "IsaacLab/Objects/ToyTruck/toy_truck.usd",
-            "Objects/ToyTruck/toy_truck.usd",
+        cube_size = (0.08, 0.08, 0.08)
+        cube_specs = (
+            ("cube_1", "Cube1", (0.10, 0.25, 0.90)),
+            ("cube_2", "Cube2", (0.08, 0.42, 1.00)),
+            ("cube_3", "Cube3", (0.06, 0.58, 0.95)),
         )
-        box_usd_path = _resolve_local_asset_path(
-            "Isaac/IsaacLab/Objects/Box/box.usd",
-            "IsaacLab/Objects/Box/box.usd",
-            "Objects/Box/box.usd",
-        )
+        for scene_name, prim_name, color in cube_specs:
+            setattr(
+                self.scene,
+                scene_name,
+                RigidObjectCfg(
+                    prim_path=f"{{ENV_REGEX_NS}}/{prim_name}",
+                    init_state=RigidObjectCfg.InitialStateCfg(),
+                    spawn=_make_fallback_cuboid(
+                        size=cube_size,
+                        color=color,
+                        rigid_props=cube_properties,
+                        mass_props=cube_mass_properties,
+                    ),
+                ),
+            )
 
-        self.scene.toy_truck = RigidObjectCfg(
-            prim_path="{ENV_REGEX_NS}/ToyTruck",
-            init_state=RigidObjectCfg.InitialStateCfg(),
-            spawn=(
-                UsdFileCfg(
-                    usd_path=toy_truck_usd_path,
-                    rigid_props=toy_truck_properties,
-                    mass_props=toy_mass_properties,
-                )
-                if toy_truck_usd_path is not None
-                else _make_fallback_cuboid(
-                    size=(0.18, 0.10, 0.08),
-                    color=(0.10, 0.25, 0.90),
-                    rigid_props=toy_truck_properties,
-                    mass_props=toy_mass_properties,
-                )
-            ),
-        )
-
+        box_size = (0.36, 0.36, 0.22)
+        box_material = PreviewSurfaceCfg(diffuse_color=(0.95, 0.08, 0.55), roughness=0.5)
         self.scene.box = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Box",
             init_state=RigidObjectCfg.InitialStateCfg(),
-            spawn=(
-                UsdFileCfg(
-                    usd_path=box_usd_path,
-                    rigid_props=box_properties,
-                )
-                if box_usd_path is not None
-                else _make_fallback_cuboid(
-                    size=(0.28, 0.28, 0.20),
-                    color=(0.95, 0.05, 0.35),
-                    rigid_props=box_properties,
-                    mass_props=MassPropertiesCfg(mass=0.25),
-                )
+            spawn=CuboidCfg(
+                func=spawn_open_container_box,
+                size=box_size,
+                collision_props=CollisionPropertiesCfg(),
+                rigid_props=box_properties,
+                mass_props=MassPropertiesCfg(mass=0.35),
+                visual_material=box_material,
+                semantic_tags=[("class", "box")],
             ),
         )
 
@@ -475,7 +569,7 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
             update_period=0.05,
             history_length=6,
             debug_vis=True,
-            filter_prim_paths_expr=["{ENV_REGEX_NS}/ToyTruck"],
+            filter_prim_paths_expr=["{ENV_REGEX_NS}/Cube1", "{ENV_REGEX_NS}/Cube2", "{ENV_REGEX_NS}/Cube3"],
         )
 
         self.teleop_devices = DevicesCfg(

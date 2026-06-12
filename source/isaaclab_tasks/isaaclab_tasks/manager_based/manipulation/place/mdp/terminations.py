@@ -121,3 +121,41 @@ def object_a_is_into_b(
             raise ValueError("No gripper_joint_names found in environment config")
 
     return success
+
+
+def objects_are_inside_box(
+    env: ManagerBasedRLEnv,
+    object_cfgs: tuple[SceneEntityCfg, ...] = (
+        SceneEntityCfg("cube_1"),
+        SceneEntityCfg("cube_2"),
+        SceneEntityCfg("cube_3"),
+    ),
+    box_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    xy_threshold: float | tuple[float, float] = 0.14,
+    z_min: float = -0.08,
+    z_max: float = 0.16,
+) -> torch.Tensor:
+    """Check that all configured objects are inside the target box volume.
+
+    The check is intentionally geometric and does not require the gripper to be open.
+    This supports teleoperation tasks where success means that every cube has been
+    placed into the container.
+    """
+
+    box: RigidObject = env.scene[box_cfg.name]
+    box_pos_w = box.data.root_pos_w
+
+    if isinstance(xy_threshold, tuple):
+        x_threshold, y_threshold = xy_threshold
+    else:
+        x_threshold = y_threshold = xy_threshold
+
+    success = torch.ones(box_pos_w.shape[0], dtype=torch.bool, device=box_pos_w.device)
+    for object_cfg in object_cfgs:
+        obj: RigidObject = env.scene[object_cfg.name]
+        delta = obj.data.root_pos_w - box_pos_w
+        inside_xy = torch.logical_and(torch.abs(delta[:, 0]) < x_threshold, torch.abs(delta[:, 1]) < y_threshold)
+        inside_z = torch.logical_and(delta[:, 2] > z_min, delta[:, 2] < z_max)
+        success = torch.logical_and(success, torch.logical_and(inside_xy, inside_z))
+
+    return success
