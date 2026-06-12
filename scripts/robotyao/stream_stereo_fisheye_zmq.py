@@ -6,7 +6,7 @@
 Usage examples:
 
     isaaclab.bat -p scripts/robotyao/stream_stereo_fisheye_zmq.py --headless
-    isaaclab.bat -p scripts/robotyao/stream_stereo_fisheye_zmq.py --width 960 --height 960 --fps 15
+    isaaclab.bat -p scripts/robotyao/stream_stereo_fisheye_zmq.py --width 960 --height 960
 
 The stream is a PUB multipart message:
 
@@ -57,7 +57,15 @@ parser.add_argument("--endpoint", type=str, default="tcp://*:5556", help="ZMQ PU
 parser.add_argument("--topic", type=str, default="robotyao.stereo.fisheye.v1", help="ZMQ topic.")
 parser.add_argument("--width", type=int, default=1920, help="Camera image width.")
 parser.add_argument("--height", type=int, default=1920, help="Camera image height.")
-parser.add_argument("--fps", type=float, default=30.0, help="Target publish FPS. Use 0 for every rendered frame.")
+parser.add_argument(
+    "--fps",
+    type=float,
+    default=0.0,
+    help=(
+        "Legacy H264 timestamp FPS hint. Publishing is not frame-limited; "
+        "0 uses a 60 FPS H264 timestamp hint."
+    ),
+)
 parser.add_argument("--encoding", choices=["h264", "jpg"], default="h264", help="Image payload encoding.")
 parser.add_argument("--jpeg_quality", type=int, default=85, help="JPEG quality when --encoding jpg is used.")
 parser.add_argument("--h264_bitrate", type=int, default=12_000_000, help="H264 target bitrate per eye.")
@@ -67,9 +75,31 @@ parser.add_argument("--h264_profile", type=str, default="baseline", help="libx26
 parser.add_argument("--baseline", type=float, default=0.064, help="Stereo camera baseline in meters.")
 parser.add_argument("--fisheye_fov", type=float, default=180.0, help="Fisheye field of view in degrees.")
 parser.add_argument("--show-camera-lenses", action="store_true", help="Show debug lens spheres in the simulated scene.")
+parser.add_argument(
+    "--hide-viewport",
+    action="store_true",
+    help=(
+        "In GUI mode, hide/disable the main 3D viewport by switching to PARTIAL_RENDERING. "
+        "Camera sensors and UI overlays continue to update."
+    ),
+)
 parser.add_argument("--warmup_frames", type=int, default=8, help="Frames to render before publishing.")
 parser.add_argument("--print_every", type=int, default=60, help="Print status every N published frames.")
 parser.add_argument("--max_frames", type=int, default=0, help="Stop after N simulation frames. Use 0 to run forever.")
+parser.add_argument(
+    "--stream-every-n-frames",
+    type=int,
+    default=1,
+    help=(
+        "Publish/encode one stereo frame every N simulation frames. The control and physics loop still runs every frame. "
+        "Use 1 to stream every frame."
+    ),
+)
+parser.add_argument(
+    "--debug-perf-timing",
+    action="store_true",
+    help="Print average per-frame timing for control, physics, camera, CPU copy, encoding, and ZMQ send.",
+)
 parser.add_argument(
     "--task-scene",
     action="store_true",
@@ -466,6 +496,10 @@ from isaaclab.sensors.camera import Camera, CameraCfg
 from pxr import Gf, UsdGeom
 
 import omni.usd
+try:
+    import omni.ui as ui
+except Exception:
+    ui = None
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
@@ -477,6 +511,138 @@ from isaaclab.devices.openxr.retargeters.robotyao_wheeled_xr_retargeter import (
 )
 
 _ROBOTYAO_LEGACY_COMMAND_SIZE = RobotYaoWheeledXrRetargeter.RIGHT_ARM_ROT_DELTA_START + 3
+
+
+class RobotYaoFpsHud:
+    """Small Kit UI overlay that reports live simulation and publishing FPS."""
+
+    def __init__(self, title: str):
+        self._window = None
+        self._label = None
+        self._sub_label = None
+        self._last_time = time.perf_counter()
+        self._last_frame_id = 0
+        self._last_published = 0
+        self._last_update = 0.0
+        self._enabled = ui is not None and not bool(getattr(args_cli, "headless", False))
+        if not self._enabled:
+            return
+
+        try:
+            self._window = ui.Window(title, width=230, height=58, visible=True)
+            for attr_name, attr_value in (("position_x", 245), ("position_y", 38)):
+                if hasattr(self._window, attr_name):
+                    setattr(self._window, attr_name, attr_value)
+            with self._window.frame:
+                with ui.ZStack():
+                    ui.Rectangle(
+                        style={
+                            "background_color": 0xCC202020,
+                            "border_color": 0xAAE6E6E6,
+                            "border_width": 1.0,
+                            "border_radius": 4.0,
+                        }
+                    )
+                    with ui.VStack(alignment=ui.Alignment.CENTER):
+                        ui.Spacer(height=5)
+                        self._label = ui.Label(
+                            "FPS --",
+                            alignment=ui.Alignment.CENTER,
+                            style={"color": 0xFFFFFFFF, "font_size": 20},
+                        )
+                        self._sub_label = ui.Label(
+                            "PUB --",
+                            alignment=ui.Alignment.CENTER,
+                            style={"color": 0xFFD0D7E2, "font_size": 12},
+                        )
+        except Exception as exc:
+            self._enabled = False
+            self._window = None
+            self._label = None
+            self._sub_label = None
+            print(f"[RobotYao] FPS HUD disabled: {exc}", flush=True)
+
+    def update(self, frame_id: int, published: int, now: float | None = None) -> None:
+        if not self._enabled or self._label is None:
+            return
+        now = time.perf_counter() if now is None else now
+        if now - self._last_update < 0.25:
+            return
+
+        elapsed = max(now - self._last_time, 1.0e-6)
+        sim_fps = (int(frame_id) - self._last_frame_id) / elapsed
+        pub_fps = (int(published) - self._last_published) / elapsed
+        self._last_time = now
+        self._last_frame_id = int(frame_id)
+        self._last_published = int(published)
+        self._last_update = now
+
+        self._label.text = f"FPS {sim_fps:5.1f}"
+        if self._sub_label is not None:
+            self._sub_label.text = f"PUB {pub_fps:5.1f}  frame {int(frame_id)}"
+
+    def destroy(self) -> None:
+        if self._window is not None:
+            try:
+                self._window.visible = False
+                self._window.destroy()
+            except Exception:
+                pass
+        self._window = None
+        self._label = None
+        self._sub_label = None
+
+
+class RobotYaoPerfMeter:
+    """Collects coarse loop timing to identify the current FPS bottleneck."""
+
+    def __init__(self, label: str):
+        self._label = label
+        self._enabled = bool(args_cli.debug_perf_timing)
+        self._totals: dict[str, float] = {}
+        self._count = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def add(self, **sections: float) -> None:
+        if not self._enabled:
+            return
+        self._count += 1
+        for name, value in sections.items():
+            self._totals[name] = self._totals.get(name, 0.0) + max(float(value), 0.0)
+
+    def maybe_print(self, published: int, frame_id: int) -> None:
+        if not self._enabled or self._count <= 0:
+            return
+        if args_cli.print_every <= 0 or published <= 0 or published % args_cli.print_every != 0:
+            return
+
+        parts = []
+        for name in ("control", "step", "camera", "copy", "encode", "send", "total"):
+            if name in self._totals:
+                parts.append(f"{name}={1000.0 * self._totals[name] / self._count:.1f}ms")
+        print(
+            f"[RobotYao] perf {self._label}: samples={self._count} frame_id={frame_id} "
+            + " ".join(parts),
+            flush=True,
+        )
+        self._totals.clear()
+        self._count = 0
+
+
+def _apply_optional_partial_rendering(sim, label: str) -> None:
+    if not bool(args_cli.hide_viewport):
+        return
+    try:
+        sim.set_render_mode(sim.RenderMode.PARTIAL_RENDERING)
+        print(
+            f"[RobotYao] {label}: main viewport disabled via PARTIAL_RENDERING; camera sensors remain active.",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[RobotYao] Failed to enable PARTIAL_RENDERING for {label}: {exc}", flush=True)
 
 
 def _spawn_shape(path: str, cfg, translation: tuple[float, float, float]):
@@ -812,12 +978,17 @@ class H264EyeEncoder:
         list(self._codec.encode(None))
 
 
+def _h264_stream_fps_hint() -> float:
+    return float(args_cli.fps) if float(args_cli.fps) > 0.0 else 60.0
+
+
 class StereoH264Encoder:
     def __init__(self):
+        stream_fps = _h264_stream_fps_hint()
         self._left = H264EyeEncoder(
             args_cli.width,
             args_cli.height,
-            args_cli.fps,
+            stream_fps,
             args_cli.h264_bitrate,
             args_cli.h264_gop,
             args_cli.h264_preset,
@@ -826,7 +997,7 @@ class StereoH264Encoder:
         self._right = H264EyeEncoder(
             args_cli.width,
             args_cli.height,
-            args_cli.fps,
+            stream_fps,
             args_cli.h264_bitrate,
             args_cli.h264_gop,
             args_cli.h264_preset,
@@ -1490,10 +1661,10 @@ class RobotYaoTaskSceneController:
             print(f"[RobotYao] Found lift joint: {lift_joint_names[0]} (ID: {self._lift_joint_id})", flush=True)
         else:
             print("[RobotYao] [WARNING] lift joint 'joint_lift_body' not found!", flush=True)
-        self._left_gripper_open_targets = self._make_gripper_joint_targets("left", closed=False)
-        self._left_gripper_close_targets = self._make_gripper_joint_targets("left", closed=True)
-        self._right_gripper_open_targets = self._make_gripper_joint_targets("right", closed=False)
-        self._right_gripper_close_targets = self._make_gripper_joint_targets("right", closed=True)
+        self._left_gripper_open_targets = self._make_gripper_joint_targets("left", close_fraction=0.0)
+        self._left_gripper_close_targets = self._make_gripper_joint_targets("left", close_fraction=1.0)
+        self._right_gripper_open_targets = self._make_gripper_joint_targets("right", close_fraction=0.0)
+        self._right_gripper_close_targets = self._make_gripper_joint_targets("right", close_fraction=1.0)
         print(
             "[RobotYao] Task action ownership: "
             f"terms={self._action_slices}, "
@@ -1572,7 +1743,7 @@ class RobotYaoTaskSceneController:
             if self._infer_action_term_side(candidate_name) == side:
                 self._enabled_arm_action_terms.add(candidate_name)
 
-    def _make_gripper_joint_targets(self, side: str, closed: bool) -> torch.Tensor:
+    def _make_gripper_joint_targets(self, side: str, close_fraction: float) -> torch.Tensor:
         if side == "left":
             joint_names = self._left_gripper_joint_names
             close_value = 0.0
@@ -1581,19 +1752,25 @@ class RobotYaoTaskSceneController:
             close_value = 0.20
         else:
             raise ValueError(f"Unsupported gripper side: {side}")
-        value = close_value if closed else 0.994
+        close_fraction = max(0.0, min(1.0, float(close_fraction)))
+        value = 0.994 + (close_value - 0.994) * close_fraction
         targets = torch.full(
             (self._env.num_envs, len(joint_names)), float(value), dtype=torch.float32, device=self._env.device
         )
         return targets
 
-    def _apply_direct_gripper_target(self, side: str, closed: bool) -> None:
+    def _apply_direct_gripper_target(self, side: str, close_fraction: float) -> None:
+        close_fraction = max(0.0, min(1.0, float(close_fraction)))
         if side == "left":
             joint_ids = self._left_gripper_joint_ids
-            targets = self._left_gripper_close_targets if closed else self._left_gripper_open_targets
+            targets = self._left_gripper_open_targets + (
+                self._left_gripper_close_targets - self._left_gripper_open_targets
+            ) * close_fraction
         elif side == "right":
             joint_ids = self._right_gripper_joint_ids
-            targets = self._right_gripper_close_targets if closed else self._right_gripper_open_targets
+            targets = self._right_gripper_open_targets + (
+                self._right_gripper_close_targets - self._right_gripper_open_targets
+            ) * close_fraction
         else:
             raise ValueError(f"Unsupported gripper side: {side}")
         if len(joint_ids) == 0:
@@ -2428,23 +2605,23 @@ class RobotYaoTaskSceneController:
         # 2. Drive grippers
         left_trigger = command_tensor[RobotYaoWheeledXrRetargeter.LEFT_TRIGGER]
         right_trigger = command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_TRIGGER]
-        left_gripper_close = float(left_trigger) > 0.5
-        right_gripper_close = float(right_trigger) > 0.5
+        left_gripper_close_fraction = max(0.0, min(1.0, float(left_trigger)))
+        right_gripper_close_fraction = max(0.0, min(1.0, float(right_trigger)))
 
         if has_concurrent_grippers:
-            actions[:, self._left_gripper_action_slice] = -1.0 if left_gripper_close else 1.0
-            actions[:, self._right_gripper_action_slice] = -1.0 if right_gripper_close else 1.0
+            actions[:, self._left_gripper_action_slice] = 1.0 - 2.0 * left_gripper_close_fraction
+            actions[:, self._right_gripper_action_slice] = 1.0 - 2.0 * right_gripper_close_fraction
         else:
             managed_gripper_side = self._gripper_action_side or ("right" if has_gripper_action else None)
             if has_gripper_action:
                 if managed_gripper_side == "left":
-                    actions[:, self._gripper_action_slice] = -1.0 if left_gripper_close else 1.0
+                    actions[:, self._gripper_action_slice] = 1.0 - 2.0 * left_gripper_close_fraction
                 else:
-                    actions[:, self._gripper_action_slice] = -1.0 if right_gripper_close else 1.0
+                    actions[:, self._gripper_action_slice] = 1.0 - 2.0 * right_gripper_close_fraction
             if managed_gripper_side != "left":
-                self._apply_direct_gripper_target("left", left_gripper_close)
+                self._apply_direct_gripper_target("left", left_gripper_close_fraction)
             if managed_gripper_side != "right":
-                self._apply_direct_gripper_target("right", right_gripper_close)
+                self._apply_direct_gripper_target("right", right_gripper_close_fraction)
 
         self._previous_body_lift_mode = body_lift_mode
         self._previous_left_follow_start_button = left_follow_start_button
@@ -2748,8 +2925,8 @@ def _reset_task_scene_runtime(
     print(f"[RobotYao] Resetting task environment: {reason}", flush=True)
     with torch.inference_mode():
         env.reset()
-    if task_controller is not None:
-        task_controller.after_env_reset(reason)
+        if task_controller is not None:
+            task_controller.after_env_reset(reason)
     _reset_camera_or_pair(camera)
 
 
@@ -2762,17 +2939,21 @@ def run_task_scene_simulator(
     """Run the registered task scene while publishing stereo fisheye frames."""
     publisher = StereoZmqPublisher(args_cli.endpoint, args_cli.topic)
     h264_encoder = StereoH264Encoder() if args_cli.encoding == "h264" else None
-    publish_interval = 0.0 if args_cli.fps <= 0.0 else 1.0 / args_cli.fps
+    publish_interval = 0.0
     next_publish_time = time.perf_counter()
     published = 0
     frame_id = 0
     debug_frame_saved = False
     start_time = time.perf_counter()
+    fps_hud = RobotYaoFpsHud("RobotYao FPS")
+    perf_meter = RobotYaoPerfMeter("task_scene")
+    stream_stride = max(1, int(args_cli.stream_every_n_frames))
 
     print(
         "[RobotYao] Streaming Agibot task stereo RGB fisheye frames "
         f"task={args_cli.task}, {args_cli.width}x{args_cli.height}, encoding={args_cli.encoding}, "
-        f"endpoint={args_cli.endpoint}, topic={args_cli.topic}",
+        f"endpoint={args_cli.endpoint}, topic={args_cli.topic}, publish_limit=none, "
+        f"stream_every_n_frames={stream_stride}",
         flush=True,
     )
     if control_device is not None:
@@ -2784,15 +2965,18 @@ def run_task_scene_simulator(
 
     try:
         while simulation_app.is_running():
+            loop_t0 = time.perf_counter()
             dt = float(env.step_dt)
             if args_cli.debug_task_loop and frame_id < 2:
                 print(f"[RobotYao] Task loop frame {frame_id + 1}: build action.", flush=True)
             command = control_device.advance() if control_device is not None else None
-            actions = (
-                task_controller.apply_before_step(command, dt)
-                if task_controller is not None
-                else torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
-            )
+            with torch.inference_mode():
+                actions = (
+                    task_controller.apply_before_step(command, dt)
+                    if task_controller is not None
+                    else torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
+                )
+            control_t1 = time.perf_counter()
             reset_reason = task_controller.consume_env_reset_request() if task_controller is not None else None
             if reset_reason is not None:
                 _reset_task_scene_runtime(env, camera, task_controller, reset_reason)
@@ -2803,6 +2987,7 @@ def run_task_scene_simulator(
                 print(f"[RobotYao] Task loop frame {frame_id + 1}: env.step.", flush=True)
             with torch.inference_mode():
                 env.step(actions)
+            step_t2 = time.perf_counter()
             if task_controller is not None:
                 task_controller.request_reset_if_box_dropped()
                 reset_reason = task_controller.consume_env_reset_request()
@@ -2825,11 +3010,29 @@ def run_task_scene_simulator(
                 task_controller.update_camera_xforms()
             if args_cli.debug_task_loop and frame_id < 2:
                 print(f"[RobotYao] Task loop frame {frame_id + 1}: camera updated.", flush=True)
+            camera_t3 = time.perf_counter()
             frame_id += 1
+            fps_hud.update(frame_id, published)
             should_stop_after_frame = args_cli.max_frames > 0 and frame_id >= args_cli.max_frames
 
             now = time.perf_counter()
             if frame_id <= args_cli.warmup_frames:
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    total=camera_t3 - loop_t0,
+                )
+                if should_stop_after_frame:
+                    break
+                continue
+            if stream_stride > 1 and frame_id % stream_stride != 0:
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    total=camera_t3 - loop_t0,
+                )
                 if should_stop_after_frame:
                     break
                 continue
@@ -2840,10 +3043,17 @@ def run_task_scene_simulator(
             if publish_interval > 0.0:
                 next_publish_time = max(now, next_publish_time + publish_interval)
 
+            copy_t0 = time.perf_counter()
             if isinstance(camera, tuple):
                 left_tensor = camera[0].data.output.get("rgb")
                 right_tensor = camera[1].data.output.get("rgb")
                 if left_tensor is None or right_tensor is None or left_tensor.shape[0] < 1 or right_tensor.shape[0] < 1:
+                    perf_meter.add(
+                        control=control_t1 - loop_t0,
+                        step=step_t2 - control_t1,
+                        camera=camera_t3 - step_t2,
+                        total=time.perf_counter() - loop_t0,
+                    )
                     if should_stop_after_frame:
                         break
                     continue
@@ -2857,6 +3067,12 @@ def run_task_scene_simulator(
                     if args_cli.debug_task_loop and frame_id <= 2:
                         shape = None if rgb_tensor is None else tuple(rgb_tensor.shape)
                         print(f"[RobotYao] Task loop frame {frame_id}: rgb not ready shape={shape}.", flush=True)
+                    perf_meter.add(
+                        control=control_t1 - loop_t0,
+                        step=step_t2 - control_t1,
+                        camera=camera_t3 - step_t2,
+                        total=time.perf_counter() - loop_t0,
+                    )
                     if should_stop_after_frame:
                         break
                     continue
@@ -2865,18 +3081,29 @@ def run_task_scene_simulator(
                 rgb_images = rgb_tensor.detach().cpu().numpy()
                 left_rgb = np.ascontiguousarray(rgb_images[0, :, :, :3], dtype=np.uint8)
                 right_rgb = np.ascontiguousarray(rgb_images[1, :, :, :3], dtype=np.uint8)
+            copy_t1 = time.perf_counter()
             if not debug_frame_saved:
                 _save_debug_frame_pair("task_scene", frame_id, left_rgb, right_rgb)
                 debug_frame_saved = True
+            encode_t0 = time.perf_counter()
             if h264_encoder is not None:
                 left_payload, right_payload = h264_encoder.encode(left_rgb, right_rgb)
                 if not left_payload or not right_payload:
+                    perf_meter.add(
+                        control=control_t1 - loop_t0,
+                        step=step_t2 - control_t1,
+                        camera=camera_t3 - step_t2,
+                        copy=copy_t1 - copy_t0,
+                        encode=time.perf_counter() - encode_t0,
+                        total=time.perf_counter() - loop_t0,
+                    )
                     if should_stop_after_frame:
                         break
                     continue
             else:
                 left_payload = _encode_jpeg(left_rgb, args_cli.jpeg_quality)
                 right_payload = _encode_jpeg(right_rgb, args_cli.jpeg_quality)
+            encode_t1 = time.perf_counter()
 
             header = {
                 "version": 1,
@@ -2975,8 +3202,21 @@ def run_task_scene_simulator(
                     else None,
                 },
             }
+            send_t0 = time.perf_counter()
             publisher.send(header, left_payload, right_payload)
+            send_t1 = time.perf_counter()
             published += 1
+            fps_hud.update(frame_id, published)
+            perf_meter.add(
+                control=control_t1 - loop_t0,
+                step=step_t2 - control_t1,
+                camera=camera_t3 - step_t2,
+                copy=copy_t1 - copy_t0,
+                encode=encode_t1 - encode_t0,
+                send=send_t1 - send_t0,
+                total=send_t1 - loop_t0,
+            )
+            perf_meter.maybe_print(published, frame_id)
 
             if args_cli.print_every > 0 and published % args_cli.print_every == 0:
                 elapsed = max(time.perf_counter() - start_time, 1.0e-6)
@@ -3005,6 +3245,7 @@ def run_task_scene_simulator(
             publisher.close()
         except Exception as exc:
             print(f"[RobotYao] Failed to close stereo publisher: {exc}", flush=True)
+        fps_hud.destroy()
         try:
             env.close()
         except Exception as exc:
@@ -3019,17 +3260,20 @@ def run_simulator(
 ):
     publisher = StereoZmqPublisher(args_cli.endpoint, args_cli.topic)
     h264_encoder = StereoH264Encoder() if args_cli.encoding == "h264" else None
-    publish_interval = 0.0 if args_cli.fps <= 0.0 else 1.0 / args_cli.fps
+    publish_interval = 0.0
     next_publish_time = time.perf_counter()
     published = 0
     frame_id = 0
     debug_frame_saved = False
     start_time = time.perf_counter()
+    fps_hud = RobotYaoFpsHud("RobotYao FPS")
+    perf_meter = RobotYaoPerfMeter("simple_scene")
+    stream_stride = max(1, int(args_cli.stream_every_n_frames))
 
     print(
         "[RobotYao] Streaming stereo RGB fisheye frames "
         f"{args_cli.width}x{args_cli.height}, encoding={args_cli.encoding}, endpoint={args_cli.endpoint}, "
-        f"topic={args_cli.topic}"
+        f"topic={args_cli.topic}, publish_limit=none, stream_every_n_frames={stream_stride}"
     )
     if control_device is not None:
         print(
@@ -3039,21 +3283,48 @@ def run_simulator(
 
     try:
         while simulation_app.is_running():
+            loop_t0 = time.perf_counter()
             physics_dt = sim.get_physics_dt()
             if control_device is not None and robot_controller is not None:
                 robot_controller.apply(control_device.advance(), physics_dt)
+            control_t1 = time.perf_counter()
 
             sim.step()
+            step_t2 = time.perf_counter()
             camera.update(dt=physics_dt)
+            camera_t3 = time.perf_counter()
             frame_id += 1
+            fps_hud.update(frame_id, published)
             should_stop_after_frame = args_cli.max_frames > 0 and frame_id >= args_cli.max_frames
 
             now = time.perf_counter()
             if frame_id <= args_cli.warmup_frames:
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    total=time.perf_counter() - loop_t0,
+                )
+                if should_stop_after_frame:
+                    break
+                continue
+            if stream_stride > 1 and frame_id % stream_stride != 0:
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    total=time.perf_counter() - loop_t0,
+                )
                 if should_stop_after_frame:
                     break
                 continue
             if publish_interval > 0.0 and now < next_publish_time:
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    total=time.perf_counter() - loop_t0,
+                )
                 if should_stop_after_frame:
                     break
                 continue
@@ -3062,25 +3333,43 @@ def run_simulator(
 
             rgb_tensor = camera.data.output.get("rgb")
             if rgb_tensor is None or rgb_tensor.shape[0] < 2:
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    total=time.perf_counter() - loop_t0,
+                )
                 if should_stop_after_frame:
                     break
                 continue
 
+            copy_t0 = time.perf_counter()
             rgb_images = rgb_tensor.detach().cpu().numpy()
             left_rgb = np.ascontiguousarray(rgb_images[0, :, :, :3], dtype=np.uint8)
             right_rgb = np.ascontiguousarray(rgb_images[1, :, :, :3], dtype=np.uint8)
+            copy_t1 = time.perf_counter()
             if not debug_frame_saved:
                 _save_debug_frame_pair("simple_scene", frame_id, left_rgb, right_rgb)
                 debug_frame_saved = True
+            encode_t0 = time.perf_counter()
             if h264_encoder is not None:
                 left_payload, right_payload = h264_encoder.encode(left_rgb, right_rgb)
                 if not left_payload or not right_payload:
+                    perf_meter.add(
+                        control=control_t1 - loop_t0,
+                        step=step_t2 - control_t1,
+                        camera=camera_t3 - step_t2,
+                        copy=copy_t1 - copy_t0,
+                        encode=time.perf_counter() - encode_t0,
+                        total=time.perf_counter() - loop_t0,
+                    )
                     if should_stop_after_frame:
                         break
                     continue
             else:
                 left_payload = _encode_jpeg(left_rgb, args_cli.jpeg_quality)
                 right_payload = _encode_jpeg(right_rgb, args_cli.jpeg_quality)
+            encode_t1 = time.perf_counter()
 
             header = {
                 "version": 1,
@@ -3119,8 +3408,21 @@ def run_simulator(
                     "poly_f": 0.0,
                 },
             }
+            send_t0 = time.perf_counter()
             publisher.send(header, left_payload, right_payload)
+            send_t1 = time.perf_counter()
             published += 1
+            fps_hud.update(frame_id, published)
+            perf_meter.add(
+                control=control_t1 - loop_t0,
+                step=step_t2 - control_t1,
+                camera=camera_t3 - step_t2,
+                copy=copy_t1 - copy_t0,
+                encode=encode_t1 - encode_t0,
+                send=send_t1 - send_t0,
+                total=send_t1 - loop_t0,
+            )
+            perf_meter.maybe_print(published, frame_id)
 
             if args_cli.print_every > 0 and published % args_cli.print_every == 0:
                 elapsed = max(time.perf_counter() - start_time, 1.0e-6)
@@ -3148,6 +3450,7 @@ def run_simulator(
             publisher.close()
         except Exception as exc:
             print(f"[RobotYao] Failed to close stereo publisher: {exc}", flush=True)
+        fps_hud.destroy()
 
 
 def main():
@@ -3155,6 +3458,7 @@ def main():
         env = _create_task_scene_env()
         print("[RobotYao] Setting debug camera view.", flush=True)
         env.sim.set_camera_view(eye=[1.5, -1.0, 1.5], target=[0.5, 0.0, 0.0])
+        _apply_optional_partial_rendering(env.sim, "Task scene")
         print("[RobotYao] Creating task stereo fisheye cameras.", flush=True)
         camera = _design_task_scene_stereo_cameras(
             args_cli.width, args_cli.height, args_cli.fisheye_fov, args_cli.show_camera_lenses
@@ -3172,6 +3476,7 @@ def main():
     sim_cfg = sim_utils.SimulationCfg(dt=1.0 / 60.0, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     sim.set_camera_view(eye=[4.0, 3.5, 2.2], target=[0.6, 0.0, 0.8])
+    _apply_optional_partial_rendering(sim, "Simple scene")
 
     camera = _design_scene(
         args_cli.width, args_cli.height, args_cli.baseline, args_cli.fisheye_fov, args_cli.show_camera_lenses
