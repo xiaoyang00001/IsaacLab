@@ -60,6 +60,30 @@ def _relative_rotvec_wxyz(current_quat: np.ndarray, previous_quat: np.ndarray) -
     return _axis_angle_from_quat_wxyz(delta_quat)
 
 
+_MOCOPI_ARM_JOINT_NAMES = {
+    "left": (
+        "LEFT_ARM_UpperArm",
+        "LEFT_ARM_LowerArm",
+        "LEFT_ARM_Hand",
+    ),
+    "right": (
+        "RIGHT_ARM_UpperArm",
+        "RIGHT_ARM_LowerArm",
+        "RIGHT_ARM_Hand",
+    ),
+}
+
+
+def _parse_joint_signs(signs: str, *, label: str) -> np.ndarray:
+    values = [value.strip() for value in signs.split(",") if value.strip()]
+    if len(values) != 7:
+        raise ValueError(f"{label} must contain exactly 7 comma-separated signs.")
+    parsed = np.asarray([float(value) for value in values], dtype=np.float32)
+    if not np.all(np.isfinite(parsed)):
+        raise ValueError(f"{label} contains NaN/Inf.")
+    return parsed
+
+
 class RobotYaoWheeledXrRetargeter(RetargeterBase):
     """Map Unity XR controller data to a compact wheeled-robot command.
 
@@ -101,6 +125,8 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         left_arm_follow_active,
         right_arm_follow_active,
         base_height_vel,
+        left_arm_joint_delta_0..6,
+        right_arm_joint_delta_0..6,
     ]``
 
     Right-hand B/A starts/stops right-arm follow; left-hand Y/X starts/stops
@@ -111,7 +137,8 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
     arm deltas so the arms remain fixed relative to the moving body.
     """
 
-    OUTPUT_SIZE = 35
+    OUTPUT_SIZE = 49
+    LEGACY_OUTPUT_SIZE = 35
     BASE_FORWARD = 0
     BASE_LATERAL = 1
     BASE_YAW = 2
@@ -135,6 +162,9 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
     LEFT_ARM_FOLLOW_ACTIVE = 32
     RIGHT_ARM_FOLLOW_ACTIVE = 33
     BASE_HEIGHT_VEL = 34
+    LEFT_ARM_JOINT_DELTA_START = 35
+    RIGHT_ARM_JOINT_DELTA_START = 42
+    ARM_JOINT_DELTA_SIZE = 7
 
     def __init__(self, cfg: RobotYaoWheeledXrRetargeterCfg):
         super().__init__(cfg)
@@ -151,6 +181,16 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         self._arm_rotation_delta_dead_zone = max(0.0, float(cfg.arm_rotation_delta_dead_zone))
         self._follow_button_mode = cfg.follow_button_mode
         self._debug_deltas = bool(cfg.debug_deltas)
+        self._mocopi_arm_joint_control = bool(cfg.mocopi_arm_joint_control)
+        self._mocopi_arm_joint_delta_scale = float(cfg.mocopi_arm_joint_delta_scale)
+        self._mocopi_arm_joint_dead_zone = max(0.0, float(cfg.mocopi_arm_joint_dead_zone))
+        self._mocopi_arm_joint_max_step = max(0.0, float(cfg.mocopi_arm_joint_max_step))
+        self._mocopi_left_joint_signs = _parse_joint_signs(
+            cfg.mocopi_left_joint_signs, label="mocopi_left_joint_signs"
+        )
+        self._mocopi_right_joint_signs = _parse_joint_signs(
+            cfg.mocopi_right_joint_signs, label="mocopi_right_joint_signs"
+        )
 
         self._left_arm_follow_active = False
         self._right_arm_follow_active = False
@@ -162,6 +202,7 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         self._previous_right_controller_position: np.ndarray | None = None
         self._previous_left_controller_quat: np.ndarray | None = None
         self._previous_right_controller_quat: np.ndarray | None = None
+        self._previous_mocopi_arm_quats: dict[str, dict[str, np.ndarray]] = {"left": {}, "right": {}}
         self._previous_left_grip_active = False
 
     def retarget(self, data: dict) -> torch.Tensor:
@@ -207,6 +248,8 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         right_delta = np.zeros(3, dtype=np.float32)
         left_rot_delta = np.zeros(3, dtype=np.float32)
         right_rot_delta = np.zeros(3, dtype=np.float32)
+        left_joint_delta = np.zeros(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
+        right_joint_delta = np.zeros(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
         left_position = self._extract_position(left_controller)
         right_position = self._extract_position(right_controller)
         left_quat = self._extract_quaternion(left_controller)
@@ -246,6 +289,16 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         right_delta = self._apply_vector_dead_zone(right_delta, self._arm_position_delta_dead_zone)
         left_rot_delta = self._apply_vector_dead_zone(left_rot_delta, self._arm_rotation_delta_dead_zone)
         right_rot_delta = self._apply_vector_dead_zone(right_rot_delta, self._arm_rotation_delta_dead_zone)
+        if self._mocopi_arm_joint_control:
+            whole_body = data.get("whole_body", {})
+            if self._left_arm_follow_active and arm_delta_enabled:
+                left_joint_delta = self._compute_mocopi_arm_joint_delta("left", whole_body)
+            else:
+                self._reset_mocopi_arm_history("left")
+            if self._right_arm_follow_active and arm_delta_enabled:
+                right_joint_delta = self._compute_mocopi_arm_joint_delta("right", whole_body)
+            else:
+                self._reset_mocopi_arm_history("right")
 
         if self._debug_deltas and (np.any(left_raw_delta != 0.0) or np.any(left_rot_delta != 0.0)):
             print(
@@ -298,6 +351,12 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         output[self.LEFT_ARM_FOLLOW_ACTIVE] = 1.0 if self._left_arm_follow_active else 0.0
         output[self.RIGHT_ARM_FOLLOW_ACTIVE] = 1.0 if self._right_arm_follow_active else 0.0
         output[self.BASE_HEIGHT_VEL] = height_vel
+        output[
+            self.LEFT_ARM_JOINT_DELTA_START : self.LEFT_ARM_JOINT_DELTA_START + self.ARM_JOINT_DELTA_SIZE
+        ] = left_joint_delta
+        output[
+            self.RIGHT_ARM_JOINT_DELTA_START : self.RIGHT_ARM_JOINT_DELTA_START + self.ARM_JOINT_DELTA_SIZE
+        ] = right_joint_delta
         self._previous_left_grip_active = left_grip_active
         return torch.tensor(output, dtype=torch.float32, device=self._sim_device)
 
@@ -345,9 +404,11 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         if side is None or side == "left":
             self._previous_left_controller_position = None
             self._previous_left_controller_quat = None
+            self._reset_mocopi_arm_history("left")
         if side is None or side == "right":
             self._previous_right_controller_position = None
             self._previous_right_controller_quat = None
+            self._reset_mocopi_arm_history("right")
 
     def _stop_all_arm_follow(self) -> None:
         self._left_arm_follow_active = False
@@ -373,6 +434,67 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         if controller_data.ndim == 2 and controller_data.shape[0] > row and controller_data.shape[1] >= 7:
             return _normalize_quat_wxyz(controller_data[row, 3:7].copy())
         return None
+
+    def _reset_mocopi_arm_history(self, side: str | None = None) -> None:
+        if side is None:
+            self._previous_mocopi_arm_quats = {"left": {}, "right": {}}
+        elif side in self._previous_mocopi_arm_quats:
+            self._previous_mocopi_arm_quats[side].clear()
+
+    def _compute_mocopi_arm_joint_delta(self, side: str, whole_body: dict) -> np.ndarray:
+        if side not in _MOCOPI_ARM_JOINT_NAMES:
+            raise ValueError(f"Unsupported Mocopi arm side: {side}")
+        if not isinstance(whole_body, dict):
+            self._reset_mocopi_arm_history(side)
+            return np.zeros(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
+
+        current_quats: dict[str, np.ndarray] = {}
+        for joint_name in _MOCOPI_ARM_JOINT_NAMES[side]:
+            pose = whole_body.get(joint_name)
+            if pose is None:
+                self._reset_mocopi_arm_history(side)
+                return np.zeros(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
+            pose_array = np.asarray(pose, dtype=np.float32)
+            if pose_array.shape[0] < 7:
+                self._reset_mocopi_arm_history(side)
+                return np.zeros(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
+            quat = _normalize_quat_wxyz(pose_array[3:7].copy())
+            if quat is None:
+                self._reset_mocopi_arm_history(side)
+                return np.zeros(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
+            current_quats[joint_name] = quat
+
+        previous_quats = self._previous_mocopi_arm_quats[side]
+        if len(previous_quats) != len(current_quats):
+            self._previous_mocopi_arm_quats[side] = {name: quat.copy() for name, quat in current_quats.items()}
+            return np.zeros(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
+
+        upper_name, lower_name, hand_name = _MOCOPI_ARM_JOINT_NAMES[side]
+        upper = _relative_rotvec_wxyz(current_quats[upper_name], previous_quats[upper_name])
+        lower = _relative_rotvec_wxyz(current_quats[lower_name], previous_quats[lower_name])
+        hand = _relative_rotvec_wxyz(current_quats[hand_name], previous_quats[hand_name])
+        self._previous_mocopi_arm_quats[side] = {name: quat.copy() for name, quat in current_quats.items()}
+
+        # First-pass human-arm to 7-DoF robot-arm delta map.  The signs are CLI-tunable
+        # because Mocopi/avatar rig axes and robot joint axes are not guaranteed to match.
+        joint_delta = np.asarray(
+            [
+                upper[1],
+                -upper[0],
+                upper[2],
+                lower[1],
+                lower[0],
+                hand[1],
+                hand[2],
+            ],
+            dtype=np.float32,
+        )
+        signs = self._mocopi_left_joint_signs if side == "left" else self._mocopi_right_joint_signs
+        joint_delta = joint_delta * signs * self._mocopi_arm_joint_delta_scale
+        joint_delta = self._apply_vector_dead_zone(joint_delta, self._mocopi_arm_joint_dead_zone)
+        if self._mocopi_arm_joint_max_step > 0.0:
+            joint_delta = np.clip(joint_delta, -self._mocopi_arm_joint_max_step, self._mocopi_arm_joint_max_step)
+        return joint_delta.astype(np.float32)
 
     def _apply_dead_zone(self, value: float) -> float:
         value = float(value)
@@ -404,4 +526,10 @@ class RobotYaoWheeledXrRetargeterCfg(RetargeterCfg):
     arm_rotation_delta_dead_zone: float = 0.006
     follow_button_mode: str = "toggle"
     debug_deltas: bool = False
+    mocopi_arm_joint_control: bool = False
+    mocopi_arm_joint_delta_scale: float = 1.0
+    mocopi_arm_joint_dead_zone: float = 0.002
+    mocopi_arm_joint_max_step: float = 0.08
+    mocopi_left_joint_signs: str = "1,1,1,1,1,1,1"
+    mocopi_right_joint_signs: str = "1,1,1,1,1,1,1"
     retargeter_type: type[RetargeterBase] = RobotYaoWheeledXrRetargeter

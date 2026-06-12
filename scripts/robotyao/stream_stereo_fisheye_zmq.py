@@ -345,6 +345,50 @@ parser.add_argument(
     action="store_true",
     help="Enable low-level retargeter delta logs. Disabled by default so session logs stay readable.",
 )
+parser.add_argument(
+    "--mocopi-arm-joint-control",
+    action="store_true",
+    help="Use Unity Mocopi whole-body arm joint rotation deltas to directly drive the robot arm joints.",
+)
+parser.add_argument(
+    "--unity-mocopi-input-endpoint",
+    type=str,
+    default="",
+    help=(
+        "Optional extra Unity Mocopi whole-body ZMQ endpoint. Leave empty when whole-body packets are "
+        "published by the native XR publisher on --unity-input-endpoint."
+    ),
+)
+parser.add_argument(
+    "--mocopi-arm-joint-delta-scale",
+    type=float,
+    default=1.0,
+    help="Scale applied to Mocopi arm rotation deltas before they are written as robot joint deltas.",
+)
+parser.add_argument(
+    "--mocopi-arm-joint-deadband",
+    type=float,
+    default=0.002,
+    help="Ignore Mocopi direct-joint delta vectors whose norm is below this value in radians.",
+)
+parser.add_argument(
+    "--mocopi-arm-joint-max-step",
+    type=float,
+    default=0.08,
+    help="Clamp each Mocopi-generated robot joint delta component to this many radians per frame.",
+)
+parser.add_argument(
+    "--mocopi-left-arm-joint-signs",
+    type=str,
+    default="1,1,1,1,1,1,1",
+    help="Comma-separated signs for the 7 left-arm Mocopi-to-robot joint delta channels.",
+)
+parser.add_argument(
+    "--mocopi-right-arm-joint-signs",
+    type=str,
+    default="1,1,1,1,1,1,1",
+    help="Comma-separated signs for the 7 right-arm Mocopi-to-robot joint delta channels.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -1421,6 +1465,19 @@ class RobotYaoTaskSceneController:
         )
         self._left_arm_joint_ids, self._left_arm_joint_names = self._robot.find_joints(["left_arm_joint.*"])
         self._right_arm_joint_ids, self._right_arm_joint_names = self._robot.find_joints(["right_arm_joint.*"])
+        if args_cli.mocopi_arm_joint_control:
+            print(
+                "[RobotYao] Mocopi arm joint control enabled: "
+                f"extra_mocopi_endpoint={args_cli.unity_mocopi_input_endpoint}, "
+                f"scale={args_cli.mocopi_arm_joint_delta_scale:.3f}, "
+                f"deadband={args_cli.mocopi_arm_joint_deadband:.6f}, "
+                f"max_step={args_cli.mocopi_arm_joint_max_step:.6f}, "
+                f"left_signs={args_cli.mocopi_left_arm_joint_signs}, "
+                f"right_signs={args_cli.mocopi_right_arm_joint_signs}, "
+                f"left_arm_joints={self._left_arm_joint_names}, "
+                f"right_arm_joints={self._right_arm_joint_names}",
+                flush=True,
+            )
         self._left_gripper_joint_ids, self._left_gripper_joint_names = self._robot.find_joints(
             ["left_hand_joint1", "left_.*_Support_Joint"]
         )
@@ -1998,11 +2055,22 @@ class RobotYaoTaskSceneController:
         right_rot_delta_start = RobotYaoWheeledXrRetargeter.RIGHT_ARM_ROT_DELTA_START
         left_scene_rot_delta = command_tensor[left_rot_delta_start : left_rot_delta_start + 3]
         right_scene_rot_delta = command_tensor[right_rot_delta_start : right_rot_delta_start + 3]
+        arm_joint_delta_size = RobotYaoWheeledXrRetargeter.ARM_JOINT_DELTA_SIZE
+        left_direct_joint_delta = torch.zeros(arm_joint_delta_size, dtype=torch.float32, device=self._env.device)
+        right_direct_joint_delta = torch.zeros(arm_joint_delta_size, dtype=torch.float32, device=self._env.device)
+        left_joint_delta_start = RobotYaoWheeledXrRetargeter.LEFT_ARM_JOINT_DELTA_START
+        right_joint_delta_start = RobotYaoWheeledXrRetargeter.RIGHT_ARM_JOINT_DELTA_START
+        if command_tensor.numel() >= left_joint_delta_start + arm_joint_delta_size:
+            left_direct_joint_delta = command_tensor[left_joint_delta_start : left_joint_delta_start + arm_joint_delta_size]
+        if command_tensor.numel() >= right_joint_delta_start + arm_joint_delta_size:
+            right_direct_joint_delta = command_tensor[right_joint_delta_start : right_joint_delta_start + arm_joint_delta_size]
         if body_lift_mode:
             left_scene_delta = torch.zeros_like(left_scene_delta)
             right_scene_delta = torch.zeros_like(right_scene_delta)
             left_scene_rot_delta = torch.zeros_like(left_scene_rot_delta)
             right_scene_rot_delta = torch.zeros_like(right_scene_rot_delta)
+            left_direct_joint_delta = torch.zeros_like(left_direct_joint_delta)
+            right_direct_joint_delta = torch.zeros_like(right_direct_joint_delta)
         raw_left_delta_start = RobotYaoWheeledXrRetargeter.RAW_LEFT_DELTA_START
         raw_right_delta_start = RobotYaoWheeledXrRetargeter.RAW_RIGHT_DELTA_START
         left_controller_delta = command_tensor[raw_left_delta_start : raw_left_delta_start + 3]
@@ -2013,10 +2081,13 @@ class RobotYaoTaskSceneController:
         right_rmpflow_rot_delta = _apply_axis_map_tensor(right_scene_rot_delta, self._right_rmpflow_axis_map)
         arm_position_deadband = max(0.0, float(args_cli.arm_command_position_deadband))
         arm_rotation_deadband = max(0.0, float(args_cli.arm_command_rotation_deadband))
+        mocopi_joint_deadband = max(0.0, float(args_cli.mocopi_arm_joint_deadband))
         left_position_command_norm = float(torch.linalg.norm(left_rmpflow_delta).item())
         left_rotation_command_norm = float(torch.linalg.norm(left_rmpflow_rot_delta).item())
         right_position_command_norm = float(torch.linalg.norm(right_rmpflow_delta).item())
         right_rotation_command_norm = float(torch.linalg.norm(right_rmpflow_rot_delta).item())
+        left_direct_joint_command_norm = float(torch.linalg.norm(left_direct_joint_delta).item())
+        right_direct_joint_command_norm = float(torch.linalg.norm(right_direct_joint_delta).item())
         if left_position_command_norm <= arm_position_deadband:
             left_scene_delta = torch.zeros_like(left_scene_delta)
             left_rmpflow_delta = torch.zeros_like(left_rmpflow_delta)
@@ -2029,6 +2100,14 @@ class RobotYaoTaskSceneController:
         if right_rotation_command_norm <= arm_rotation_deadband:
             right_scene_rot_delta = torch.zeros_like(right_scene_rot_delta)
             right_rmpflow_rot_delta = torch.zeros_like(right_rmpflow_rot_delta)
+        if left_direct_joint_command_norm <= mocopi_joint_deadband:
+            left_direct_joint_delta = torch.zeros_like(left_direct_joint_delta)
+            left_direct_joint_command_norm = 0.0
+        if right_direct_joint_command_norm <= mocopi_joint_deadband:
+            right_direct_joint_delta = torch.zeros_like(right_direct_joint_delta)
+            right_direct_joint_command_norm = 0.0
+        left_has_direct_joint_command = bool(args_cli.mocopi_arm_joint_control and left_direct_joint_command_norm > 0.0)
+        right_has_direct_joint_command = bool(args_cli.mocopi_arm_joint_control and right_direct_joint_command_norm > 0.0)
         left_in_follow_warmup = self._left_arm_follow_warmup_frames > 0
         right_in_follow_warmup = self._right_arm_follow_warmup_frames > 0
         left_target_tracking_active = left_follow_active_bool and not body_lift_mode and not self._left_arm_hold_after_lift
@@ -2048,10 +2127,12 @@ class RobotYaoTaskSceneController:
         left_has_arm_command = bool(
             left_position_action_norm > arm_position_deadband
             or left_rotation_command_norm > arm_rotation_deadband
+            or left_has_direct_joint_command
         )
         right_has_arm_command = bool(
             right_position_action_norm > arm_position_deadband
             or right_rotation_command_norm > arm_rotation_deadband
+            or right_has_direct_joint_command
         )
         drive_left_follow_active_bool = (
             left_follow_active_bool
@@ -2197,8 +2278,8 @@ class RobotYaoTaskSceneController:
                 f"left_hold_after_lift={self._left_arm_hold_after_lift}, right_hold_after_lift={self._right_arm_hold_after_lift}, "
                 f"left_follow_warmup={self._left_arm_follow_warmup_frames}, right_follow_warmup={self._right_arm_follow_warmup_frames}, "
                 f"arm_position_deadband={arm_position_deadband:.6f}, arm_rotation_deadband={arm_rotation_deadband:.6f}, "
-                f"left_command_norms=(mapped_pos={left_position_command_norm:.6f}, action_pos={left_position_action_norm:.6f}, rot={left_rotation_command_norm:.6f}), "
-                f"right_command_norms=(mapped_pos={right_position_command_norm:.6f}, action_pos={right_position_action_norm:.6f}, rot={right_rotation_command_norm:.6f}), "
+                f"left_command_norms=(mapped_pos={left_position_command_norm:.6f}, action_pos={left_position_action_norm:.6f}, rot={left_rotation_command_norm:.6f}, joint={left_direct_joint_command_norm:.6f}), "
+                f"right_command_norms=(mapped_pos={right_position_command_norm:.6f}, action_pos={right_position_action_norm:.6f}, rot={right_rotation_command_norm:.6f}, joint={right_direct_joint_command_norm:.6f}), "
                 f"left_controller_delta_isaac={left_controller_delta.tolist()}, "
                 f"right_controller_delta_isaac={right_controller_delta.tolist()}, "
                 f"left_scene_delta={left_scene_delta.tolist()}, "
@@ -2211,6 +2292,8 @@ class RobotYaoTaskSceneController:
                 f"right_scene_rot_delta={right_scene_rot_delta.tolist()}, "
                 f"left_rmpflow_rot_delta={left_rmpflow_rot_delta.tolist()}, "
                 f"right_rmpflow_rot_delta={right_rmpflow_rot_delta.tolist()}, "
+                f"left_direct_joint_delta={left_direct_joint_delta.tolist()}, "
+                f"right_direct_joint_delta={right_direct_joint_delta.tolist()}, "
                 f"left_axis_map={_format_axis_map(self._left_rmpflow_axis_map)}, right_axis_map={_format_axis_map(self._right_rmpflow_axis_map)}, "
                 f"actual_left_ee_delta_w={None if actual_left_ee_delta_w is None else actual_left_ee_delta_w.tolist()}, "
                 f"actual_right_ee_delta_w={None if actual_right_ee_delta_w is None else actual_right_ee_delta_w.tolist()}, "
@@ -2277,21 +2360,27 @@ class RobotYaoTaskSceneController:
         if has_concurrent_arms:
             if not body_lift_mode:
                 if drive_left_follow_active_bool:
-                    self._apply_arm_action_delta(
-                        actions,
-                        self._left_arm_action_slice,
-                        left_arm_position_action_delta,
-                        left_rmpflow_rot_delta,
-                    )
-                    self._enable_arm_action_term("left_arm_action")
+                    if left_has_direct_joint_command:
+                        self._apply_direct_arm_joint_delta(left_direct_joint_delta, self._left_arm_joint_ids)
+                    else:
+                        self._apply_arm_action_delta(
+                            actions,
+                            self._left_arm_action_slice,
+                            left_arm_position_action_delta,
+                            left_rmpflow_rot_delta,
+                        )
+                        self._enable_arm_action_term("left_arm_action")
                 if drive_right_follow_active_bool:
-                    self._apply_arm_action_delta(
-                        actions,
-                        self._right_arm_action_slice,
-                        right_arm_position_action_delta,
-                        right_rmpflow_rot_delta,
-                    )
-                    self._enable_arm_action_term("right_arm_action")
+                    if right_has_direct_joint_command:
+                        self._apply_direct_arm_joint_delta(right_direct_joint_delta, self._right_arm_joint_ids)
+                    else:
+                        self._apply_arm_action_delta(
+                            actions,
+                            self._right_arm_action_slice,
+                            right_arm_position_action_delta,
+                            right_rmpflow_rot_delta,
+                        )
+                        self._enable_arm_action_term("right_arm_action")
         else:
             arm_action_slice = self._arm_action_slice
             if (
@@ -2309,19 +2398,29 @@ class RobotYaoTaskSceneController:
 
             if has_arm_action and not body_lift_mode:
                 if arm_action_side == "left" and drive_left_follow_active_bool:
-                    self._apply_arm_action_delta(actions, arm_action_slice, left_arm_position_action_delta, left_rmpflow_rot_delta)
-                    self._enable_arm_action_term("arm_action")
+                    if left_has_direct_joint_command:
+                        self._apply_direct_arm_joint_delta(left_direct_joint_delta, self._left_arm_joint_ids)
+                    else:
+                        self._apply_arm_action_delta(actions, arm_action_slice, left_arm_position_action_delta, left_rmpflow_rot_delta)
+                        self._enable_arm_action_term("arm_action")
                 elif arm_action_side == "right" and drive_right_follow_active_bool:
-                    self._apply_arm_action_delta(actions, arm_action_slice, right_arm_position_action_delta, right_rmpflow_rot_delta)
-                    self._enable_arm_action_term("arm_action")
+                    if right_has_direct_joint_command:
+                        self._apply_direct_arm_joint_delta(right_direct_joint_delta, self._right_arm_joint_ids)
+                    else:
+                        self._apply_arm_action_delta(actions, arm_action_slice, right_arm_position_action_delta, right_rmpflow_rot_delta)
+                        self._enable_arm_action_term("arm_action")
 
             if not body_lift_mode and arm_action_side != "left" and drive_left_follow_active_bool:
-                if self._fallback_rmpflow_controller is not None and self._fallback_rmpflow_side == "left":
+                if left_has_direct_joint_command:
+                    self._apply_direct_arm_joint_delta(left_direct_joint_delta, self._left_arm_joint_ids)
+                elif self._fallback_rmpflow_controller is not None and self._fallback_rmpflow_side == "left":
                     self._apply_fallback_rmpflow_delta(left_arm_position_action_delta, left_rmpflow_rot_delta)
                 else:
                     self._apply_direct_arm_delta(left_scene_delta, self._left_arm_joint_ids)
             if not body_lift_mode and arm_action_side != "right" and drive_right_follow_active_bool:
-                if self._fallback_rmpflow_controller is not None and self._fallback_rmpflow_side == "right":
+                if right_has_direct_joint_command:
+                    self._apply_direct_arm_joint_delta(right_direct_joint_delta, self._right_arm_joint_ids)
+                elif self._fallback_rmpflow_controller is not None and self._fallback_rmpflow_side == "right":
                     self._apply_fallback_rmpflow_delta(right_arm_position_action_delta, right_rmpflow_rot_delta)
                 else:
                     self._apply_direct_arm_delta(right_scene_delta, self._right_arm_joint_ids)
@@ -2515,6 +2614,26 @@ class RobotYaoTaskSceneController:
         joint_targets = torch.clamp(joint_targets, min=-2.8, max=2.8)
         self._robot.set_joint_position_target(joint_targets, joint_ids=joint_ids)
 
+    def _apply_direct_arm_joint_delta(self, joint_delta_1d: torch.Tensor, joint_ids: list[int]) -> None:
+        """Apply already-retargeted Mocopi joint deltas directly to robot arm targets."""
+        if len(joint_ids) == 0:
+            return
+        if joint_delta_1d.numel() == 0:
+            return
+        if torch.any(torch.isnan(joint_delta_1d)) or torch.any(torch.isinf(joint_delta_1d)):
+            print("[WARNING] Invalid Mocopi arm joint_delta (NaN/Inf)!", flush=True)
+            joint_delta_1d = torch.zeros_like(joint_delta_1d)
+
+        joint_count = min(len(joint_ids), int(joint_delta_1d.numel()))
+        joint_delta = torch.zeros(
+            (self._env.num_envs, len(joint_ids)), dtype=torch.float32, device=self._env.device
+        )
+        joint_delta[:, :joint_count] = joint_delta_1d[:joint_count].unsqueeze(0)
+        joint_targets = self._robot.data.joint_pos[:, joint_ids].clone() + joint_delta
+        joint_limits = self._robot.data.soft_joint_pos_limits[:, joint_ids, :]
+        joint_targets = torch.clamp(joint_targets, min=joint_limits[..., 0], max=joint_limits[..., 1])
+        self._robot.set_joint_position_target(joint_targets, joint_ids=joint_ids)
+
 
 def _create_unity_control_device() -> RobotYaoXrSubDevice:
     retargeter_cfg = RobotYaoWheeledXrRetargeterCfg(
@@ -2528,10 +2647,19 @@ def _create_unity_control_device() -> RobotYaoXrSubDevice:
         arm_rotation_delta_dead_zone=args_cli.arm_command_rotation_deadband,
         follow_button_mode=args_cli.unity_follow_mode,
         debug_deltas=args_cli.debug_retargeter_deltas,
+        mocopi_arm_joint_control=args_cli.mocopi_arm_joint_control,
+        mocopi_arm_joint_delta_scale=args_cli.mocopi_arm_joint_delta_scale,
+        mocopi_arm_joint_dead_zone=args_cli.mocopi_arm_joint_deadband,
+        mocopi_arm_joint_max_step=args_cli.mocopi_arm_joint_max_step,
+        mocopi_left_joint_signs=args_cli.mocopi_left_arm_joint_signs,
+        mocopi_right_joint_signs=args_cli.mocopi_right_arm_joint_signs,
     )
     retargeter = RobotYaoWheeledXrRetargeter(retargeter_cfg)
+    input_endpoint = args_cli.unity_input_endpoint
+    if args_cli.mocopi_arm_joint_control and args_cli.unity_mocopi_input_endpoint:
+        input_endpoint = f"{input_endpoint},{args_cli.unity_mocopi_input_endpoint}"
     device_cfg = RobotYaoXrSubDeviceCfg(
-        endpoint=args_cli.unity_input_endpoint,
+        endpoint=input_endpoint,
         topic=args_cli.unity_input_topic,
         sim_device=args_cli.device,
         auto_start=True,

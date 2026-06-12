@@ -149,6 +149,15 @@ def _zero_pose() -> np.ndarray:
     return np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 
+def _split_endpoints(endpoint: str) -> list[str]:
+    endpoints = []
+    for item in endpoint.replace(";", ",").split(","):
+        item = item.strip()
+        if item:
+            endpoints.append(item)
+    return endpoints
+
+
 class ZeroMqGameSubDevice(DeviceBase):
     """Isaac Lab hardware device that consumes MGXR tracking packets over ZeroMQ."""
 
@@ -338,7 +347,12 @@ class ZeroMqGameSubDevice(DeviceBase):
             socket.setsockopt(zmq.RCVTIMEO, self._cfg.receive_timeout_ms)
 
             try:
-                socket.connect(self._cfg.endpoint)
+                endpoints = _split_endpoints(self._cfg.endpoint)
+                if not endpoints:
+                    logger.error("ZeroMQ subscriber has no endpoint configured.")
+                    return
+                for endpoint in endpoints:
+                    socket.connect(endpoint)
             except Exception as exc:
                 logger.error("ZeroMQ subscriber connect failed: %s", exc)
                 return
