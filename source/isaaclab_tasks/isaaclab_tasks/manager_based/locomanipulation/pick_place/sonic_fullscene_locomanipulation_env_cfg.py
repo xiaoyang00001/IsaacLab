@@ -29,8 +29,11 @@ deploy 看到"冻结-跳变"状态流 → 站立失稳（主配置 post_init 有
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
+
+from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 
 from . import locomanipulation_g1_env_cfg as _main
 from .sonic_solo_locomanipulation_env_cfg import (
@@ -88,6 +91,25 @@ class SonicFullsceneEventsCfg:
     # 非物理模式下钉死 SONIC 根（物理模式时主配置类体不会生成此字段）
     if hasattr(_MAIN_EVENTS, "fix_sonic_articulation_root"):
         fix_sonic_articulation_root = _MAIN_EVENTS.fix_sonic_articulation_root
+
+    # warehouse.usd 自带 CollisionPlane/CollisionMesh 两块地板碰撞体且未绑物理材质
+    # （PhysX 默认 μ=0.5/average），与 μ=1.0/max 的 GroundPlane 在 z=0 共面叠放——
+    # 脚底接触落在哪块上摩擦就跟谁，侧移/蹬地随机打滑。prestartup 补绑对齐（2026-06-11
+    # USD 排查实锤：USD 内仅传送带/分拣箱有材质，地板两件均无绑定）。
+    bind_warehouse_floor_friction = EventTerm(
+        func=locomanip_mdp.bind_floor_physics_material,
+        mode="prestartup",
+        params={
+            "prim_path_templates": (
+                "/World/envs/env_{}/Background/GroundPlane/CollisionPlane",
+                "/World/envs/env_{}/Background/GroundPlane/CollisionMesh",
+            ),
+            "static_friction": 1.0,
+            "dynamic_friction": 1.0,
+            "restitution": 0.0,
+            "friction_combine_mode": "max",
+        },
+    )
 
     # viewer 开机对准 SONIC 正面；reset（R 键摔倒恢复）后重对一次
     align_viewer_to_sonic_front_startup = _MAIN_EVENTS.align_viewer_to_sonic_front_startup

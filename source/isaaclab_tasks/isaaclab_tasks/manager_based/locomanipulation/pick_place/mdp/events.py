@@ -1248,3 +1248,57 @@ def rotate_conveyor_rollers(
             op = xformable.GetRotateZOp()
         if op:
             op.Set(cumulative_angle_deg)
+
+
+def bind_floor_physics_material(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    prim_path_templates: tuple[str, ...] = (
+        "/World/envs/env_{}/Background/GroundPlane/CollisionPlane",
+        "/World/envs/env_{}/Background/GroundPlane/CollisionMesh",
+    ),
+    material_prim_path: str = "/World/PhysicsMaterials/SonicFloorMaterial",
+    static_friction: float = 1.0,
+    dynamic_friction: float = 1.0,
+    restitution: float = 0.0,
+    friction_combine_mode: str = "max",
+):
+    """给场景 USD 自带的地板碰撞体补绑显式物理材质。
+
+    warehouse.usd 的 ``/Root/GroundPlane/CollisionPlane``（无限平面）与 ``CollisionMesh``
+    都没有绑定物理材质，PhysX 落到默认 μ=0.5 / combine=average。它们与场景配置里
+    μ=1.0/max 的 GroundPlane 在 z=0 完全共面——脚底接触分配到哪块碰撞体，摩擦就跟谁，
+    蹬地/侧移工况会随机打滑（闭环七条件之一即显式 μ=1.0，solo 场景无此叠层问题）。
+    prestartup 一次性补绑，使所有共面地板摩擦一致。
+    """
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    material_cfg = sim_utils.RigidBodyMaterialCfg(
+        static_friction=static_friction,
+        dynamic_friction=dynamic_friction,
+        restitution=restitution,
+        friction_combine_mode=friction_combine_mode,
+    )
+    if not stage.GetPrimAtPath(material_prim_path).IsValid():
+        material_cfg.func(material_prim_path, material_cfg)
+
+    for env_id in env_ids.tolist():
+        for template in prim_path_templates:
+            prim_path = template.format(env_id)
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                _diag_print(f"[locomanip_event] bind_floor_physics_material: prim not found: {prim_path}")
+                continue
+            try:
+                sim_utils.bind_physics_material(prim_path, material_prim_path, stage=stage)
+                _diag_print(
+                    f"[locomanip_event] bind_floor_physics_material: {prim_path} -> "
+                    f"mu={static_friction}/{dynamic_friction} combine={friction_combine_mode}"
+                )
+            except Exception as exc:
+                _diag_print(f"[locomanip_event] bind_floor_physics_material: failed on {prim_path}: {exc}")
