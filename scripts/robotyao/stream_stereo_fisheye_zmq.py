@@ -7,7 +7,7 @@ Usage examples:
 
     isaaclab.bat -p scripts/robotyao/stream_stereo_fisheye_zmq.py --headless
     isaaclab.bat -p scripts/robotyao/stream_stereo_fisheye_zmq.py --width 960 --height 960
-
+   .\isaaclab.bat -p .\scripts\robotyao\stream_stereo_fisheye_zmq.py --task-scene --task-use-rmpflow --allow-remote-rmpflow-assets --unity-control --debug-perf-timing --width 1920 --height 1920 --encoding h264 --stereo-pack side_by_side --h264-codec h264_nvenc --fps 0 --print_every 60 --task-runtime-render-interval 0
 The stream is a PUB multipart message:
 
     [topic, header_json, left_image_bytes, right_image_bytes]
