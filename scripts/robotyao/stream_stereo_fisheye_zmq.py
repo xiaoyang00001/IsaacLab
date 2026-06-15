@@ -22,7 +22,9 @@ import io
 import json
 import math
 import os
+import queue
 import random
+import threading
 import traceback
 import time
 from fractions import Fraction
@@ -67,9 +69,27 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--encoding", choices=["h264", "jpg"], default="h264", help="Image payload encoding.")
+parser.add_argument(
+    "--stereo-pack",
+    choices=["separate", "side_by_side"],
+    default="side_by_side",
+    help=(
+        "Stereo payload layout. 'side_by_side' sends one packed left-right payload for lower encode overhead; "
+        "'separate' sends left/right payloads for compatibility."
+    ),
+)
 parser.add_argument("--jpeg_quality", type=int, default=85, help="JPEG quality when --encoding jpg is used.")
 parser.add_argument("--h264_bitrate", type=int, default=12_000_000, help="H264 target bitrate per eye.")
 parser.add_argument("--h264_gop", type=int, default=30, help="H264 keyframe interval per eye.")
+parser.add_argument(
+    "--h264-codec",
+    type=str,
+    default="auto",
+    help=(
+        "PyAV H264 encoder name. 'auto' tries h264_nvenc first and falls back to libx264. "
+        "Use libx264 for software compatibility or h264_nvenc to force NVIDIA NVENC."
+    ),
+)
 parser.add_argument("--h264_preset", type=str, default="ultrafast", help="libx264 preset.")
 parser.add_argument("--h264_profile", type=str, default="baseline", help="libx264 profile.")
 parser.add_argument("--baseline", type=float, default=0.064, help="Stereo camera baseline in meters.")
@@ -101,6 +121,22 @@ parser.add_argument(
     help="Print average per-frame timing for control, physics, camera, CPU copy, encoding, and ZMQ send.",
 )
 parser.add_argument(
+    "--debug-task-step-breakdown",
+    action="store_true",
+    help="Profile ManagerBasedRLEnv.step internals for the task scene. Requires --debug-perf-timing to print.",
+)
+parser.add_argument(
+    "--sync-stream",
+    action="store_true",
+    help="Disable the async encode/send worker and block the simulation loop on video publishing.",
+)
+parser.add_argument(
+    "--async-stream-queue-size",
+    type=int,
+    default=1,
+    help="Raw frame queue size for async streaming. 1 keeps only the latest frame and minimizes teleop latency.",
+)
+parser.add_argument(
     "--task-scene",
     action="store_true",
     help="Run the registered Isaac Lab Agibot Toy2Box task scene instead of the built-in simple test scene.",
@@ -116,6 +152,41 @@ parser.add_argument(
     "--task-use-rmpflow",
     action="store_true",
     help="Use the task's original RMPFlow arm action. Requires Agibot RMPFlow assets to be available.",
+)
+parser.add_argument(
+    "--task-env-render-interval",
+    type=int,
+    default=0,
+    help=(
+        "Override task env sim.render_interval. 0 keeps the task config default. "
+        "Large values can be tested to avoid env.step internal rendering, but may affect sensor startup."
+    ),
+)
+parser.add_argument(
+    "--task-runtime-render-interval",
+    type=int,
+    default=0,
+    help=(
+        "Override env.cfg.sim.render_interval after task/camera initialization. "
+        "0 keeps the runtime default. Large values are experimental and may affect Kit/RTX sensor responsiveness."
+    ),
+)
+parser.add_argument(
+    "--task-decimation",
+    type=int,
+    default=1,
+    help="Override task env decimation. Default 1 favors low-latency teleop; 0 keeps the task config default.",
+)
+parser.add_argument(
+    "--task-full-rl-step",
+    action="store_true",
+    help="Use Isaac Lab's full ManagerBasedRLEnv.step instead of the lighter streaming step.",
+)
+parser.add_argument(
+    "--task-sim-dt",
+    type=float,
+    default=0.0,
+    help="Override task physics dt in seconds. 0 keeps the task config default.",
 )
 parser.add_argument(
     "--allow-remote-rmpflow-assets",
@@ -620,9 +691,13 @@ class RobotYaoPerfMeter:
             return
 
         parts = []
+        printed_names = set()
         for name in ("control", "step", "camera", "copy", "encode", "send", "total"):
             if name in self._totals:
                 parts.append(f"{name}={1000.0 * self._totals[name] / self._count:.1f}ms")
+                printed_names.add(name)
+        for name in sorted(set(self._totals.keys()) - printed_names):
+            parts.append(f"{name}={1000.0 * self._totals[name] / self._count:.1f}ms")
         print(
             f"[RobotYao] perf {self._label}: samples={self._count} frame_id={frame_id} "
             + " ".join(parts),
@@ -931,6 +1006,7 @@ class H264EyeEncoder:
         fps: float,
         bitrate: int,
         gop: int,
+        codec_name: str,
         preset: str,
         profile: str,
     ):
@@ -941,30 +1017,92 @@ class H264EyeEncoder:
             )
 
         rate = Fraction(max(float(fps), 1.0)).limit_denominator(1000)
-        self._codec = av.CodecContext.create("libx264", "w")
-        self._codec.width = int(width)
-        self._codec.height = int(height)
-        self._codec.pix_fmt = "yuv420p"
-        self._codec.time_base = Fraction(rate.denominator, rate.numerator)
-        self._codec.framerate = rate
-        self._codec.bit_rate = int(bitrate)
-        self._codec.gop_size = max(int(gop), 1)
-        self._codec.max_b_frames = 0
-        self._codec.options = {
-            "preset": preset,
-            "tune": "zerolatency",
-            "profile": profile,
-            "x264-params": (
-                f"keyint={max(int(gop), 1)}:"
-                f"min-keyint={max(int(gop), 1)}:"
-                "scenecut=0:"
-                "repeat-headers=1:"
-                "bframes=0:"
-                "aud=1"
-            ),
-        }
-        self._codec.open()
+        requested_codec = str(codec_name or "auto").strip() or "auto"
+        codec_candidates = ["h264_nvenc", "libx264"] if requested_codec == "auto" else [requested_codec]
+        errors: list[str] = []
+        self._codec = None
+        self._codec_name = ""
+        self._codec_preset = ""
+
+        for candidate_codec in codec_candidates:
+            for candidate_preset in self._preset_candidates(candidate_codec, preset):
+                try:
+                    codec = av.CodecContext.create(candidate_codec, "w")
+                    codec.width = int(width)
+                    codec.height = int(height)
+                    codec.pix_fmt = "yuv420p"
+                    codec.time_base = Fraction(rate.denominator, rate.numerator)
+                    codec.framerate = rate
+                    codec.bit_rate = int(bitrate)
+                    codec.gop_size = max(int(gop), 1)
+                    codec.max_b_frames = 0
+                    codec.options = self._codec_options(candidate_codec, candidate_preset, profile, gop)
+                    codec.open()
+                    self._codec = codec
+                    self._codec_name = candidate_codec
+                    self._codec_preset = candidate_preset
+                    if requested_codec == "auto":
+                        preset_text = f", preset={candidate_preset}" if candidate_preset else ""
+                        print(
+                            f"[RobotYao] H264 encoder selected: codec={candidate_codec}{preset_text}, "
+                            f"size={int(width)}x{int(height)}, bitrate={int(bitrate)}",
+                            flush=True,
+                        )
+                    break
+                except Exception as exc:
+                    preset_text = candidate_preset if candidate_preset else "<none>"
+                    errors.append(f"{candidate_codec}/{preset_text}: {exc}")
+            if self._codec is not None:
+                break
+
+        if self._codec is None:
+            raise RuntimeError(
+                f"Failed to open PyAV H264 encoder '{requested_codec}'. "
+                "Use --h264-codec libx264 for software encoding, or make sure the active FFmpeg build supports "
+                "NVIDIA NVENC when using h264_nvenc/auto. Attempts: " + " | ".join(errors)
+            )
         self._frame_index = 0
+
+    @staticmethod
+    def _preset_candidates(codec_name: str, preset: str) -> list[str]:
+        requested = str(preset or "").strip()
+        if codec_name == "libx264":
+            return [requested or "ultrafast"]
+        candidates: list[str] = []
+        if requested and requested != "ultrafast":
+            candidates.append(requested)
+        for fallback in ("p1", "llhp", "fast", ""):
+            if fallback not in candidates:
+                candidates.append(fallback)
+        return candidates
+
+    @staticmethod
+    def _codec_options(codec_name: str, preset: str, profile: str, gop: int) -> dict[str, str]:
+        if codec_name == "libx264":
+            return {
+                "preset": preset or "ultrafast",
+                "tune": "zerolatency",
+                "profile": profile,
+                "x264-params": (
+                    f"keyint={max(int(gop), 1)}:"
+                    f"min-keyint={max(int(gop), 1)}:"
+                    "scenecut=0:"
+                    "repeat-headers=1:"
+                    "bframes=0:"
+                    "aud=1"
+                ),
+            }
+        if preset:
+            return {"preset": preset}
+        return {}
+
+    @property
+    def codec_name(self) -> str:
+        return self._codec_name
+
+    @property
+    def codec_preset(self) -> str:
+        return self._codec_preset
 
     def encode(self, rgb: np.ndarray) -> bytes:
         frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
@@ -982,32 +1120,203 @@ def _h264_stream_fps_hint() -> float:
     return float(args_cli.fps) if float(args_cli.fps) > 0.0 else 60.0
 
 
+def _compose_stereo_side_by_side(left_rgb: np.ndarray, right_rgb: np.ndarray) -> np.ndarray:
+    """Pack left and right eye RGB images into one side-by-side RGB image."""
+    if left_rgb.shape != right_rgb.shape:
+        raise ValueError(f"Stereo eye shapes do not match: left={left_rgb.shape}, right={right_rgb.shape}")
+    height, width = left_rgb.shape[:2]
+    packed = np.empty((height, width * 2, left_rgb.shape[2]), dtype=np.uint8)
+    packed[:, :width, :] = left_rgb
+    packed[:, width:, :] = right_rgb
+    return packed
+
+
+def _stereo_payload_dimensions() -> tuple[int, int, int, int]:
+    eye_width = int(args_cli.width)
+    eye_height = int(args_cli.height)
+    if args_cli.stereo_pack == "side_by_side":
+        return eye_width * 2, eye_height, eye_width, eye_height
+    return eye_width, eye_height, eye_width, eye_height
+
+
+def _make_stereo_header_base(frame_id: int) -> dict:
+    payload_width, payload_height, eye_width, eye_height = _stereo_payload_dimensions()
+    payload_count = 1 if args_cli.stereo_pack == "side_by_side" else 2
+    h264_bitrate = int(args_cli.h264_bitrate) * (2 if args_cli.stereo_pack == "side_by_side" else 1)
+    return {
+        "version": 1,
+        "frame_id": int(frame_id),
+        "timestamp_ns": int(time.time_ns()),
+        "width": int(payload_width),
+        "height": int(payload_height),
+        "eye_width": int(eye_width),
+        "eye_height": int(eye_height),
+        "stereo_pack": args_cli.stereo_pack,
+        "payload_count": int(payload_count),
+        "encoding": args_cli.encoding,
+        "pixel_format": "rgb8",
+        "quality": int(args_cli.jpeg_quality) if args_cli.encoding == "jpg" else None,
+        "h264": {
+            "annex_b": True,
+            "codec": args_cli.h264_codec,
+            "bitrate": int(h264_bitrate),
+            "gop": int(args_cli.h264_gop),
+            "profile": args_cli.h264_profile,
+            "preset": args_cli.h264_preset,
+            "source_format": "rgb24",
+            "encoded_format": "yuv420p",
+        }
+        if args_cli.encoding == "h264"
+        else None,
+        "eye_order": "left_right",
+        "baseline_m": float(args_cli.baseline),
+        "fisheye": {
+            "model": "fisheyePolynomial",
+            "fov_deg": float(args_cli.fisheye_fov),
+            "cx": float(eye_width) * 0.5,
+            "cy": float(eye_height) * 0.5,
+            "radius": min(float(eye_width), float(eye_height)) * 0.5,
+            "radius_px": min(float(eye_width), float(eye_height)) * 0.5,
+            "poly_a": 0.0,
+            "poly_b": _fisheye_full_frame_poly_b(eye_width, eye_height, args_cli.fisheye_fov),
+            "poly_c": 0.0,
+            "poly_d": 0.0,
+            "poly_e": 0.0,
+            "poly_f": 0.0,
+        },
+    }
+
+
+def _make_task_scene_stereo_header(frame_id: int, task_controller) -> dict:
+    header = _make_stereo_header_base(frame_id)
+    header.update({
+        "scene": {
+            "mode": "task",
+            "task": args_cli.task,
+            "robot": "Agibot A2D",
+        },
+        "camera_mount": {
+            "mode": args_cli.task_camera_mount,
+            "frame": (
+                f"Robot/{args_cli.task_camera_head_link}"
+                if args_cli.task_camera_mount == "head_link"
+                else "agibot_root_yaw"
+            ),
+            "head_link": args_cli.task_camera_head_link if args_cli.task_camera_mount == "head_link" else None,
+            "head_rig_translate_m": [
+                float(args_cli.task_camera_head_rig_x),
+                float(args_cli.task_camera_head_rig_y),
+                float(args_cli.task_camera_head_rig_z),
+            ]
+            if args_cli.task_camera_mount == "head_link"
+            else None,
+            "head_rig_orient_xyz_deg": [
+                float(args_cli.task_camera_head_rig_roll_deg),
+                float(args_cli.task_camera_head_rig_pitch_deg),
+                float(args_cli.task_camera_head_rig_yaw_deg),
+            ]
+            if args_cli.task_camera_mount == "head_link"
+            else None,
+            "head_local_forward_offset_m": float(args_cli.task_camera_head_forward_offset)
+            if args_cli.task_camera_mount == "head_link"
+            else None,
+            "head_local_up_offset_m": float(args_cli.task_camera_head_up_offset)
+            if args_cli.task_camera_mount == "head_link"
+            else None,
+            "head_local_look_down_deg": float(args_cli.task_camera_head_look_down_deg)
+            if args_cli.task_camera_mount == "head_link"
+            else None,
+            "root_forward_offset_m": float(args_cli.task_camera_forward_offset)
+            if args_cli.task_camera_mount == "root"
+            else None,
+            "root_height_offset_m": float(args_cli.task_camera_height_offset)
+            if args_cli.task_camera_mount == "root"
+            else None,
+            "root_look_down_deg": float(args_cli.task_camera_look_down_deg)
+            if args_cli.task_camera_mount == "root"
+            else None,
+            "left_world_pos": task_controller.last_camera_positions[0]
+            if task_controller is not None and len(task_controller.last_camera_positions) > 0
+            else None,
+            "right_world_pos": task_controller.last_camera_positions[1]
+            if task_controller is not None and len(task_controller.last_camera_positions) > 1
+            else None,
+            "left_world_target": task_controller.last_camera_targets[0]
+            if task_controller is not None and len(task_controller.last_camera_targets) > 0
+            else None,
+            "right_world_target": task_controller.last_camera_targets[1]
+            if task_controller is not None and len(task_controller.last_camera_targets) > 1
+            else None,
+        },
+    })
+    return header
+
+
 class StereoH264Encoder:
     def __init__(self):
         stream_fps = _h264_stream_fps_hint()
-        self._left = H264EyeEncoder(
-            args_cli.width,
-            args_cli.height,
-            stream_fps,
-            args_cli.h264_bitrate,
-            args_cli.h264_gop,
-            args_cli.h264_preset,
-            args_cli.h264_profile,
-        )
-        self._right = H264EyeEncoder(
-            args_cli.width,
-            args_cli.height,
-            stream_fps,
-            args_cli.h264_bitrate,
-            args_cli.h264_gop,
-            args_cli.h264_preset,
-            args_cli.h264_profile,
-        )
+        self._pack = args_cli.stereo_pack
+        if self._pack == "side_by_side":
+            self._stereo = H264EyeEncoder(
+                int(args_cli.width) * 2,
+                int(args_cli.height),
+                stream_fps,
+                int(args_cli.h264_bitrate) * 2,
+                args_cli.h264_gop,
+                args_cli.h264_codec,
+                args_cli.h264_preset,
+                args_cli.h264_profile,
+            )
+            self._left = None
+            self._right = None
+        else:
+            self._stereo = None
+            self._left = H264EyeEncoder(
+                args_cli.width,
+                args_cli.height,
+                stream_fps,
+                args_cli.h264_bitrate,
+                args_cli.h264_gop,
+                args_cli.h264_codec,
+                args_cli.h264_preset,
+                args_cli.h264_profile,
+            )
+            self._right = H264EyeEncoder(
+                args_cli.width,
+                args_cli.height,
+                stream_fps,
+                args_cli.h264_bitrate,
+                args_cli.h264_gop,
+                args_cli.h264_codec,
+                args_cli.h264_preset,
+                args_cli.h264_profile,
+            )
 
-    def encode(self, left_rgb: np.ndarray, right_rgb: np.ndarray) -> tuple[bytes, bytes]:
+    @property
+    def codec_name(self) -> str:
+        if self._stereo is not None:
+            return self._stereo.codec_name
+        if self._left.codec_name == self._right.codec_name:
+            return self._left.codec_name
+        return f"{self._left.codec_name},{self._right.codec_name}"
+
+    @property
+    def codec_preset(self) -> str:
+        if self._stereo is not None:
+            return self._stereo.codec_preset
+        if self._left.codec_preset == self._right.codec_preset:
+            return self._left.codec_preset
+        return f"{self._left.codec_preset},{self._right.codec_preset}"
+
+    def encode(self, left_rgb: np.ndarray, right_rgb: np.ndarray) -> tuple[bytes, ...]:
+        if self._pack == "side_by_side":
+            return (self._stereo.encode(_compose_stereo_side_by_side(left_rgb, right_rgb)),)
         return self._left.encode(left_rgb), self._right.encode(right_rgb)
 
     def close(self):
+        if self._stereo is not None:
+            self._stereo.close()
+            return
         self._left.close()
         self._right.close()
 
@@ -1027,6 +1336,12 @@ def _encode_jpeg(rgb: np.ndarray, jpeg_quality: int) -> bytes:
     stream = io.BytesIO()
     Image.fromarray(rgb, mode="RGB").save(stream, format="JPEG", quality=int(jpeg_quality), optimize=False)
     return stream.getvalue()
+
+
+def _encode_stereo_jpeg_payloads(left_rgb: np.ndarray, right_rgb: np.ndarray) -> tuple[bytes, ...]:
+    if args_cli.stereo_pack == "side_by_side":
+        return (_encode_jpeg(_compose_stereo_side_by_side(left_rgb, right_rgb), args_cli.jpeg_quality),)
+    return _encode_jpeg(left_rgb, args_cli.jpeg_quality), _encode_jpeg(right_rgb, args_cli.jpeg_quality)
 
 
 def _save_rgb_png(rgb: np.ndarray, output_path: str) -> None:
@@ -1070,9 +1385,154 @@ class StereoZmqPublisher:
         self._socket.close(0)
         self._context.term()
 
-    def send(self, header: dict, left_payload: bytes, right_payload: bytes):
+    def send(self, header: dict, *payloads: bytes):
+        if not payloads:
+            raise ValueError("Stereo publisher requires at least one payload.")
         header_payload = json.dumps(header, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-        self._socket.send_multipart([self._topic, header_payload, left_payload, right_payload], flags=zmq.NOBLOCK)
+        self._socket.send_multipart([self._topic, header_payload, *payloads], flags=zmq.NOBLOCK)
+
+
+class AsyncStereoStreamPublisher:
+    """Encode and publish stereo frames on a worker thread so simulation is not video-bound."""
+
+    def __init__(self, endpoint: str, topic: str, label: str):
+        self._endpoint = endpoint
+        self._topic = topic
+        self._label = label
+        self._queue: queue.Queue = queue.Queue(maxsize=max(1, int(args_cli.async_stream_queue_size)))
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+        self._submitted = 0
+        self._published = 0
+        self._dropped = 0
+        self._last_payload_bytes = 0
+        self._encode_total = 0.0
+        self._send_total = 0.0
+        self._codec_name = str(args_cli.h264_codec)
+        self._codec_preset = str(args_cli.h264_preset)
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, name=f"RobotYao-{label}-stream", daemon=True)
+        self._thread.start()
+
+    def wait_until_ready(self, timeout: float = 10.0) -> None:
+        self._ready.wait(timeout=max(float(timeout), 0.0))
+        with self._lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError(f"Async stereo stream worker failed to start: {error}") from error
+
+    @property
+    def codec_name(self) -> str:
+        with self._lock:
+            return self._codec_name
+
+    @property
+    def codec_preset(self) -> str:
+        with self._lock:
+            return self._codec_preset
+
+    def submit(self, header: dict, left_rgb: np.ndarray, right_rgb: np.ndarray) -> bool:
+        if self._stop.is_set():
+            return False
+        item = (header, left_rgb, right_rgb)
+        with self._lock:
+            error = self._error
+        if error is not None:
+            print(f"[RobotYao] Async stereo stream worker error: {error}", flush=True)
+            return False
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                with self._lock:
+                    self._dropped += 1
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                with self._lock:
+                    self._dropped += 1
+                return False
+        with self._lock:
+            self._submitted += 1
+        return True
+
+    def stats(self) -> dict[str, float | int | str]:
+        with self._lock:
+            encode_avg = self._encode_total / self._published if self._published > 0 else 0.0
+            send_avg = self._send_total / self._published if self._published > 0 else 0.0
+            return {
+                "submitted": self._submitted,
+                "published": self._published,
+                "dropped": self._dropped,
+                "last_payload_bytes": self._last_payload_bytes,
+                "encode_avg": encode_avg,
+                "send_avg": send_avg,
+                "codec_name": self._codec_name,
+                "codec_preset": self._codec_preset,
+            }
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        publisher = None
+        encoder = None
+        try:
+            publisher = StereoZmqPublisher(self._endpoint, self._topic)
+            encoder = StereoH264Encoder() if args_cli.encoding == "h264" else None
+            if encoder is not None:
+                with self._lock:
+                    self._codec_name = encoder.codec_name
+                    self._codec_preset = encoder.codec_preset
+            self._ready.set()
+
+            while not self._stop.is_set() or not self._queue.empty():
+                try:
+                    header, left_rgb, right_rgb = self._queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                encode_t0 = time.perf_counter()
+                if encoder is not None:
+                    payloads = encoder.encode(left_rgb, right_rgb)
+                    if any(not payload for payload in payloads):
+                        continue
+                    h264_header = header.get("h264")
+                    if isinstance(h264_header, dict):
+                        h264_header["codec"] = encoder.codec_name
+                        h264_header["preset"] = encoder.codec_preset
+                else:
+                    payloads = _encode_stereo_jpeg_payloads(left_rgb, right_rgb)
+                encode_t1 = time.perf_counter()
+                send_t0 = time.perf_counter()
+                publisher.send(header, *payloads)
+                send_t1 = time.perf_counter()
+                with self._lock:
+                    self._published += 1
+                    self._last_payload_bytes = sum(len(payload) for payload in payloads)
+                    self._encode_total += encode_t1 - encode_t0
+                    self._send_total += send_t1 - send_t0
+        except BaseException as exc:
+            with self._lock:
+                self._error = exc
+            print(f"[RobotYao] Async stereo stream worker stopped with error: {exc}", flush=True)
+            traceback.print_exc()
+            self._ready.set()
+        finally:
+            if encoder is not None:
+                try:
+                    encoder.close()
+                except Exception as exc:
+                    print(f"[RobotYao] Failed to close async H264 encoder: {exc}", flush=True)
+            if publisher is not None:
+                try:
+                    publisher.close()
+                except Exception as exc:
+                    print(f"[RobotYao] Failed to close async stereo publisher: {exc}", flush=True)
 
 
 def _set_xform_common(path: str, translation: np.ndarray, yaw_rad: float | None = None) -> None:
@@ -2860,7 +3320,20 @@ def _create_task_scene_env():
         args_cli.task_use_rmpflow = False
     if hasattr(env_cfg, "terminations") and hasattr(env_cfg.terminations, "time_out"):
         env_cfg.terminations.time_out = None
-    env_cfg.sim.render_interval = 1
+    if float(args_cli.task_sim_dt) > 0.0 and hasattr(env_cfg, "sim"):
+        env_cfg.sim.dt = float(args_cli.task_sim_dt)
+    if int(args_cli.task_env_render_interval) > 0 and hasattr(env_cfg, "sim"):
+        env_cfg.sim.render_interval = int(args_cli.task_env_render_interval)
+    if int(args_cli.task_decimation) > 0 and hasattr(env_cfg, "decimation"):
+        env_cfg.decimation = int(args_cli.task_decimation)
+    sim_dt = getattr(getattr(env_cfg, "sim", None), "dt", None)
+    sim_render_interval = getattr(getattr(env_cfg, "sim", None), "render_interval", None)
+    sim_decimation = getattr(env_cfg, "decimation", None)
+    print(
+        "[RobotYao] Task sim timing: "
+        f"dt={sim_dt}, decimation={sim_decimation}, render_interval={sim_render_interval}",
+        flush=True,
+    )
     if hasattr(env_cfg, "observations"):
         # Streaming only needs the task scene and action manager. Heavy task-only observations
         # are disabled here to avoid waiting on frame/contact sensor data during startup.
@@ -2930,6 +3403,168 @@ def _reset_task_scene_runtime(
     _reset_camera_or_pair(camera)
 
 
+def _apply_task_runtime_render_interval(env) -> None:
+    runtime_interval = int(args_cli.task_runtime_render_interval)
+    if runtime_interval <= 0:
+        return
+    previous_interval = getattr(env.cfg.sim, "render_interval", None)
+    env.cfg.sim.render_interval = runtime_interval
+    print(
+        "[RobotYao] Task runtime render_interval override: "
+        f"{previous_interval} -> {env.cfg.sim.render_interval}",
+        flush=True,
+    )
+
+
+def _profiled_task_env_step(env, actions: torch.Tensor) -> dict[str, float]:
+    """Run ManagerBasedRLEnv.step with coarse internal timings for task-scene profiling."""
+    timings: dict[str, float] = {}
+
+    t0 = time.perf_counter()
+    env.action_manager.process_action(actions.to(env.device))
+    t1 = time.perf_counter()
+    env.recorder_manager.record_pre_step()
+    t2 = time.perf_counter()
+
+    is_rendering = env.sim.has_gui() or env.sim.has_rtx_sensors()
+    render_interval = max(int(getattr(env.cfg.sim, "render_interval", 1)), 1)
+    action_apply_total = 0.0
+    write_total = 0.0
+    sim_total = 0.0
+    render_total = 0.0
+    recorder_decimation_total = 0.0
+    scene_update_total = 0.0
+
+    for _ in range(env.cfg.decimation):
+        env._sim_step_counter += 1
+        td0 = time.perf_counter()
+        env.action_manager.apply_action()
+        td1 = time.perf_counter()
+        env.scene.write_data_to_sim()
+        td2 = time.perf_counter()
+        env.sim.step(render=False)
+        td3 = time.perf_counter()
+        env.recorder_manager.record_post_physics_decimation_step()
+        td4 = time.perf_counter()
+        if env._sim_step_counter % render_interval == 0 and is_rendering:
+            env.sim.render()
+        td5 = time.perf_counter()
+        env.scene.update(dt=env.physics_dt)
+        td6 = time.perf_counter()
+
+        action_apply_total += td1 - td0
+        write_total += td2 - td1
+        sim_total += td3 - td2
+        recorder_decimation_total += td4 - td3
+        render_total += td5 - td4
+        scene_update_total += td6 - td5
+
+    tp0 = time.perf_counter()
+    env.episode_length_buf += 1
+    env.common_step_counter += 1
+    tp1 = time.perf_counter()
+    env.reset_buf = env.termination_manager.compute()
+    env.reset_terminated = env.termination_manager.terminated
+    env.reset_time_outs = env.termination_manager.time_outs
+    tp2 = time.perf_counter()
+    env.reward_buf = env.reward_manager.compute(dt=env.step_dt)
+    tp3 = time.perf_counter()
+    if len(env.recorder_manager.active_terms) > 0:
+        env.obs_buf = env.observation_manager.compute()
+        env.recorder_manager.record_post_step()
+    tp4 = time.perf_counter()
+
+    reset_env_ids = env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+    if len(reset_env_ids) > 0:
+        env.recorder_manager.record_pre_reset(reset_env_ids)
+        env._reset_idx(reset_env_ids)
+        if env.sim.has_rtx_sensors() and env.cfg.num_rerenders_on_reset > 0:
+            for _ in range(env.cfg.num_rerenders_on_reset):
+                env.sim.render()
+        env.recorder_manager.record_post_reset(reset_env_ids)
+    tp5 = time.perf_counter()
+
+    env.command_manager.compute(dt=env.step_dt)
+    tp6 = time.perf_counter()
+    if "interval" in env.event_manager.available_modes:
+        env.event_manager.apply(mode="interval", dt=env.step_dt)
+    tp7 = time.perf_counter()
+    env.obs_buf = env.observation_manager.compute(update_history=True)
+    tp8 = time.perf_counter()
+
+    timings["action_process"] = t1 - t0
+    timings["recorder_pre"] = t2 - t1
+    timings["action_apply"] = action_apply_total
+    timings["write_data"] = write_total
+    timings["sim_step"] = sim_total
+    timings["recorder_decimation"] = recorder_decimation_total
+    timings["env_internal_render"] = render_total
+    timings["scene_update"] = scene_update_total
+    timings["counter"] = tp1 - tp0
+    timings["termination"] = tp2 - tp1
+    timings["reward"] = tp3 - tp2
+    timings["recorder_post"] = tp4 - tp3
+    timings["reset"] = tp5 - tp4
+    timings["command"] = tp6 - tp5
+    timings["event"] = tp7 - tp6
+    timings["observation"] = tp8 - tp7
+    return timings
+
+
+def _streaming_task_env_step(env, actions: torch.Tensor, *, collect_timings: bool = False) -> dict[str, float]:
+    """Step only the pieces required for RobotYao streaming teleop."""
+    timings: dict[str, float] = {}
+
+    t0 = time.perf_counter()
+    env.action_manager.process_action(actions.to(env.device))
+    t1 = time.perf_counter()
+
+    is_rendering = env.sim.has_gui() or env.sim.has_rtx_sensors()
+    render_interval = max(int(getattr(env.cfg.sim, "render_interval", 1)), 1)
+    action_apply_total = 0.0
+    write_total = 0.0
+    sim_total = 0.0
+    render_total = 0.0
+    scene_update_total = 0.0
+
+    for _ in range(env.cfg.decimation):
+        env._sim_step_counter += 1
+        td0 = time.perf_counter()
+        env.action_manager.apply_action()
+        td1 = time.perf_counter()
+        env.scene.write_data_to_sim()
+        td2 = time.perf_counter()
+        env.sim.step(render=False)
+        td3 = time.perf_counter()
+        if env._sim_step_counter % render_interval == 0 and is_rendering:
+            env.sim.render()
+        td4 = time.perf_counter()
+        env.scene.update(dt=env.physics_dt)
+        td5 = time.perf_counter()
+
+        if collect_timings:
+            action_apply_total += td1 - td0
+            write_total += td2 - td1
+            sim_total += td3 - td2
+            render_total += td4 - td3
+            scene_update_total += td5 - td4
+
+    tc0 = time.perf_counter()
+    env.episode_length_buf += 1
+    env.common_step_counter += 1
+    tc1 = time.perf_counter()
+
+    if collect_timings:
+        timings["action_process"] = t1 - t0
+        timings["action_apply"] = action_apply_total
+        timings["write_data"] = write_total
+        timings["sim_step"] = sim_total
+        timings["env_internal_render"] = render_total
+        timings["scene_update"] = scene_update_total
+        timings["counter"] = tc1 - tc0
+    return timings
+
+
 def run_task_scene_simulator(
     env,
     camera: Camera | tuple[Camera, Camera],
@@ -2937,8 +3572,19 @@ def run_task_scene_simulator(
     task_controller: RobotYaoTaskSceneController | None = None,
 ):
     """Run the registered task scene while publishing stereo fisheye frames."""
-    publisher = StereoZmqPublisher(args_cli.endpoint, args_cli.topic)
-    h264_encoder = StereoH264Encoder() if args_cli.encoding == "h264" else None
+    async_stream = None if args_cli.sync_stream else AsyncStereoStreamPublisher(args_cli.endpoint, args_cli.topic, "task_scene")
+    publisher = None
+    h264_encoder = None
+    if async_stream is not None:
+        async_stream.wait_until_ready()
+        args_cli.h264_codec = async_stream.codec_name
+        args_cli.h264_preset = async_stream.codec_preset
+    else:
+        publisher = StereoZmqPublisher(args_cli.endpoint, args_cli.topic)
+        h264_encoder = StereoH264Encoder() if args_cli.encoding == "h264" else None
+        if h264_encoder is not None:
+            args_cli.h264_codec = h264_encoder.codec_name
+            args_cli.h264_preset = h264_encoder.codec_preset
     publish_interval = 0.0
     next_publish_time = time.perf_counter()
     published = 0
@@ -2947,13 +3593,16 @@ def run_task_scene_simulator(
     start_time = time.perf_counter()
     fps_hud = RobotYaoFpsHud("RobotYao FPS")
     perf_meter = RobotYaoPerfMeter("task_scene")
+    step_breakdown_meter = RobotYaoPerfMeter("task_step_breakdown")
     stream_stride = max(1, int(args_cli.stream_every_n_frames))
 
     print(
         "[RobotYao] Streaming Agibot task stereo RGB fisheye frames "
         f"task={args_cli.task}, {args_cli.width}x{args_cli.height}, encoding={args_cli.encoding}, "
+        f"stereo_pack={args_cli.stereo_pack}, h264_codec={args_cli.h264_codec}, "
         f"endpoint={args_cli.endpoint}, topic={args_cli.topic}, publish_limit=none, "
-        f"stream_every_n_frames={stream_stride}",
+        f"stream_every_n_frames={stream_stride}, stream_mode={'sync' if args_cli.sync_stream else 'async'}, "
+        f"task_step_mode={'full_rl' if args_cli.task_full_rl_step else 'streaming'}",
         flush=True,
     )
     if control_device is not None:
@@ -2986,7 +3635,14 @@ def run_task_scene_simulator(
             if args_cli.debug_task_loop and frame_id < 2:
                 print(f"[RobotYao] Task loop frame {frame_id + 1}: env.step.", flush=True)
             with torch.inference_mode():
-                env.step(actions)
+                if args_cli.task_full_rl_step and args_cli.debug_task_step_breakdown:
+                    step_breakdown_meter.add(**_profiled_task_env_step(env, actions))
+                elif args_cli.task_full_rl_step:
+                    env.step(actions)
+                elif args_cli.debug_task_step_breakdown:
+                    step_breakdown_meter.add(**_streaming_task_env_step(env, actions, collect_timings=True))
+                else:
+                    _streaming_task_env_step(env, actions)
             step_t2 = time.perf_counter()
             if task_controller is not None:
                 task_controller.request_reset_if_box_dropped()
@@ -3085,10 +3741,46 @@ def run_task_scene_simulator(
             if not debug_frame_saved:
                 _save_debug_frame_pair("task_scene", frame_id, left_rgb, right_rgb)
                 debug_frame_saved = True
+            header = _make_task_scene_stereo_header(frame_id, task_controller)
+            if async_stream is not None:
+                submit_t0 = time.perf_counter()
+                submitted = async_stream.submit(header, left_rgb, right_rgb)
+                submit_t1 = time.perf_counter()
+                if submitted:
+                    published += 1
+                stream_stats = async_stream.stats()
+                sent_count = int(stream_stats["published"])
+                fps_hud.update(frame_id, sent_count)
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    copy=copy_t1 - copy_t0,
+                    encode=0.0,
+                    send=submit_t1 - submit_t0,
+                    total=submit_t1 - loop_t0,
+                )
+                perf_meter.maybe_print(published, frame_id)
+                step_breakdown_meter.maybe_print(published, frame_id)
+
+                if args_cli.print_every > 0 and published > 0 and published % args_cli.print_every == 0:
+                    elapsed = max(time.perf_counter() - start_time, 1.0e-6)
+                    mb = float(stream_stats["last_payload_bytes"]) / (1024.0 * 1024.0)
+                    print(
+                        f"[RobotYao] task_scene submitted={published} sent={sent_count} "
+                        f"dropped={int(stream_stats['dropped'])} fps={sent_count / elapsed:.1f} "
+                        f"async_encode={1000.0 * float(stream_stats['encode_avg']):.1f}ms "
+                        f"last_payload={mb:.2f} MiB frame_id={frame_id} stereo_pack={args_cli.stereo_pack}",
+                        flush=True,
+                    )
+
+                if should_stop_after_frame:
+                    break
+                continue
             encode_t0 = time.perf_counter()
             if h264_encoder is not None:
-                left_payload, right_payload = h264_encoder.encode(left_rgb, right_rgb)
-                if not left_payload or not right_payload:
+                payloads = h264_encoder.encode(left_rgb, right_rgb)
+                if any(not payload for payload in payloads):
                     perf_meter.add(
                         control=control_t1 - loop_t0,
                         step=step_t2 - control_t1,
@@ -3101,109 +3793,11 @@ def run_task_scene_simulator(
                         break
                     continue
             else:
-                left_payload = _encode_jpeg(left_rgb, args_cli.jpeg_quality)
-                right_payload = _encode_jpeg(right_rgb, args_cli.jpeg_quality)
+                payloads = _encode_stereo_jpeg_payloads(left_rgb, right_rgb)
             encode_t1 = time.perf_counter()
 
-            header = {
-                "version": 1,
-                "frame_id": int(frame_id),
-                "timestamp_ns": int(time.time_ns()),
-                "width": int(args_cli.width),
-                "height": int(args_cli.height),
-                "encoding": args_cli.encoding,
-                "pixel_format": "rgb8",
-                "quality": int(args_cli.jpeg_quality) if args_cli.encoding == "jpg" else None,
-                "h264": {
-                    "annex_b": True,
-                    "bitrate": int(args_cli.h264_bitrate),
-                    "gop": int(args_cli.h264_gop),
-                    "profile": args_cli.h264_profile,
-                    "preset": args_cli.h264_preset,
-                    "source_format": "rgb24",
-                    "encoded_format": "yuv420p",
-                }
-                if args_cli.encoding == "h264"
-                else None,
-                "eye_order": "left_right",
-                "baseline_m": float(args_cli.baseline),
-                "fisheye": {
-                    "model": "fisheyePolynomial",
-                    "fov_deg": float(args_cli.fisheye_fov),
-                    "cx": float(args_cli.width) * 0.5,
-                    "cy": float(args_cli.height) * 0.5,
-                    "radius": min(float(args_cli.width), float(args_cli.height)) * 0.5,
-                    "radius_px": min(float(args_cli.width), float(args_cli.height)) * 0.5,
-                    "poly_a": 0.0,
-                    "poly_b": _fisheye_full_frame_poly_b(args_cli.width, args_cli.height, args_cli.fisheye_fov),
-                    "poly_c": 0.0,
-                    "poly_d": 0.0,
-                    "poly_e": 0.0,
-                    "poly_f": 0.0,
-                },
-                "scene": {
-                    "mode": "task",
-                    "task": args_cli.task,
-                    "robot": "Agibot A2D",
-                },
-                "camera_mount": {
-                    "mode": args_cli.task_camera_mount,
-                    "frame": (
-                        f"Robot/{args_cli.task_camera_head_link}"
-                        if args_cli.task_camera_mount == "head_link"
-                        else "agibot_root_yaw"
-                    ),
-                    "head_link": args_cli.task_camera_head_link
-                    if args_cli.task_camera_mount == "head_link"
-                    else None,
-                    "head_rig_translate_m": [
-                        float(args_cli.task_camera_head_rig_x),
-                        float(args_cli.task_camera_head_rig_y),
-                        float(args_cli.task_camera_head_rig_z),
-                    ]
-                    if args_cli.task_camera_mount == "head_link"
-                    else None,
-                    "head_rig_orient_xyz_deg": [
-                        float(args_cli.task_camera_head_rig_roll_deg),
-                        float(args_cli.task_camera_head_rig_pitch_deg),
-                        float(args_cli.task_camera_head_rig_yaw_deg),
-                    ]
-                    if args_cli.task_camera_mount == "head_link"
-                    else None,
-                    "head_local_forward_offset_m": float(args_cli.task_camera_head_forward_offset)
-                    if args_cli.task_camera_mount == "head_link"
-                    else None,
-                    "head_local_up_offset_m": float(args_cli.task_camera_head_up_offset)
-                    if args_cli.task_camera_mount == "head_link"
-                    else None,
-                    "head_local_look_down_deg": float(args_cli.task_camera_head_look_down_deg)
-                    if args_cli.task_camera_mount == "head_link"
-                    else None,
-                    "root_forward_offset_m": float(args_cli.task_camera_forward_offset)
-                    if args_cli.task_camera_mount == "root"
-                    else None,
-                    "root_height_offset_m": float(args_cli.task_camera_height_offset)
-                    if args_cli.task_camera_mount == "root"
-                    else None,
-                    "root_look_down_deg": float(args_cli.task_camera_look_down_deg)
-                    if args_cli.task_camera_mount == "root"
-                    else None,
-                    "left_world_pos": task_controller.last_camera_positions[0]
-                    if task_controller is not None and len(task_controller.last_camera_positions) > 0
-                    else None,
-                    "right_world_pos": task_controller.last_camera_positions[1]
-                    if task_controller is not None and len(task_controller.last_camera_positions) > 1
-                    else None,
-                    "left_world_target": task_controller.last_camera_targets[0]
-                    if task_controller is not None and len(task_controller.last_camera_targets) > 0
-                    else None,
-                    "right_world_target": task_controller.last_camera_targets[1]
-                    if task_controller is not None and len(task_controller.last_camera_targets) > 1
-                    else None,
-                },
-            }
             send_t0 = time.perf_counter()
-            publisher.send(header, left_payload, right_payload)
+            publisher.send(header, *payloads)
             send_t1 = time.perf_counter()
             published += 1
             fps_hud.update(frame_id, published)
@@ -3217,34 +3811,49 @@ def run_task_scene_simulator(
                 total=send_t1 - loop_t0,
             )
             perf_meter.maybe_print(published, frame_id)
+            step_breakdown_meter.maybe_print(published, frame_id)
 
             if args_cli.print_every > 0 and published % args_cli.print_every == 0:
                 elapsed = max(time.perf_counter() - start_time, 1.0e-6)
-                mb = (len(left_payload) + len(right_payload)) / (1024.0 * 1024.0)
+                mb = sum(len(payload) for payload in payloads) / (1024.0 * 1024.0)
                 print(
                     f"[RobotYao] task_scene published={published} fps={published / elapsed:.1f} "
-                    f"last_payload={mb:.2f} MiB frame_id={frame_id}",
+                    f"last_payload={mb:.2f} MiB frame_id={frame_id} stereo_pack={args_cli.stereo_pack}",
                     flush=True,
                 )
 
             if should_stop_after_frame:
                 break
     finally:
-        print(f"[RobotYao] Task scene stopped. frames={frame_id}, published={published}", flush=True)
         if control_device is not None:
             try:
                 control_device.stop()
             except Exception as exc:
                 print(f"[RobotYao] Failed to stop Unity control device: {exc}", flush=True)
+        if async_stream is not None:
+            try:
+                async_stream.close()
+            except Exception as exc:
+                print(f"[RobotYao] Failed to close async stereo stream: {exc}", flush=True)
         if h264_encoder is not None:
             try:
                 h264_encoder.close()
             except Exception as exc:
                 print(f"[RobotYao] Failed to close H264 encoder: {exc}", flush=True)
-        try:
-            publisher.close()
-        except Exception as exc:
-            print(f"[RobotYao] Failed to close stereo publisher: {exc}", flush=True)
+        if publisher is not None:
+            try:
+                publisher.close()
+            except Exception as exc:
+                print(f"[RobotYao] Failed to close stereo publisher: {exc}", flush=True)
+        if async_stream is not None:
+            stream_stats = async_stream.stats()
+            print(
+                f"[RobotYao] Task scene stopped. frames={frame_id}, submitted={published}, "
+                f"sent={int(stream_stats['published'])}, dropped={int(stream_stats['dropped'])}",
+                flush=True,
+            )
+        else:
+            print(f"[RobotYao] Task scene stopped. frames={frame_id}, published={published}", flush=True)
         fps_hud.destroy()
         try:
             env.close()
@@ -3258,8 +3867,19 @@ def run_simulator(
     control_device: RobotYaoXrSubDevice | None = None,
     robot_controller: RobotYaoSceneController | None = None,
 ):
-    publisher = StereoZmqPublisher(args_cli.endpoint, args_cli.topic)
-    h264_encoder = StereoH264Encoder() if args_cli.encoding == "h264" else None
+    async_stream = None if args_cli.sync_stream else AsyncStereoStreamPublisher(args_cli.endpoint, args_cli.topic, "simple_scene")
+    publisher = None
+    h264_encoder = None
+    if async_stream is not None:
+        async_stream.wait_until_ready()
+        args_cli.h264_codec = async_stream.codec_name
+        args_cli.h264_preset = async_stream.codec_preset
+    else:
+        publisher = StereoZmqPublisher(args_cli.endpoint, args_cli.topic)
+        h264_encoder = StereoH264Encoder() if args_cli.encoding == "h264" else None
+        if h264_encoder is not None:
+            args_cli.h264_codec = h264_encoder.codec_name
+            args_cli.h264_preset = h264_encoder.codec_preset
     publish_interval = 0.0
     next_publish_time = time.perf_counter()
     published = 0
@@ -3272,8 +3892,10 @@ def run_simulator(
 
     print(
         "[RobotYao] Streaming stereo RGB fisheye frames "
-        f"{args_cli.width}x{args_cli.height}, encoding={args_cli.encoding}, endpoint={args_cli.endpoint}, "
-        f"topic={args_cli.topic}, publish_limit=none, stream_every_n_frames={stream_stride}"
+        f"{args_cli.width}x{args_cli.height}, encoding={args_cli.encoding}, stereo_pack={args_cli.stereo_pack}, "
+        f"h264_codec={args_cli.h264_codec}, endpoint={args_cli.endpoint}, "
+        f"topic={args_cli.topic}, publish_limit=none, stream_every_n_frames={stream_stride}, "
+        f"stream_mode={'sync' if args_cli.sync_stream else 'async'}"
     )
     if control_device is not None:
         print(
@@ -3351,10 +3973,44 @@ def run_simulator(
             if not debug_frame_saved:
                 _save_debug_frame_pair("simple_scene", frame_id, left_rgb, right_rgb)
                 debug_frame_saved = True
+            header = _make_stereo_header_base(frame_id)
+            if async_stream is not None:
+                submit_t0 = time.perf_counter()
+                submitted = async_stream.submit(header, left_rgb, right_rgb)
+                submit_t1 = time.perf_counter()
+                if submitted:
+                    published += 1
+                stream_stats = async_stream.stats()
+                sent_count = int(stream_stats["published"])
+                fps_hud.update(frame_id, sent_count)
+                perf_meter.add(
+                    control=control_t1 - loop_t0,
+                    step=step_t2 - control_t1,
+                    camera=camera_t3 - step_t2,
+                    copy=copy_t1 - copy_t0,
+                    encode=0.0,
+                    send=submit_t1 - submit_t0,
+                    total=submit_t1 - loop_t0,
+                )
+                perf_meter.maybe_print(published, frame_id)
+
+                if args_cli.print_every > 0 and published > 0 and published % args_cli.print_every == 0:
+                    elapsed = max(time.perf_counter() - start_time, 1.0e-6)
+                    mb = float(stream_stats["last_payload_bytes"]) / (1024.0 * 1024.0)
+                    print(
+                        f"[RobotYao] submitted={published} sent={sent_count} "
+                        f"dropped={int(stream_stats['dropped'])} fps={sent_count / elapsed:.1f} "
+                        f"async_encode={1000.0 * float(stream_stats['encode_avg']):.1f}ms "
+                        f"last_payload={mb:.2f} MiB frame_id={frame_id} stereo_pack={args_cli.stereo_pack}"
+                    )
+
+                if should_stop_after_frame:
+                    break
+                continue
             encode_t0 = time.perf_counter()
             if h264_encoder is not None:
-                left_payload, right_payload = h264_encoder.encode(left_rgb, right_rgb)
-                if not left_payload or not right_payload:
+                payloads = h264_encoder.encode(left_rgb, right_rgb)
+                if any(not payload for payload in payloads):
                     perf_meter.add(
                         control=control_t1 - loop_t0,
                         step=step_t2 - control_t1,
@@ -3367,49 +4023,11 @@ def run_simulator(
                         break
                     continue
             else:
-                left_payload = _encode_jpeg(left_rgb, args_cli.jpeg_quality)
-                right_payload = _encode_jpeg(right_rgb, args_cli.jpeg_quality)
+                payloads = _encode_stereo_jpeg_payloads(left_rgb, right_rgb)
             encode_t1 = time.perf_counter()
 
-            header = {
-                "version": 1,
-                "frame_id": int(frame_id),
-                "timestamp_ns": int(time.time_ns()),
-                "width": int(args_cli.width),
-                "height": int(args_cli.height),
-                "encoding": args_cli.encoding,
-                "pixel_format": "rgb8",
-                "quality": int(args_cli.jpeg_quality) if args_cli.encoding == "jpg" else None,
-                "h264": {
-                    "annex_b": True,
-                    "bitrate": int(args_cli.h264_bitrate),
-                    "gop": int(args_cli.h264_gop),
-                    "profile": args_cli.h264_profile,
-                    "preset": args_cli.h264_preset,
-                    "source_format": "rgb24",
-                    "encoded_format": "yuv420p",
-                }
-                if args_cli.encoding == "h264"
-                else None,
-                "eye_order": "left_right",
-                "baseline_m": float(args_cli.baseline),
-                "fisheye": {
-                    "model": "fisheyePolynomial",
-                    "fov_deg": float(args_cli.fisheye_fov),
-                    "cx": float(args_cli.width) * 0.5,
-                    "cy": float(args_cli.height) * 0.5,
-                    "radius": min(float(args_cli.width), float(args_cli.height)) * 0.5,
-                    "radius_px": min(float(args_cli.width), float(args_cli.height)) * 0.5,
-                    "poly_a": 0.0,
-                    "poly_b": _fisheye_full_frame_poly_b(args_cli.width, args_cli.height, args_cli.fisheye_fov),
-                    "poly_c": 0.0,
-                    "poly_d": 0.0,
-                    "poly_e": 0.0,
-                    "poly_f": 0.0,
-                },
-            }
             send_t0 = time.perf_counter()
-            publisher.send(header, left_payload, right_payload)
+            publisher.send(header, *payloads)
             send_t1 = time.perf_counter()
             published += 1
             fps_hud.update(frame_id, published)
@@ -3426,30 +4044,44 @@ def run_simulator(
 
             if args_cli.print_every > 0 and published % args_cli.print_every == 0:
                 elapsed = max(time.perf_counter() - start_time, 1.0e-6)
-                mb = (len(left_payload) + len(right_payload)) / (1024.0 * 1024.0)
+                mb = sum(len(payload) for payload in payloads) / (1024.0 * 1024.0)
                 print(
                     f"[RobotYao] published={published} fps={published / elapsed:.1f} "
-                    f"last_payload={mb:.2f} MiB frame_id={frame_id}"
+                    f"last_payload={mb:.2f} MiB frame_id={frame_id} stereo_pack={args_cli.stereo_pack}"
                 )
 
             if should_stop_after_frame:
                 break
     finally:
-        print(f"[RobotYao] Simple scene stopped. frames={frame_id}, published={published}")
         if control_device is not None:
             try:
                 control_device.stop()
             except Exception as exc:
                 print(f"[RobotYao] Failed to stop Unity control device: {exc}", flush=True)
+        if async_stream is not None:
+            try:
+                async_stream.close()
+            except Exception as exc:
+                print(f"[RobotYao] Failed to close async stereo stream: {exc}", flush=True)
         if h264_encoder is not None:
             try:
                 h264_encoder.close()
             except Exception as exc:
                 print(f"[RobotYao] Failed to close H264 encoder: {exc}", flush=True)
-        try:
-            publisher.close()
-        except Exception as exc:
-            print(f"[RobotYao] Failed to close stereo publisher: {exc}", flush=True)
+        if publisher is not None:
+            try:
+                publisher.close()
+            except Exception as exc:
+                print(f"[RobotYao] Failed to close stereo publisher: {exc}", flush=True)
+        if async_stream is not None:
+            stream_stats = async_stream.stats()
+            print(
+                f"[RobotYao] Simple scene stopped. frames={frame_id}, submitted={published}, "
+                f"sent={int(stream_stats['published'])}, dropped={int(stream_stats['dropped'])}",
+                flush=True,
+            )
+        else:
+            print(f"[RobotYao] Simple scene stopped. frames={frame_id}, published={published}")
         fps_hud.destroy()
 
 
@@ -3468,6 +4100,7 @@ def main():
         task_controller = RobotYaoTaskSceneController(env, camera)
         print("[RobotYao] Resetting task stereo cameras.", flush=True)
         _reset_camera_or_pair(camera)
+        _apply_task_runtime_render_interval(env)
         control_device = _create_unity_control_device() if args_cli.unity_control else None
         print("[RobotYao] Task scene setup complete.", flush=True)
         run_task_scene_simulator(env, camera, control_device, task_controller)
