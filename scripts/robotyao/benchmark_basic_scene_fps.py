@@ -30,10 +30,15 @@ Example:
 from __future__ import annotations
 
 import argparse
+import ctypes
+import json
 import math
 import os
+import queue
 import sys
+import threading
 import time
+import traceback
 
 _ROBOTYAO_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _ROBOTYAO_CACHE_ROOT = os.path.join(_ROBOTYAO_REPO_ROOT, ".robotyao_cache")
@@ -61,6 +66,34 @@ parser.add_argument("--camera-width", type=int, default=1920, help="Stereo fishe
 parser.add_argument("--camera-height", type=int, default=1920, help="Stereo fisheye camera image height.")
 parser.add_argument("--baseline", type=float, default=0.064, help="Stereo fisheye camera baseline in meters.")
 parser.add_argument("--fisheye-fov", type=float, default=180.0, help="Stereo fisheye camera field of view in degrees.")
+parser.add_argument(
+    "--native-h264-stream",
+    action="store_true",
+    help="Copy stereo fisheye RGB frames to Isaaclinkencode.dll for async side-by-side NVENC H264 ZMQ publishing.",
+)
+parser.add_argument(
+    "--native-h264-dll",
+    type=str,
+    default=r"E:\VSCode\Isaac_link_encode\x64\Release\Isaaclinkencode.dll",
+    help="Path to Isaac_link_encode Release x64 DLL.",
+)
+parser.add_argument("--endpoint", type=str, default="tcp://*:5556", help="Native H264 ZMQ PUB bind endpoint.")
+parser.add_argument("--topic", type=str, default="robotyao.stereo.fisheye.v1", help="Native H264 ZMQ topic.")
+parser.add_argument("--h264-bitrate", type=int, default=12_000_000, help="H264 target bitrate per eye.")
+parser.add_argument("--h264-gop", type=int, default=30, help="H264 keyframe interval.")
+parser.add_argument("--h264-fps", type=int, default=60, help="H264 encoder timestamp FPS hint.")
+parser.add_argument(
+    "--native-h264-queue-size",
+    type=int,
+    default=1,
+    help="Async native encoder queue size. 1 keeps the latest frame and drops stale frames.",
+)
+parser.add_argument(
+    "--stream-every-n-frames",
+    type=int,
+    default=1,
+    help="Submit one stereo frame to the native encoder every N simulation frames.",
+)
 parser.add_argument("--unity-control", action="store_true", help="Receive Unity controller input over ZMQ.")
 parser.add_argument(
     "--unity-input-endpoint",
@@ -73,7 +106,7 @@ parser.add_argument(
     "--unity-follow-mode",
     choices=["toggle", "hold"],
     default="toggle",
-    help="Arm-follow mode for left Y/X and right B/A.",
+    help="Arm-follow mode for right B/A. Right B starts both arms; right A stops both arms.",
 )
 parser.add_argument("--max-forward-speed", type=float, default=1.0, help="Left stick Y forward speed in m/s.")
 parser.add_argument("--max-lateral-speed", type=float, default=0.6, help="Left stick X lateral speed in m/s.")
@@ -101,14 +134,14 @@ parser.add_argument(
     "--arm-follow-start-warmup-frames",
     type=int,
     default=5,
-    help="Hold arm joints for this many frames after pressing Y/B before accepting arm deltas.",
+    help="Hold arm joints for this many frames after pressing right B before accepting arm deltas.",
 )
 parser.add_argument(
     "--arm-cumulative-target",
     dest="arm_cumulative_target",
     action="store_true",
     default=True,
-    help="Track persistent EE targets from Y/B press to X/A release, matching stream_stereo_fisheye_zmq.py.",
+    help="Track persistent EE targets from right B press to right A release, matching stream_stereo_fisheye_zmq.py.",
 )
 parser.add_argument(
     "--no-arm-cumulative-target",
@@ -167,8 +200,14 @@ if _kit_passthrough_args:
     # from rejecting them before AppLauncher starts.
     print(f"[RobotYaoBasic] Passing Kit args through: {' '.join(_kit_passthrough_args)}", flush=True)
 
+if args_cli.native_h264_stream:
+    args_cli.with_stereo_fisheye = True
+
 if args_cli.with_stereo_fisheye and hasattr(args_cli, "enable_cameras"):
     args_cli.enable_cameras = True
+
+if args_cli.native_h264_stream and (int(args_cli.camera_width) % 2 != 0 or int(args_cli.camera_height) % 2 != 0):
+    raise ValueError("Native H264 encoding requires even --camera-width and --camera-height values.")
 
 _robotyao_cache_arg_path = _ROBOTYAO_CACHE_ROOT.replace("\\", "/")
 _existing_kit_args = str(args_cli.kit_args or "").strip()
@@ -186,6 +225,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import torch
+import numpy as np
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
@@ -202,6 +242,10 @@ from isaaclab.devices.openxr.retargeters.robotyao_wheeled_xr_retargeter import (
 )
 from isaaclab_assets.robots.agibot import AGIBOT_A2D_CFG  # isort: skip
 from isaaclab_tasks.manager_based.manipulation.place.config.agibot.place_toy2box_rmp_rel_env_cfg import (  # isort: skip
+    _TASK_BOX_DEFAULT_POSE,
+    _TASK_BOX_SIZE,
+    _TASK_BOX_SUCCESS_X_THRESHOLD,
+    _TASK_BOX_SUCCESS_Y_THRESHOLD,
     _TASK_CUBE_DEFAULT_POSES,
     _TASK_CUBE_SIZE,
     _TASK_ROBOT_DEFAULT_POS,
@@ -209,10 +253,30 @@ from isaaclab_tasks.manager_based.manipulation.place.config.agibot.place_toy2box
     _TASK_TABLE_SIZE,
     _configure_symmetric_arm_init_pose,
     spawn_agibot_floating,
+    spawn_open_container_box,
 )
 
 
 _ROBOTYAO_LEGACY_COMMAND_SIZE = RobotYaoWheeledXrRetargeter.RIGHT_ARM_ROT_DELTA_START + 3
+_BASIC_CUBE_NAMES = ("cube_1", "cube_2", "cube_3")
+_BASIC_CUBE_SCALE = 1.5
+_BASIC_CUBE_SIZE = float(_TASK_CUBE_SIZE) * _BASIC_CUBE_SCALE
+_BASIC_TABLE_HEIGHT_OFFSET_Z = 0.10
+_BASIC_TABLE_POS = (
+    float(_TASK_TABLE_POS[0]),
+    float(_TASK_TABLE_POS[1]),
+    float(_TASK_TABLE_POS[2]) + _BASIC_TABLE_HEIGHT_OFFSET_Z,
+)
+_BASIC_TABLE_TOP_Z = _BASIC_TABLE_POS[2] + float(_TASK_TABLE_SIZE[2]) * 0.5
+_BASIC_CUBE_Z = _BASIC_TABLE_TOP_Z + _BASIC_CUBE_SIZE * 0.5
+_BASIC_CUBE_DROP_RESET_Z = _BASIC_TABLE_TOP_Z - 0.12
+_BASIC_BOX_Z = _BASIC_TABLE_TOP_Z + float(_TASK_BOX_SIZE[2]) * 0.5
+_BASIC_BOX_POSE = (float(_TASK_BOX_DEFAULT_POSE[0]), float(_TASK_BOX_DEFAULT_POSE[1]), _BASIC_BOX_Z)
+_BASIC_BOX_DROP_RESET_Z = _BASIC_TABLE_TOP_Z - 0.12
+_BASIC_CUBE_BOX_SUCCESS_Z_MIN = -0.09
+_BASIC_CUBE_BOX_SUCCESS_Z_MAX = 0.08
+_BASIC_GRIPPER_OPEN_VALUE = 0.994
+_BASIC_GRIPPER_CLOSE_FOLLOW_MARGIN = 0.04
 
 
 def _make_robot_cfg():
@@ -225,12 +289,16 @@ def _make_robot_cfg():
     return robot_cfg
 
 
+def _basic_cube_pose(base_pose: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (float(base_pose[0]), float(base_pose[1]), _BASIC_CUBE_Z)
+
+
 def _cube_cfg(prim_name: str, pose: tuple[float, float, float], color: tuple[float, float, float]) -> RigidObjectCfg:
     return RigidObjectCfg(
         prim_path=f"{{ENV_REGEX_NS}}/{prim_name}",
         init_state=RigidObjectCfg.InitialStateCfg(pos=pose),
         spawn=sim_utils.CuboidCfg(
-            size=(_TASK_CUBE_SIZE, _TASK_CUBE_SIZE, _TASK_CUBE_SIZE),
+            size=(_BASIC_CUBE_SIZE, _BASIC_CUBE_SIZE, _BASIC_CUBE_SIZE),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
@@ -242,6 +310,28 @@ def _cube_cfg(prim_name: str, pose: tuple[float, float, float], color: tuple[flo
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color, roughness=0.5),
+        ),
+    )
+
+
+def _container_box_cfg() -> RigidObjectCfg:
+    return RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Box",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=_BASIC_BOX_POSE),
+        spawn=sim_utils.CuboidCfg(
+            func=spawn_open_container_box,
+            size=_TASK_BOX_SIZE,
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=1,
+                max_angular_velocity=1000.0,
+                max_linear_velocity=1000.0,
+                max_depenetration_velocity=5.0,
+                disable_gravity=False,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.20),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.20, 0.82), roughness=0.45),
         ),
     )
 
@@ -419,7 +509,7 @@ def _create_head_stereo_fisheye_cameras(width: int, height: int, fisheye_fov: fl
 
 @configclass
 class BasicRobotYaoSceneCfg(InteractiveSceneCfg):
-    """Minimal scene with the Agibot robot, table, and cubes."""
+    """Minimal scene with the Agibot robot, table, cubes, and a container box."""
 
     ground = AssetBaseCfg(
         prim_path="/World/GroundPlane",
@@ -437,16 +527,17 @@ class BasicRobotYaoSceneCfg(InteractiveSceneCfg):
     robot = _make_robot_cfg()
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=_TASK_TABLE_POS),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=_BASIC_TABLE_POS),
         spawn=sim_utils.CuboidCfg(
             size=_TASK_TABLE_SIZE,
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.48, 0.50, 0.52), roughness=0.7),
         ),
     )
-    cube_1 = _cube_cfg("Cube1", _TASK_CUBE_DEFAULT_POSES["cube_1"], (0.10, 0.25, 0.90))
-    cube_2 = _cube_cfg("Cube2", _TASK_CUBE_DEFAULT_POSES["cube_2"], (0.08, 0.42, 1.00))
-    cube_3 = _cube_cfg("Cube3", _TASK_CUBE_DEFAULT_POSES["cube_3"], (0.06, 0.58, 0.95))
+    cube_1 = _cube_cfg("Cube1", _basic_cube_pose(_TASK_CUBE_DEFAULT_POSES["cube_1"]), (0.10, 0.25, 0.90))
+    cube_2 = _cube_cfg("Cube2", _basic_cube_pose(_TASK_CUBE_DEFAULT_POSES["cube_2"]), (0.08, 0.42, 1.00))
+    cube_3 = _cube_cfg("Cube3", _basic_cube_pose(_TASK_CUBE_DEFAULT_POSES["cube_3"]), (0.06, 0.58, 0.95))
+    box = _container_box_cfg()
 
 
 class PerfWindow:
@@ -463,13 +554,342 @@ class PerfWindow:
 
     def pop_line(self, frame_id: int, fps: float) -> str:
         parts = []
-        for name in ("control", "write", "step", "render", "update", "camera", "copy", "total"):
+        for name in ("control", "write", "step", "render", "update", "camera", "copy", "submit", "total"):
             if name in self.totals:
                 parts.append(f"{name}={1000.0 * self.totals[name] / max(self.count, 1):.1f}ms")
         line = f"[RobotYaoBasic] perf samples={self.count} frame_id={frame_id} fps={fps:.1f} " + " ".join(parts)
         self.count = 0
         self.totals.clear()
         return line
+
+
+class _NativeIsaacLinkEncodeConfig(ctypes.Structure):
+    _fields_ = [
+        ("eyeWidth", ctypes.c_int),
+        ("eyeHeight", ctypes.c_int),
+        ("fps", ctypes.c_int),
+        ("bitrate", ctypes.c_int),
+        ("gop", ctypes.c_int),
+        ("inputFormat", ctypes.c_int),
+        ("sendHighWaterMark", ctypes.c_int),
+        ("reserved0", ctypes.c_int),
+    ]
+
+
+class _NativeIsaacLinkEncodeStats(ctypes.Structure):
+    _fields_ = [
+        ("isRunning", ctypes.c_int),
+        ("eyeWidth", ctypes.c_int),
+        ("eyeHeight", ctypes.c_int),
+        ("payloadWidth", ctypes.c_int),
+        ("payloadHeight", ctypes.c_int),
+        ("submittedFrames", ctypes.c_uint64),
+        ("encodedFrames", ctypes.c_uint64),
+        ("sentFrames", ctypes.c_uint64),
+        ("failedFrames", ctypes.c_uint64),
+        ("lastFrameBytes", ctypes.c_uint64),
+        ("lastEncodeMs", ctypes.c_double),
+        ("lastSendMs", ctypes.c_double),
+        ("lastError", ctypes.c_char * 256),
+    ]
+
+
+class NativeIsaacLinkEncodePublisher:
+    """ctypes wrapper around Isaaclinkencode.dll."""
+
+    _PIXEL_RGB24 = 0
+
+    def __init__(self):
+        self._dll_path = os.path.abspath(os.path.expandvars(args_cli.native_h264_dll))
+        if not os.path.exists(self._dll_path):
+            raise FileNotFoundError(f"Isaaclinkencode.dll not found: {self._dll_path}")
+        self._dll = ctypes.WinDLL(self._dll_path)
+        self._configure_abi()
+        self._closed = True
+
+        config = _NativeIsaacLinkEncodeConfig(
+            eyeWidth=int(args_cli.camera_width),
+            eyeHeight=int(args_cli.camera_height),
+            fps=max(1, int(args_cli.h264_fps)),
+            bitrate=max(1, int(args_cli.h264_bitrate) * 2),
+            gop=max(1, int(args_cli.h264_gop)),
+            inputFormat=self._PIXEL_RGB24,
+            sendHighWaterMark=max(2, int(args_cli.native_h264_queue_size) + 1),
+            reserved0=0,
+        )
+        ok = self._dll.ILE_Start(
+            str(args_cli.endpoint).encode("utf-8"),
+            str(args_cli.topic).encode("utf-8"),
+            ctypes.byref(config),
+        )
+        if not ok:
+            raise RuntimeError(f"ILE_Start failed: {self.last_error()}")
+        self._closed = False
+        print(
+            "[RobotYaoBasic] Native Isaac_link_encode started: "
+            f"dll={self._dll_path}, endpoint={args_cli.endpoint}, topic={args_cli.topic}, "
+            f"size={int(args_cli.camera_width) * 2}x{int(args_cli.camera_height)}, "
+            f"bitrate={int(args_cli.h264_bitrate) * 2}, gop={int(args_cli.h264_gop)}",
+            flush=True,
+        )
+
+    def _configure_abi(self) -> None:
+        byte_ptr = ctypes.POINTER(ctypes.c_uint8)
+        self._dll.ILE_Start.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.POINTER(_NativeIsaacLinkEncodeConfig),
+        ]
+        self._dll.ILE_Start.restype = ctypes.c_int
+        self._dll.ILE_Stop.argtypes = []
+        self._dll.ILE_Stop.restype = None
+        self._dll.ILE_PublishStereoFrame.argtypes = [
+            byte_ptr,
+            ctypes.c_int,
+            byte_ptr,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        self._dll.ILE_PublishStereoFrame.restype = ctypes.c_int
+        self._dll.ILE_GetStats.argtypes = [ctypes.POINTER(_NativeIsaacLinkEncodeStats)]
+        self._dll.ILE_GetStats.restype = None
+
+    def publish(self, header: dict, left_rgb: np.ndarray, right_rgb: np.ndarray, force_idr: bool) -> dict[str, float | int | str]:
+        if left_rgb.dtype != np.uint8 or not left_rgb.flags["C_CONTIGUOUS"]:
+            left_rgb = np.ascontiguousarray(left_rgb, dtype=np.uint8)
+        if right_rgb.dtype != np.uint8 or not right_rgb.flags["C_CONTIGUOUS"]:
+            right_rgb = np.ascontiguousarray(right_rgb, dtype=np.uint8)
+        header_payload = json.dumps(header, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        left_ptr = left_rgb.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+        right_ptr = right_rgb.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+        ok = self._dll.ILE_PublishStereoFrame(
+            left_ptr,
+            int(left_rgb.strides[0]),
+            right_ptr,
+            int(right_rgb.strides[0]),
+            self._PIXEL_RGB24,
+            header_payload,
+            len(header_payload),
+            1 if force_idr else 0,
+        )
+        stats = self.stats()
+        if not ok:
+            raise RuntimeError(f"ILE_PublishStereoFrame failed: {stats.get('last_error') or 'unknown native error'}")
+        return stats
+
+    def stats(self) -> dict[str, float | int | str]:
+        raw = _NativeIsaacLinkEncodeStats()
+        self._dll.ILE_GetStats(ctypes.byref(raw))
+        return {
+            "running": int(raw.isRunning),
+            "submitted": int(raw.submittedFrames),
+            "encoded": int(raw.encodedFrames),
+            "sent": int(raw.sentFrames),
+            "failed": int(raw.failedFrames),
+            "last_payload_bytes": int(raw.lastFrameBytes),
+            "last_encode_ms": float(raw.lastEncodeMs),
+            "last_send_ms": float(raw.lastSendMs),
+            "last_error": bytes(raw.lastError).split(b"\0", 1)[0].decode("utf-8", errors="replace"),
+        }
+
+    def last_error(self) -> str:
+        return str(self.stats().get("last_error") or "unknown native encoder error")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._dll.ILE_Stop()
+        self._closed = True
+
+
+class AsyncNativeStereoEncoder:
+    """Latest-frame async encoder/publisher for benchmark video timing."""
+
+    def __init__(self):
+        self._queue: queue.Queue = queue.Queue(maxsize=max(1, int(args_cli.native_h264_queue_size)))
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+        self._submitted = 0
+        self._sent = 0
+        self._sent_total = 0
+        self._dropped = 0
+        self._failed = 0
+        self._last_payload_bytes = 0
+        self._wait_total = 0.0
+        self._call_total = 0.0
+        self._encode_total = 0.0
+        self._send_total = 0.0
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, name="RobotYaoBasic-NativeEncode", daemon=True)
+        self._thread.start()
+
+    def wait_until_ready(self, timeout: float = 10.0) -> None:
+        self._ready.wait(timeout=max(0.0, float(timeout)))
+        with self._lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError(f"Native encoder worker failed to start: {error}") from error
+
+    def submit(self, frame_id: int, header: dict, left_rgb: np.ndarray, right_rgb: np.ndarray) -> bool:
+        if self._stop.is_set():
+            return False
+        with self._lock:
+            if self._error is not None:
+                raise RuntimeError(f"Native encoder worker stopped: {self._error}") from self._error
+        item = (int(frame_id), time.perf_counter(), header, left_rgb, right_rgb)
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                with self._lock:
+                    self._dropped += 1
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                with self._lock:
+                    self._dropped += 1
+                return False
+        with self._lock:
+            self._submitted += 1
+        return True
+
+    def stats(self) -> dict[str, float | int]:
+        with self._lock:
+            sent = max(self._sent, 1)
+            return {
+                "submitted": self._submitted,
+                "sent": self._sent,
+                "sent_total": self._sent_total,
+                "dropped": self._dropped,
+                "failed": self._failed,
+                "last_payload_bytes": self._last_payload_bytes,
+                "queue_wait_avg": self._wait_total / sent,
+                "dll_call_avg": self._call_total / sent,
+                "native_encode_avg": self._encode_total / sent,
+                "native_send_avg": self._send_total / sent,
+            }
+
+    def pop_line(self) -> str:
+        with self._lock:
+            sent = max(self._sent, 1)
+            native_other_total = max(0.0, self._call_total - self._encode_total - self._send_total)
+            line = (
+                f"[RobotYaoBasic] native_stream submitted={self._submitted} sent={self._sent} "
+                f"sent_total={self._sent_total} dropped={self._dropped} failed={self._failed} "
+                f"queue_wait={1000.0 * self._wait_total / sent:.1f}ms "
+                f"dll_call={1000.0 * self._call_total / sent:.1f}ms "
+                f"dll_encode_merge_upload={1000.0 * self._encode_total / sent:.1f}ms "
+                f"dll_send={1000.0 * self._send_total / sent:.1f}ms "
+                f"dll_overhead={1000.0 * native_other_total / sent:.1f}ms "
+                f"last_payload={self._last_payload_bytes / (1024.0 * 1024.0):.2f}MiB"
+            )
+            self._wait_total = 0.0
+            self._call_total = 0.0
+            self._encode_total = 0.0
+            self._send_total = 0.0
+            self._sent = 0
+            self._last_payload_bytes = 0
+            return line
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        publisher = None
+        try:
+            publisher = NativeIsaacLinkEncodePublisher()
+            self._ready.set()
+            while not self._stop.is_set() or not self._queue.empty():
+                try:
+                    frame_id, submitted_at, header, left_rgb, right_rgb = self._queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                call_start = time.perf_counter()
+                wait_time = call_start - submitted_at
+                try:
+                    stats = publisher.publish(header, left_rgb, right_rgb, force_idr=frame_id <= 1)
+                except Exception:
+                    with self._lock:
+                        self._failed += 1
+                    raise
+                call_end = time.perf_counter()
+                with self._lock:
+                    self._sent += 1
+                    self._sent_total += 1
+                    self._last_payload_bytes = int(stats["last_payload_bytes"])
+                    self._wait_total += wait_time
+                    self._call_total += call_end - call_start
+                    self._encode_total += float(stats["last_encode_ms"]) / 1000.0
+                    self._send_total += float(stats["last_send_ms"]) / 1000.0
+        except BaseException as exc:
+            with self._lock:
+                self._error = exc
+            print(f"[RobotYaoBasic] Native encoder worker stopped with error: {exc}", flush=True)
+            traceback.print_exc()
+            self._ready.set()
+        finally:
+            if publisher is not None:
+                try:
+                    publisher.close()
+                except Exception as exc:
+                    print(f"[RobotYaoBasic] Failed to close native encoder DLL: {exc}", flush=True)
+
+
+def _make_native_stereo_header(frame_id: int) -> dict:
+    eye_width = int(args_cli.camera_width)
+    eye_height = int(args_cli.camera_height)
+    return {
+        "version": 1,
+        "frame_id": int(frame_id),
+        "timestamp_ns": int(time.time_ns()),
+        "width": int(eye_width * 2),
+        "height": int(eye_height),
+        "eye_width": int(eye_width),
+        "eye_height": int(eye_height),
+        "stereo_pack": "side_by_side",
+        "payload_count": 1,
+        "encoding": "h264",
+        "pixel_format": "rgb8",
+        "h264": {
+            "annex_b": True,
+            "codec": "isaac_link_encode",
+            "bitrate": int(args_cli.h264_bitrate) * 2,
+            "gop": int(args_cli.h264_gop),
+            "profile": "baseline",
+            "preset": "nvenc_low_latency_hp",
+            "source_format": "rgb24",
+            "encoded_format": "yuv420p",
+        },
+        "eye_order": "left_right",
+        "baseline_m": float(args_cli.baseline),
+        "fisheye": {
+            "model": "fisheyePolynomial",
+            "fov_deg": float(args_cli.fisheye_fov),
+            "cx": float(eye_width) * 0.5,
+            "cy": float(eye_height) * 0.5,
+            "radius": min(float(eye_width), float(eye_height)) * 0.5,
+            "radius_px": min(float(eye_width), float(eye_height)) * 0.5,
+            "poly_a": 0.0,
+            "poly_b": _fisheye_full_frame_poly_b(eye_width, eye_height, args_cli.fisheye_fov),
+            "poly_c": 0.0,
+            "poly_d": 0.0,
+            "poly_e": 0.0,
+            "poly_f": 0.0,
+        },
+        "scene": {
+            "mode": "basic_benchmark",
+            "robot": "Agibot A2D",
+            "task_managers": False,
+        },
+    }
 
 
 def _reset_scene(scene: InteractiveScene) -> torch.Tensor:
@@ -490,6 +910,41 @@ def _reset_scene(scene: InteractiveScene) -> torch.Tensor:
 
     scene.reset()
     return joint_pos
+
+
+def _basic_scene_reset_reason(scene: InteractiveScene) -> str | None:
+    box_pos = scene["box"].data.root_pos_w
+    cube_inside_masks = []
+
+    box_drop_mask = box_pos[:, 2] < _BASIC_BOX_DROP_RESET_Z
+    if torch.any(box_drop_mask):
+        env_id = int(torch.nonzero(box_drop_mask, as_tuple=False)[0, 0].item())
+        z = float(box_pos[env_id, 2].item())
+        return f"box dropped below table z={z:.3f}"
+
+    for cube_name in _BASIC_CUBE_NAMES:
+        cube_pos = scene[cube_name].data.root_pos_w
+        cube_drop_mask = cube_pos[:, 2] < _BASIC_CUBE_DROP_RESET_Z
+        if torch.any(cube_drop_mask):
+            env_id = int(torch.nonzero(cube_drop_mask, as_tuple=False)[0, 0].item())
+            z = float(cube_pos[env_id, 2].item())
+            return f"{cube_name} dropped from table z={z:.3f}"
+
+        delta = cube_pos - box_pos
+        cube_inside_masks.append(
+            (torch.abs(delta[:, 0]) <= float(_TASK_BOX_SUCCESS_X_THRESHOLD))
+            & (torch.abs(delta[:, 1]) <= float(_TASK_BOX_SUCCESS_Y_THRESHOLD))
+            & (delta[:, 2] >= _BASIC_CUBE_BOX_SUCCESS_Z_MIN)
+            & (delta[:, 2] <= _BASIC_CUBE_BOX_SUCCESS_Z_MAX)
+        )
+
+    success_mask = cube_inside_masks[0]
+    for mask in cube_inside_masks[1:]:
+        success_mask = success_mask & mask
+    if torch.any(success_mask):
+        env_id = int(torch.nonzero(success_mask, as_tuple=False)[0, 0].item())
+        return f"success: all cubes inside box env={env_id}"
+    return None
 
 
 def _yaw_from_quat_wxyz(quat: torch.Tensor) -> float:
@@ -525,9 +980,10 @@ class BasicUnityController:
         self._right_arm_hold_after_lift = False
         self._left_arm_follow_warmup_frames = 0
         self._right_arm_follow_warmup_frames = 0
-        self._previous_left_follow_start_button = False
+        self._left_gripper_close_fraction = 0.0
+        self._right_gripper_close_fraction = 0.0
+        self._previous_left_reset_button = False
         self._previous_right_follow_start_button = False
-        self._previous_right_grip_pressed = False
         self._reset_requested = False
         self._reset_reason = ""
         self._step_count = 0
@@ -587,9 +1043,10 @@ class BasicUnityController:
         self._right_arm_hold_after_lift = hold_arms
         self._left_arm_follow_warmup_frames = 0
         self._right_arm_follow_warmup_frames = 0
-        self._previous_left_follow_start_button = False
+        self._left_gripper_close_fraction = 0.0
+        self._right_gripper_close_fraction = 0.0
+        self._previous_left_reset_button = False
         self._previous_right_follow_start_button = False
-        self._previous_right_grip_pressed = False
         self._left_arm_target_pos_b = None
         self._right_arm_target_pos_b = None
         for controller in self._rmpflow_controllers.values():
@@ -744,13 +1201,11 @@ class BasicUnityController:
         follow_active_bool = bool(follow_active.item())
         body_lift_mode = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_GRIP].item() > 0.5)
         self._body_lift_mode = body_lift_mode
-        right_grip_pressed = bool(command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_GRIP].item() > 0.5)
-        if right_grip_pressed and not self._previous_right_grip_pressed:
-            self.request_reset("right Grip pressed")
+        left_reset_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_SECONDARY].item() > 0.5)
+        if left_reset_button and not self._previous_left_reset_button:
+            self.request_reset("left Y pressed")
 
-        left_follow_start_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_SECONDARY].item() > 0.5)
         right_follow_start_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_SECONDARY].item() > 0.5)
-        left_follow_start_pressed = left_follow_start_button and not self._previous_left_follow_start_button
         right_follow_start_pressed = right_follow_start_button and not self._previous_right_follow_start_button
         if self._previous_body_lift_mode and not body_lift_mode:
             self._left_arm_hold_after_lift = True
@@ -760,13 +1215,12 @@ class BasicUnityController:
             self._reset_arm_position_target("left")
             self._reset_arm_position_target("right")
         start_warmup_frames = max(0, int(args_cli.arm_follow_start_warmup_frames))
-        if left_follow_start_pressed:
-            self._left_arm_hold_after_lift = False
-            self._left_arm_follow_warmup_frames = start_warmup_frames
-            self._reset_arm_position_target("left")
         if right_follow_start_pressed:
+            self._left_arm_hold_after_lift = False
             self._right_arm_hold_after_lift = False
+            self._left_arm_follow_warmup_frames = start_warmup_frames
             self._right_arm_follow_warmup_frames = start_warmup_frames
+            self._reset_arm_position_target("left")
             self._reset_arm_position_target("right")
         if not left_follow_active_bool:
             self._left_arm_follow_warmup_frames = 0
@@ -885,11 +1339,13 @@ class BasicUnityController:
             self._apply_arm_delta("right", right_arm_action_delta, right_mapped_rot_delta)
 
         self._apply_gripper_target(
+            "left",
             self._left_gripper_joint_ids,
             close_fraction=float(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_TRIGGER]),
             close_value=0.0,
         )
         self._apply_gripper_target(
+            "right",
             self._right_gripper_joint_ids,
             close_fraction=float(command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_TRIGGER]),
             close_value=0.20,
@@ -924,9 +1380,8 @@ class BasicUnityController:
                     flush=True,
                 )
         self._previous_body_lift_mode = body_lift_mode
-        self._previous_left_follow_start_button = left_follow_start_button
+        self._previous_left_reset_button = left_reset_button
         self._previous_right_follow_start_button = right_follow_start_button
-        self._previous_right_grip_pressed = right_grip_pressed
         self._hold_targets()
 
     def _apply_arm_delta(self, side: str, position_delta: torch.Tensor, rotation_delta: torch.Tensor) -> None:
@@ -1019,11 +1474,52 @@ class BasicUnityController:
         self._joint_targets[:, joint_ids] += joint_delta
         self._clamp_joint_targets(joint_ids)
 
-    def _apply_gripper_target(self, joint_ids: list[int], close_fraction: float, close_value: float) -> None:
+    def _limit_gripper_close_fraction(
+        self,
+        side: str,
+        joint_ids: list[int],
+        close_fraction: float,
+        close_value: float,
+    ) -> float:
+        close_fraction = max(0.0, min(1.0, close_fraction if math.isfinite(close_fraction) else 0.0))
+        previous_fraction = self._left_gripper_close_fraction if side == "left" else self._right_gripper_close_fraction
+        if close_fraction <= previous_fraction or self._joint_targets is None or len(joint_ids) == 0:
+            if side == "left":
+                self._left_gripper_close_fraction = close_fraction
+            else:
+                self._right_gripper_close_fraction = close_fraction
+            return close_fraction
+
+        joint_pos = self._robot.data.joint_pos[:, joint_ids]
+        actual_value = torch.mean(joint_pos, dim=1)
+        desired_value = _BASIC_GRIPPER_OPEN_VALUE + (float(close_value) - _BASIC_GRIPPER_OPEN_VALUE) * close_fraction
+        safe_value = torch.clamp(
+            actual_value - _BASIC_GRIPPER_CLOSE_FOLLOW_MARGIN,
+            min=min(float(close_value), _BASIC_GRIPPER_OPEN_VALUE),
+            max=max(float(close_value), _BASIC_GRIPPER_OPEN_VALUE),
+        )
+        limited_value = torch.maximum(
+            torch.full_like(safe_value, float(desired_value)),
+            safe_value,
+        )
+        denom = float(close_value) - _BASIC_GRIPPER_OPEN_VALUE
+        if abs(denom) < 1.0e-6:
+            limited_fraction = close_fraction
+        else:
+            limited_fraction = float(torch.min((limited_value - _BASIC_GRIPPER_OPEN_VALUE) / denom).item())
+            limited_fraction = max(0.0, min(close_fraction, min(1.0, limited_fraction)))
+
+        if side == "left":
+            self._left_gripper_close_fraction = limited_fraction
+        else:
+            self._right_gripper_close_fraction = limited_fraction
+        return limited_fraction
+
+    def _apply_gripper_target(self, side: str, joint_ids: list[int], close_fraction: float, close_value: float) -> None:
         if self._joint_targets is None or len(joint_ids) == 0:
             return
-        close_fraction = max(0.0, min(1.0, close_fraction if math.isfinite(close_fraction) else 0.0))
-        value = 0.994 + (float(close_value) - 0.994) * close_fraction
+        close_fraction = self._limit_gripper_close_fraction(side, joint_ids, close_fraction, close_value)
+        value = _BASIC_GRIPPER_OPEN_VALUE + (float(close_value) - _BASIC_GRIPPER_OPEN_VALUE) * close_fraction
         self._joint_targets[:, joint_ids] = value
         self._clamp_joint_targets(joint_ids)
 
@@ -1075,7 +1571,14 @@ def run_benchmark(
     robot = scene["robot"]
     sim_dt = sim.get_physics_dt()
     render_stride = max(0, int(args_cli.render_every_n_frames))
+    stream_stride = max(1, int(args_cli.stream_every_n_frames))
     print_every = max(1, int(args_cli.print_every))
+    native_stream = None
+    if args_cli.native_h264_stream:
+        if stereo_cameras is None:
+            raise RuntimeError("--native-h264-stream requires stereo cameras.")
+        native_stream = AsyncNativeStereoEncoder()
+        native_stream.wait_until_ready()
     default_joint_pos = _reset_scene(scene)
     if unity_controller is not None:
         unity_controller.reset()
@@ -1086,59 +1589,109 @@ def run_benchmark(
     print(
         "[RobotYaoBasic] Running minimal scene benchmark: "
         f"num_envs={scene.num_envs}, dt={sim_dt}, render_every_n_frames={render_stride}, "
-        f"robot=Agibot A2D, table=True, cubes=3, stereo_cameras={stereo_cameras is not None}, "
-        f"unity_control={control_device is not None}, task_managers=False, video_stream=False",
+        f"robot=Agibot A2D, table=True, cubes=3, cube_size={_BASIC_CUBE_SIZE:.3f}m, "
+        f"table_lift_z={_BASIC_TABLE_HEIGHT_OFFSET_Z:.3f}, table_top_z={_BASIC_TABLE_TOP_Z:.3f}, "
+        f"box_size={tuple(float(v) for v in _TASK_BOX_SIZE)}, drop_reset_z={_BASIC_CUBE_DROP_RESET_Z:.3f}, "
+        f"stereo_cameras={stereo_cameras is not None}, "
+        f"unity_control={control_device is not None}, task_managers=False, "
+        f"native_h264_stream={native_stream is not None}, stream_every_n_frames={stream_stride}, "
+        f"endpoint={args_cli.endpoint}, topic={args_cli.topic}",
         flush=True,
     )
 
-    while simulation_app.is_running():
-        loop_t0 = time.perf_counter()
+    try:
+        while simulation_app.is_running():
+            loop_t0 = time.perf_counter()
 
-        if control_device is not None and unity_controller is not None:
-            unity_controller.apply(control_device.advance(), sim_dt)
-            reset_reason = unity_controller.consume_reset_request()
-            if reset_reason is not None:
-                print(f"[RobotYaoBasic] Resetting basic scene: {reset_reason}", flush=True)
+            if control_device is not None and unity_controller is not None:
+                unity_controller.apply(control_device.advance(), sim_dt)
+                reset_reason = unity_controller.consume_reset_request()
+                if reset_reason is not None:
+                    print(f"[RobotYaoBasic] Resetting basic scene: {reset_reason}", flush=True)
+                    default_joint_pos = _reset_scene(scene)
+                    unity_controller.reset(hold_arms=True)
+                    if stereo_cameras is not None:
+                        for camera in stereo_cameras:
+                            camera.reset()
+            else:
+                robot.set_joint_position_target(default_joint_pos)
+            control_t1 = time.perf_counter()
+            scene.write_data_to_sim()
+            write_t2 = time.perf_counter()
+            sim.step(render=False)
+            step_t3 = time.perf_counter()
+            if render_stride > 0 and frame_id % render_stride == 0:
+                sim.render()
+            render_t4 = time.perf_counter()
+            scene.update(sim_dt)
+            scene_reset_reason = _basic_scene_reset_reason(scene)
+            if scene_reset_reason is not None:
+                print(f"[RobotYaoBasic] Resetting basic scene: {scene_reset_reason}", flush=True)
                 default_joint_pos = _reset_scene(scene)
-                unity_controller.reset(hold_arms=True)
+                if unity_controller is not None:
+                    unity_controller.reset(hold_arms=True)
                 if stereo_cameras is not None:
                     for camera in stereo_cameras:
                         camera.reset()
-        else:
-            robot.set_joint_position_target(default_joint_pos)
-        control_t1 = time.perf_counter()
-        scene.write_data_to_sim()
-        write_t2 = time.perf_counter()
-        sim.step(render=False)
-        step_t3 = time.perf_counter()
-        if render_stride > 0 and frame_id % render_stride == 0:
-            sim.render()
-        render_t4 = time.perf_counter()
-        scene.update(sim_dt)
-        update_t5 = time.perf_counter()
-        if stereo_cameras is not None:
-            for camera in stereo_cameras:
-                camera.update(dt=sim_dt)
-        camera_t6 = time.perf_counter()
+            update_t5 = time.perf_counter()
+            if stereo_cameras is not None:
+                for camera in stereo_cameras:
+                    camera.update(dt=sim_dt)
+            camera_t6 = time.perf_counter()
 
-        frame_id += 1
-        elapsed = max(time.perf_counter() - start_time, 1.0e-6)
-        perf.add(
-            control=control_t1 - loop_t0,
-            write=write_t2 - control_t1,
-            step=step_t3 - write_t2,
-            render=render_t4 - step_t3,
-            update=update_t5 - render_t4,
-            camera=camera_t6 - update_t5,
-            copy=0.0,
-            total=camera_t6 - loop_t0,
-        )
+            frame_id += 1
+            copy_t7 = camera_t6
+            submit_t8 = camera_t6
+            if native_stream is not None and frame_id % stream_stride == 0:
+                copy_t0 = time.perf_counter()
+                left_tensor = stereo_cameras[0].data.output.get("rgb")
+                right_tensor = stereo_cameras[1].data.output.get("rgb")
+                if (
+                    left_tensor is not None
+                    and right_tensor is not None
+                    and left_tensor.shape[0] >= 1
+                    and right_tensor.shape[0] >= 1
+                ):
+                    left_rgb = np.ascontiguousarray(left_tensor.detach().cpu().numpy()[0, :, :, :3], dtype=np.uint8)
+                    right_rgb = np.ascontiguousarray(right_tensor.detach().cpu().numpy()[0, :, :, :3], dtype=np.uint8)
+                    header = _make_native_stereo_header(frame_id)
+                    copy_t7 = time.perf_counter()
+                    submit_t0 = time.perf_counter()
+                    native_stream.submit(frame_id, header, left_rgb, right_rgb)
+                    submit_t8 = time.perf_counter()
+                else:
+                    copy_t7 = time.perf_counter()
+                    submit_t8 = copy_t7
+            elapsed = max(time.perf_counter() - start_time, 1.0e-6)
+            perf.add(
+                control=control_t1 - loop_t0,
+                write=write_t2 - control_t1,
+                step=step_t3 - write_t2,
+                render=render_t4 - step_t3,
+                update=update_t5 - render_t4,
+                camera=camera_t6 - update_t5,
+                copy=copy_t7 - camera_t6,
+                submit=submit_t8 - copy_t7,
+                total=submit_t8 - loop_t0,
+            )
 
-        if frame_id % print_every == 0:
-            print(perf.pop_line(frame_id, frame_id / elapsed), flush=True)
+            if frame_id % print_every == 0:
+                print(perf.pop_line(frame_id, frame_id / elapsed), flush=True)
+                if native_stream is not None:
+                    print(native_stream.pop_line(), flush=True)
 
-        if int(args_cli.max_frames) > 0 and frame_id >= int(args_cli.max_frames):
-            break
+            if int(args_cli.max_frames) > 0 and frame_id >= int(args_cli.max_frames):
+                break
+    finally:
+        if native_stream is not None:
+            native_stream.close()
+            final_stats = native_stream.stats()
+            print(
+                f"[RobotYaoBasic] native_stream stopped submitted={int(final_stats['submitted'])} "
+                f"sent_total={int(final_stats['sent_total'])} dropped={int(final_stats['dropped'])} "
+                f"failed={int(final_stats['failed'])}",
+                flush=True,
+            )
 
     print(f"[RobotYaoBasic] stopped frames={frame_id}", flush=True)
 

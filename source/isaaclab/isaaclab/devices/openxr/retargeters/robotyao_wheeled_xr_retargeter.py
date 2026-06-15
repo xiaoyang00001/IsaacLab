@@ -129,8 +129,9 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         right_arm_joint_delta_0..6,
     ]``
 
-    Right-hand B/A starts/stops right-arm follow; left-hand Y/X starts/stops
-    left-arm follow. Controller poses are expected to already be converted to Isaac Lab coordinates by
+    Right-hand B/A starts/stops bimanual arm follow. Left-hand Y/X are passed
+    through for higher-level scene actions and do not control arm follow here.
+    Controller poses are expected to already be converted to Isaac Lab coordinates by
     ``ZeroMqGameSubDevice``; this retargeter differences consecutive controller
     poses and applies position/rotation delta scales. Holding the left grip enters
     body-lift mode, routes the left stick Y axis to the lift command, and freezes
@@ -232,11 +233,9 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
 
         yaw = self._apply_dead_zone(right_inputs[DeviceBase.MotionControllerInputIndex.THUMBSTICK_X.value])
 
-        left_follow_start_button = left_inputs[DeviceBase.MotionControllerInputIndex.BUTTON_1.value] > 0.5
-        left_follow_stop_button = left_inputs[DeviceBase.MotionControllerInputIndex.BUTTON_0.value] > 0.5
         right_follow_start_button = right_inputs[DeviceBase.MotionControllerInputIndex.BUTTON_1.value] > 0.5
         right_follow_stop_button = right_inputs[DeviceBase.MotionControllerInputIndex.BUTTON_0.value] > 0.5
-        self._update_follow_state("left", left_follow_start_button, left_follow_stop_button)
+        self._update_follow_state("left", right_follow_start_button, right_follow_stop_button)
         self._update_follow_state("right", right_follow_start_button, right_follow_stop_button)
         if left_grip_released:
             self._stop_all_arm_follow()

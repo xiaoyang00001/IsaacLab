@@ -43,6 +43,8 @@ _ROBOTYAO_CUDA_CACHE_PATH = os.environ.setdefault(
 _ROBOTYAO_NV_SHADER_CACHE_PATH = os.environ.setdefault(
     "NV_SHADER_DISK_CACHE_PATH", os.path.join(_ROBOTYAO_CACHE_ROOT, "nv_shader_cache")
 )
+_ROBOTYAO_GRIPPER_OPEN_VALUE = 0.994
+_ROBOTYAO_GRIPPER_CLOSE_FOLLOW_MARGIN = 0.04
 for _robotyao_cache_path in (
     _ROBOTYAO_WARP_CACHE_PATH,
     _ROBOTYAO_OPTIX_CACHE_PATH,
@@ -360,7 +362,7 @@ parser.add_argument(
     dest="unity_follow_mode",
     choices=["toggle", "hold"],
     default="toggle",
-    help="Arm-follow mode for left Y/X and right B/A. Default: Y/B starts following, X/A stops.",
+    help="Arm-follow mode for right B/A. Default: right B starts both arms, right A stops both arms.",
 )
 parser.add_argument("--max-forward-speed", type=float, default=1.0, help="Left stick Y forward speed in m/s.")
 parser.add_argument("--max-lateral-speed", type=float, default=0.6, help="Left stick X lateral walking speed in m/s. Use 0 to disable strafe.")
@@ -388,7 +390,7 @@ parser.add_argument(
     "--arm-follow-start-warmup-frames",
     type=int,
     default=5,
-    help="Hold arm joints for this many frames after pressing Y/B before accepting arm deltas.",
+    help="Hold arm joints for this many frames after pressing right B before accepting arm deltas.",
 )
 parser.add_argument(
     "--arm-rmpflow-axis-map",
@@ -418,7 +420,7 @@ parser.add_argument(
     action="store_true",
     default=True,
     help=(
-        "Track a persistent end-effector position target from Y/B press to X/A release. "
+        "Track a persistent end-effector position target from right B press to right A release. "
         "This prevents relative RMPFlow deltas from discarding unexecuted residual motion."
     ),
 )
@@ -433,13 +435,13 @@ parser.add_argument(
     dest="debug_arm_delta_session",
     action="store_true",
     default=True,
-    help="Print one compact line per frame while Y/B arm-follow is active, plus a summary on X/A stop.",
+    help="Print one compact line per frame while right-B arm-follow is active, plus a summary on right-A stop.",
 )
 parser.add_argument(
     "--no-debug-arm-delta-session",
     dest="debug_arm_delta_session",
     action="store_false",
-    help="Disable compact Y/B to X/A arm delta session logs.",
+    help="Disable compact right-B to right-A arm delta session logs.",
 )
 parser.add_argument(
     "--debug-retargeter-deltas",
@@ -1971,9 +1973,10 @@ class RobotYaoTaskSceneController:
         self._right_arm_hold_after_lift = False
         self._left_arm_follow_warmup_frames = 0
         self._right_arm_follow_warmup_frames = 0
-        self._previous_left_follow_start_button = False
+        self._left_gripper_close_fraction = 0.0
+        self._right_gripper_close_fraction = 0.0
+        self._previous_left_reset_button = False
         self._previous_right_follow_start_button = False
-        self._previous_right_grip_pressed = False
         self._reset_requested = False
         self._reset_reason = ""
         self._task_cube_names = ("cube_1", "cube_2", "cube_3")
@@ -2213,14 +2216,68 @@ class RobotYaoTaskSceneController:
         else:
             raise ValueError(f"Unsupported gripper side: {side}")
         close_fraction = max(0.0, min(1.0, float(close_fraction)))
-        value = 0.994 + (close_value - 0.994) * close_fraction
+        value = _ROBOTYAO_GRIPPER_OPEN_VALUE + (close_value - _ROBOTYAO_GRIPPER_OPEN_VALUE) * close_fraction
         targets = torch.full(
             (self._env.num_envs, len(joint_names)), float(value), dtype=torch.float32, device=self._env.device
         )
         return targets
 
+    def _limit_gripper_close_fraction(self, side: str, close_fraction: float) -> float:
+        close_fraction = max(0.0, min(1.0, close_fraction if math.isfinite(close_fraction) else 0.0))
+        previous_fraction = self._left_gripper_close_fraction if side == "left" else self._right_gripper_close_fraction
+        if close_fraction <= previous_fraction:
+            if side == "left":
+                self._left_gripper_close_fraction = close_fraction
+            elif side == "right":
+                self._right_gripper_close_fraction = close_fraction
+            else:
+                raise ValueError(f"Unsupported gripper side: {side}")
+            return close_fraction
+
+        if side == "left":
+            joint_ids = self._left_gripper_joint_ids
+            open_targets = self._left_gripper_open_targets
+            close_targets = self._left_gripper_close_targets
+        elif side == "right":
+            joint_ids = self._right_gripper_joint_ids
+            open_targets = self._right_gripper_open_targets
+            close_targets = self._right_gripper_close_targets
+        else:
+            raise ValueError(f"Unsupported gripper side: {side}")
+        if len(joint_ids) == 0:
+            if side == "left":
+                self._left_gripper_close_fraction = close_fraction
+            else:
+                self._right_gripper_close_fraction = close_fraction
+            return close_fraction
+
+        joint_pos = self._robot.data.joint_pos[:, joint_ids]
+        actual_value = torch.mean(joint_pos, dim=1)
+        desired_targets = open_targets + (close_targets - open_targets) * close_fraction
+        desired_value = torch.mean(desired_targets, dim=1)
+        open_value = float(torch.mean(open_targets).item())
+        close_value = float(torch.mean(close_targets).item())
+        safe_value = torch.clamp(
+            actual_value - _ROBOTYAO_GRIPPER_CLOSE_FOLLOW_MARGIN,
+            min=min(close_value, open_value),
+            max=max(close_value, open_value),
+        )
+        limited_value = torch.maximum(desired_value, safe_value)
+        denom = close_value - open_value
+        if abs(denom) < 1.0e-6:
+            limited_fraction = close_fraction
+        else:
+            limited_fraction = float(torch.min((limited_value - open_value) / denom).item())
+            limited_fraction = max(0.0, min(close_fraction, min(1.0, limited_fraction)))
+
+        if side == "left":
+            self._left_gripper_close_fraction = limited_fraction
+        else:
+            self._right_gripper_close_fraction = limited_fraction
+        return limited_fraction
+
     def _apply_direct_gripper_target(self, side: str, close_fraction: float) -> None:
-        close_fraction = max(0.0, min(1.0, float(close_fraction)))
+        close_fraction = self._limit_gripper_close_fraction(side, float(close_fraction))
         if side == "left":
             joint_ids = self._left_gripper_joint_ids
             targets = self._left_gripper_open_targets + (
@@ -2390,7 +2447,7 @@ class RobotYaoTaskSceneController:
                 state["ee_last_w"] = ee_pos_w.detach().clone()
             print(
                 f"[ARM_DELTA_SESSION {side}] start step={state['start_step']} "
-                f"button={'Y' if side == 'left' else 'B'} "
+                f"button=B "
                 f"ee_start_w={self._format_debug_vec3(state['ee_start_w'])}",
                 flush=True,
             )
@@ -2459,7 +2516,7 @@ class RobotYaoTaskSceneController:
 
         print(
             f"[ARM_DELTA_SESSION {side}] end step={getattr(self, '_step_count', 0)} "
-            f"button={'X' if side == 'left' else 'A'} frames={state['frames']} "
+            f"button=A frames={state['frames']} "
             f"controller_total={self._format_debug_vec3(state['controller_cum'])} "
             f"controller_total_norm={self._debug_norm(state['controller_cum']):.6f} "
             f"scene_total={self._format_debug_vec3(state['scene_cum'])} "
@@ -2482,7 +2539,9 @@ class RobotYaoTaskSceneController:
         self._right_arm_hold_after_lift = hold_arms
         self._left_arm_follow_warmup_frames = 0
         self._right_arm_follow_warmup_frames = 0
-        self._previous_left_follow_start_button = False
+        self._left_gripper_close_fraction = 0.0
+        self._right_gripper_close_fraction = 0.0
+        self._previous_left_reset_button = False
         self._previous_right_follow_start_button = False
         self._enabled_arm_action_terms.clear()
         self._previous_left_gripper_pos_w = None
@@ -2655,12 +2714,10 @@ class RobotYaoTaskSceneController:
         follow_active_bool = bool(follow_active.item())
         body_lift_mode = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_GRIP].item() > 0.5)
         self._body_lift_mode = body_lift_mode
-        right_grip_pressed = bool(command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_GRIP].item() > 0.5)
-        if right_grip_pressed and not self._previous_right_grip_pressed:
-            self.request_env_reset("right Grip pressed")
-        left_follow_start_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_SECONDARY].item() > 0.5)
+        left_reset_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.LEFT_SECONDARY].item() > 0.5)
+        if left_reset_button and not self._previous_left_reset_button:
+            self.request_env_reset("left Y pressed")
         right_follow_start_button = bool(command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_SECONDARY].item() > 0.5)
-        left_follow_start_pressed = left_follow_start_button and not self._previous_left_follow_start_button
         right_follow_start_pressed = right_follow_start_button and not self._previous_right_follow_start_button
         if self._previous_body_lift_mode and not body_lift_mode:
             self._left_arm_hold_after_lift = True
@@ -2670,13 +2727,12 @@ class RobotYaoTaskSceneController:
             self._reset_arm_position_target("left")
             self._reset_arm_position_target("right")
         start_warmup_frames = max(0, int(args_cli.arm_follow_start_warmup_frames))
-        if left_follow_start_pressed:
-            self._left_arm_hold_after_lift = False
-            self._left_arm_follow_warmup_frames = start_warmup_frames
-            self._reset_arm_position_target("left")
         if right_follow_start_pressed:
+            self._left_arm_hold_after_lift = False
             self._right_arm_hold_after_lift = False
+            self._left_arm_follow_warmup_frames = start_warmup_frames
             self._right_arm_follow_warmup_frames = start_warmup_frames
+            self._reset_arm_position_target("left")
             self._reset_arm_position_target("right")
         if not left_follow_active_bool:
             self._left_arm_follow_warmup_frames = 0
@@ -3067,6 +3123,8 @@ class RobotYaoTaskSceneController:
         right_trigger = command_tensor[RobotYaoWheeledXrRetargeter.RIGHT_TRIGGER]
         left_gripper_close_fraction = max(0.0, min(1.0, float(left_trigger)))
         right_gripper_close_fraction = max(0.0, min(1.0, float(right_trigger)))
+        left_gripper_close_fraction = self._limit_gripper_close_fraction("left", left_gripper_close_fraction)
+        right_gripper_close_fraction = self._limit_gripper_close_fraction("right", right_gripper_close_fraction)
 
         if has_concurrent_grippers:
             actions[:, self._left_gripper_action_slice] = 1.0 - 2.0 * left_gripper_close_fraction
@@ -3084,9 +3142,8 @@ class RobotYaoTaskSceneController:
                 self._apply_direct_gripper_target("right", right_gripper_close_fraction)
 
         self._previous_body_lift_mode = body_lift_mode
-        self._previous_left_follow_start_button = left_follow_start_button
+        self._previous_left_reset_button = left_reset_button
         self._previous_right_follow_start_button = right_follow_start_button
-        self._previous_right_grip_pressed = right_grip_pressed
 
         self.update_camera_xforms()
         return actions
