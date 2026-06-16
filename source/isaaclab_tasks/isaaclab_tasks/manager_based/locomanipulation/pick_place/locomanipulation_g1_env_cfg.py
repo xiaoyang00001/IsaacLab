@@ -114,7 +114,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg() if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=10.0,
+            ) if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
     )
     test_box1 = RigidObjectCfg(
@@ -126,7 +129,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg() if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=10.0,
+            ) if ZMQ_SYNC_ROLE != "subscriber" else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
         ),
     )
     # 本地仓库背景
@@ -252,9 +258,11 @@ class EventsCfg:
         mode="prestartup",
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox",
-            "mass": 3.0,
-            "linear_damping": 2.0,
-            "angular_damping": 3.0,
+            "mass": 1.5,
+            "linear_damping": 5.0,
+            "angular_damping": 0.1,
+            "kinematic_enabled": ZMQ_SYNC_ROLE == "subscriber",
+            "disable_gravity": ZMQ_SYNC_ROLE == "subscriber",
         },
     )
 
@@ -263,9 +271,11 @@ class EventsCfg:
         mode="prestartup",
         params={
             "prim_path_template": "/World/envs/env_{}/TestBox1",
-            "mass": 3.0,
-            "linear_damping": 2.0,
-            "angular_damping": 3.0,
+            "mass": 1.5,
+            "linear_damping": 5.0,
+            "angular_damping": 0.1,
+            "kinematic_enabled": ZMQ_SYNC_ROLE == "subscriber",
+            "disable_gravity": ZMQ_SYNC_ROLE == "subscriber",
         },
     )
 
@@ -276,42 +286,29 @@ class EventsCfg:
         params={"prim_name": "ConveyorBelt_A08_06"},
     )
 
-    # 每 0.05s 强制恢复箱子的 -y 速度，沿传送带流向机器人（y≈-12~-13）。
-    # drive_test_box = EventTerm(
-    #     func=locomanip_mdp.drive_object_on_conveyor,
-    #     mode="interval",
-    #     interval_range_s=(0.05, 0.05),
-    #     params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
-    # )
-
-    # drive_test_box1 = EventTerm(
-    #     func=locomanip_mdp.drive_object_on_conveyor,
-    #     mode="interval",
-    #     interval_range_s=(0.05, 0.05),
-    #     params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
-    # )
-
-    #讓箱子靠摩擦力前進
-    stop_test_box_after_leaving_conveyor = EventTerm(
-        func=locomanip_mdp.stop_box_motion_after_leaving_conveyor,
+    drive_test_box = EventTerm(
+        func=locomanip_mdp.drive_object_on_conveyor,
         mode="interval",
         interval_range_s=(0.02, 0.02),
-        params={"object_name": "test_box", "conveyor_prim_name": "ConveyorBelt_A08_06"},
+        params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
     )
 
-    stop_test_box1_after_leaving_conveyor = EventTerm(
-        func=locomanip_mdp.stop_box_motion_after_leaving_conveyor,
+    drive_test_box1 = EventTerm(
+        func=locomanip_mdp.drive_object_on_conveyor,
         mode="interval",
         interval_range_s=(0.02, 0.02),
-        params={"object_name": "test_box1", "conveyor_prim_name": "ConveyorBelt_A08_06"},
+        params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
     )
-    #啓動傳送帶
+
     setup_conveyor_belt_physics = EventTerm(
     func=locomanip_mdp.setup_conveyor_belt_physics,
     mode="prestartup",
     params={
         "velocity": (-0.5, 0.0, 0.0),
         "prim_name_patterns": ("ConveyorBelt_A08_06", "ConveyorBelt_A08_07", "ConveyorBelt_A08_08"),
+        "roller_radius": 0.028951416,
+        "rotation_axis": "X",
+        "keep_rollers_parent_collision": False,
     },
 )
 

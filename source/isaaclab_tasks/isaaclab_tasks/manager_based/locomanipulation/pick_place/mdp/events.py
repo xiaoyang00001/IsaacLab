@@ -21,8 +21,10 @@ def setup_usd_rigid_object_physics(
     prim_path_template: str = "/World/envs/env_{}/TestBox",
     mass: float = 0.5,
     linear_damping: float = 0.1,
-    angular_damping: float = 1000.0,
+    angular_damping: float = 0.1,
     mesh_approximation: str = "convexHull",
+    kinematic_enabled: bool = False,
+    disable_gravity: bool = False,
 ):
     """Ensure the target USD prim has rigid-body APIs defined before simulation starts."""
     stage = get_current_stage()
@@ -42,7 +44,14 @@ def setup_usd_rigid_object_physics(
         rigid_api = UsdPhysics.RigidBodyAPI.Get(stage, prim.GetPath())
         if not rigid_api:
             rigid_api = UsdPhysics.RigidBodyAPI.Apply(prim)
-        rigid_api.CreateRigidBodyEnabledAttr(True)
+        rigid_enabled_attr = rigid_api.GetRigidBodyEnabledAttr()
+        if not rigid_enabled_attr:
+            rigid_enabled_attr = rigid_api.CreateRigidBodyEnabledAttr()
+        rigid_enabled_attr.Set(True)
+        kinematic_attr = rigid_api.GetKinematicEnabledAttr()
+        if not kinematic_attr:
+            kinematic_attr = rigid_api.CreateKinematicEnabledAttr()
+        kinematic_attr.Set(bool(kinematic_enabled))
 
         collision_api = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath())
         if not collision_api:
@@ -56,8 +65,26 @@ def setup_usd_rigid_object_physics(
         physx_api = PhysxSchema.PhysxRigidBodyAPI.Get(stage, prim.GetPath())
         if not physx_api:
             physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
-        physx_api.CreateLinearDampingAttr(float(linear_damping))
-        physx_api.CreateAngularDampingAttr(float(angular_damping))
+        disable_gravity_attr = physx_api.GetDisableGravityAttr()
+        if not disable_gravity_attr:
+            disable_gravity_attr = physx_api.CreateDisableGravityAttr()
+        disable_gravity_attr.Set(bool(disable_gravity))
+        lin_damping = physx_api.GetLinearDampingAttr()
+        if not lin_damping:
+            lin_damping = physx_api.CreateLinearDampingAttr()
+        lin_damping.Set(float(linear_damping))
+        ang_damping = physx_api.GetAngularDampingAttr()
+        if not ang_damping:
+            ang_damping = physx_api.CreateAngularDampingAttr()
+        ang_damping.Set(float(angular_damping))
+        if not kinematic_enabled:
+            try:
+                ccd_attr = physx_api.GetCcdEnabledAttr()
+                if not ccd_attr:
+                    ccd_attr = physx_api.CreateCcdEnabledAttr()
+                ccd_attr.Set(True)
+            except Exception:
+                pass
 
         # For dynamic rigid bodies, triangle mesh collision is not supported.
         # Force mesh collision approximation on the root prim and all child mesh prims.
@@ -78,7 +105,8 @@ def setup_usd_rigid_object_physics(
 
         print(
             f"[locomanip_event] setup_usd_rigid_object_physics applied on {prim_path} "
-            f"(mass={mass}, lin_damp={linear_damping}, ang_damp={angular_damping}, mesh={mesh_approximation})"
+            f"(mass={mass}, lin_damp={linear_damping}, ang_damp={angular_damping}, "
+            f"mesh={mesh_approximation}, kinematic={kinematic_enabled}, disable_gravity={disable_gravity})"
         )
 
 def stop_box_motion_after_leaving_conveyor(
@@ -322,22 +350,71 @@ def drive_object_on_conveyor(
     velocity_x: float = 0.0,
     velocity_y: float = 0.0,
 ):
-    """Maintain constant linear velocity on an object to simulate conveyor belt motion.
-
-    Called on an interval; overrides x/y velocity each tick so friction cannot slow
-    the object down.  z and angular velocities are left unchanged (z) or zeroed (angular).
-    """
+    """Only drive the box while it is still on the conveyor."""
     obj = env.scene[object_name]
     device = obj.device
 
     if env_ids is None:
         env_ids = torch.arange(env.scene.num_envs, device=device, dtype=torch.long)
 
-    vel = obj.data.root_vel_w[env_ids].clone()  # (N, 6) [lin_xyz, ang_xyz]
+    if len(env_ids) == 0:
+        return
+
+    root_pos = obj.data.root_pos_w[env_ids]
+
+    ref_key = f"_conveyor_ref_{object_name}"
+    if not hasattr(env, ref_key):
+        min_z_key = f"_conveyor_min_z_{object_name}"
+        init_z_key = f"_conveyor_init_z_{object_name}"
+        count_key = f"_conveyor_stable_count_{object_name}"
+        timeout_key = f"_conveyor_timeout_{object_name}"
+
+        if not hasattr(env, min_z_key):
+            setattr(env, min_z_key, root_pos[:, 2].clone())
+            setattr(env, init_z_key, root_pos[:, 2].clone())
+            setattr(env, count_key, 0)
+            print(f"[drive_conveyor] {object_name}: settling detect from z={root_pos[0, 2].item():.3f}")
+            return
+
+        prev_min_z = getattr(env, min_z_key)
+        new_min_z = torch.min(prev_min_z, root_pos[:, 2])
+        setattr(env, min_z_key, new_min_z)
+        initial_z = getattr(env, init_z_key)
+
+        if new_min_z[0] < prev_min_z[0]:
+            setattr(env, count_key, 0)
+        else:
+            count = getattr(env, count_key, 0) + 1
+            setattr(env, count_key, count)
+            if count >= 3 and (initial_z[0] - new_min_z[0]) >= 0.03:
+                setattr(env, ref_key, root_pos.clone())
+                print(
+                    f"[drive_conveyor] {object_name}: settled at conveyor reference: "
+                    f"z={root_pos[0, 2].item():.3f}, fall={initial_z[0].item() - new_min_z[0].item():.3f}m"
+                )
+
+        timeout = getattr(env, timeout_key, 0) + 1
+        setattr(env, timeout_key, timeout)
+        if timeout > 100:
+            setattr(env, ref_key, root_pos.clone())
+            print(f"[drive_conveyor] {object_name}: timeout forcing reference at z={root_pos[0, 2].item():.3f}")
+        return
+
+    ref_pos = getattr(env, ref_key)
+
+    z_on_belt = (root_pos[:, 2] >= ref_pos[:, 2] - 0.15) & (root_pos[:, 2] <= ref_pos[:, 2] + 0.15)
+    x_on_belt = (root_pos[:, 0] >= ref_pos[:, 0] - 2.0) & (root_pos[:, 0] <= ref_pos[:, 0] + 2.0)
+    y_on_belt = root_pos[:, 1] >= ref_pos[:, 1] - 9.0
+    on_belt = z_on_belt & x_on_belt & y_on_belt
+
+    if not on_belt.any():
+        return
+
+    env_ids_to_drive = env_ids[on_belt]
+    vel = obj.data.root_vel_w[env_ids_to_drive].clone()
     vel[:, 0] = velocity_x
     vel[:, 1] = velocity_y
-    vel[:, 3:] = 0.0          # 清零角速度，防止滚动
-    obj.write_root_velocity_to_sim(vel, env_ids=env_ids)
+    obj.write_root_velocity_to_sim(vel, env_ids=env_ids_to_drive)
 
 def setup_conveyor_belt_physics(
     env: ManagerBasedEnv,
@@ -345,8 +422,11 @@ def setup_conveyor_belt_physics(
     velocity: tuple[float, float, float] = (0.0, -0.5, 0.0),
     prim_name_patterns: tuple[str, ...] = ("ConveyorBelt",),
     rollers_name: str = "Rollers",
+    roller_radius: float = 0.028951416,
+    rotation_axis: str = "X",
+    keep_rollers_parent_collision: bool = False,
 ):
-    """Apply PhysxSurfaceVelocityAPI to conveyor rollers so boxes move by contact friction."""
+    """Configure the conveyor as a solid collider without PhysxSurfaceVelocityAPI."""
     import math
 
     stage = get_current_stage()
@@ -400,12 +480,27 @@ def setup_conveyor_belt_physics(
                 print(f"[locomanip_event] Rollers prim not found under {str(root_prim.GetPath())}")
                 continue
 
-            if not rollers_prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                UsdPhysics.RigidBodyAPI.Apply(rollers_prim)
-            rigid_api = UsdPhysics.RigidBodyAPI(rollers_prim)
-            rigid_api.GetKinematicEnabledAttr().Set(True)
-            rigid_api.CreateRigidBodyEnabledAttr(True)
+            if rollers_prim.HasAPI(PhysxSchema.PhysxSurfaceVelocityAPI):
+                surf_api = PhysxSchema.PhysxSurfaceVelocityAPI(rollers_prim)
+                try:
+                    surf_api.GetSurfaceVelocityEnabledAttr().Set(False)
+                except Exception:
+                    pass
 
+            if not keep_rollers_parent_collision:
+                if rollers_prim.HasAPI(UsdPhysics.CollisionAPI):
+                    collision_api = UsdPhysics.CollisionAPI(rollers_prim)
+                    collision_api.GetCollisionEnabledAttr().Set(False)
+                if rollers_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    rigid_api = UsdPhysics.RigidBodyAPI(rollers_prim)
+                    rigid_enabled_attr = rigid_api.GetRigidBodyEnabledAttr()
+                    if rigid_enabled_attr:
+                        rigid_enabled_attr.Set(False)
+                    kinematic_attr = rigid_api.GetKinematicEnabledAttr()
+                    if kinematic_attr:
+                        kinematic_attr.Set(False)
+
+            configured_meshes = 0
             for mesh_child in Usd.PrimRange(rollers_prim):
                 if not mesh_child.IsA(UsdGeom.Mesh):
                     continue
@@ -413,14 +508,13 @@ def setup_conveyor_belt_physics(
                     continue
                 if not mesh_child.HasAPI(UsdPhysics.CollisionAPI):
                     UsdPhysics.CollisionAPI.Apply(mesh_child)
-
-            if not rollers_prim.HasAPI(PhysxSchema.PhysxSurfaceVelocityAPI):
-                PhysxSchema.PhysxSurfaceVelocityAPI.Apply(rollers_prim)
-
-            surf_api = PhysxSchema.PhysxSurfaceVelocityAPI(rollers_prim)
-            surf_api.GetSurfaceVelocityEnabledAttr().Set(True)
-            surf_api.CreateSurfaceVelocityAttr().Set(Gf.Vec3d(*velocity))
+                mesh_collision_api = UsdPhysics.MeshCollisionAPI.Get(stage, mesh_child.GetPath())
+                if not mesh_collision_api:
+                    mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(mesh_child)
+                mesh_collision_api.GetApproximationAttr().Set("convexHull")
+                configured_meshes += 1
 
             print(
-                f"[locomanip_event] Rollers SurfaceVelocity vel={velocity} -> {str(rollers_prim.GetPath())}"
+                f"[locomanip_event] GPU-safe conveyor collider configured: "
+                f"{str(rollers_prim.GetPath())}, meshes={configured_meshes}, velocity_ref={velocity}"
             )
