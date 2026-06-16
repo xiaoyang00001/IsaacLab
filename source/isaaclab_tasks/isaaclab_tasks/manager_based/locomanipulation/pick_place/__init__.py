@@ -13,6 +13,8 @@ from . import (
     agents,
     fixed_base_upper_body_ik_g1_env_cfg,
     locomanipulation_g1_env_cfg,
+    sonic_fullmid_locomanipulation_env_cfg,
+    sonic_fullmulti_locomanipulation_env_cfg,
     sonic_fullscene_locomanipulation_env_cfg,
     sonic_solo_locomanipulation_env_cfg,
 )
@@ -35,6 +37,28 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
         "env_cfg_entry_point": sonic_fullscene_locomanipulation_env_cfg.SonicFullsceneLocomanipulationEnvCfg,
+    },
+    disable_env_checker=True,
+)
+
+# SONIC 闭环：完整主配置场景（4 台 G1 + 双机遥操 + 传送带全保留，主配置文件一行不动，
+# 继承 LocomanipulationG1EnvCfg 覆盖物理 200Hz/dec4 对齐闭环七条件 + 补 warehouse 地板摩擦）
+gym.register(
+    id="Isaac-SonicFullMulti-Locomanipulation-G1-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": sonic_fullmulti_locomanipulation_env_cfg.SonicFullMultiLocomanipulationEnvCfg,
+    },
+    disable_env_checker=True,
+)
+
+# SONIC 闭环中档：fullscene + N 台静止陪跑 G1（env flag SONIC_FULLMID_COMPANIONS 控制档位），
+# 在带陪跑 G1 的完整仓库场景里逼近实时测行走（继承 fullscene 的 200Hz/dec4 + 干净配置）
+gym.register(
+    id="Isaac-SonicFullMid-Locomanipulation-G1-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": sonic_fullmid_locomanipulation_env_cfg.SonicFullMidLocomanipulationEnvCfg,
     },
     disable_env_checker=True,
 )
