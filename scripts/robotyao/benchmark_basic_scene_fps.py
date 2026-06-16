@@ -42,6 +42,9 @@ import traceback
 
 _ROBOTYAO_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _ROBOTYAO_CACHE_ROOT = os.path.join(_ROBOTYAO_REPO_ROOT, ".robotyao_cache")
+_ROBOTYAO_NATIVE_ENCODER_LIB = os.path.join(os.path.dirname(__file__), "native", "libIsaac_link_encode.so")
+_ROBOTYAO_NATIVE_ENCODER_DLL = r"E:\VSCode\Isaac_link_encode\x64\Release\Isaaclinkencode.dll"
+_ROBOTYAO_NATIVE_ENCODER_DEFAULT = _ROBOTYAO_NATIVE_ENCODER_DLL if os.name == "nt" else _ROBOTYAO_NATIVE_ENCODER_LIB
 for _cache_name in ("warp", "optix", "cuda_cache", "nv_shader_cache"):
     _cache_path = os.path.join(_ROBOTYAO_CACHE_ROOT, _cache_name)
     os.makedirs(_cache_path, exist_ok=True)
@@ -69,13 +72,15 @@ parser.add_argument("--fisheye-fov", type=float, default=180.0, help="Stereo fis
 parser.add_argument(
     "--native-h264-stream",
     action="store_true",
-    help="Copy stereo fisheye RGB frames to Isaaclinkencode.dll for async side-by-side NVENC H264 ZMQ publishing.",
+    help="Copy stereo fisheye RGB frames to the native Isaac_link_encode library for async side-by-side H264 ZMQ publishing.",
 )
 parser.add_argument(
     "--native-h264-dll",
+    "--native-h264-library",
+    dest="native_h264_dll",
     type=str,
-    default=r"E:\VSCode\Isaac_link_encode\x64\Release\Isaaclinkencode.dll",
-    help="Path to Isaac_link_encode Release x64 DLL.",
+    default=_ROBOTYAO_NATIVE_ENCODER_DEFAULT,
+    help="Path to the native Isaac_link_encode shared library. Defaults to libIsaac_link_encode.so on Linux and the Release x64 DLL on Windows.",
 )
 parser.add_argument("--endpoint", type=str, default="tcp://*:5556", help="Native H264 ZMQ PUB bind endpoint.")
 parser.add_argument("--topic", type=str, default="robotyao.stereo.fisheye.v1", help="Native H264 ZMQ topic.")
@@ -595,15 +600,15 @@ class _NativeIsaacLinkEncodeStats(ctypes.Structure):
 
 
 class NativeIsaacLinkEncodePublisher:
-    """ctypes wrapper around Isaaclinkencode.dll."""
+    """ctypes wrapper around the native Isaac_link_encode C ABI."""
 
     _PIXEL_RGB24 = 0
 
     def __init__(self):
-        self._dll_path = os.path.abspath(os.path.expandvars(args_cli.native_h264_dll))
-        if not os.path.exists(self._dll_path):
-            raise FileNotFoundError(f"Isaaclinkencode.dll not found: {self._dll_path}")
-        self._dll = ctypes.WinDLL(self._dll_path)
+        self._library_path = os.path.abspath(os.path.expanduser(os.path.expandvars(args_cli.native_h264_dll)))
+        if not os.path.exists(self._library_path):
+            raise FileNotFoundError(f"Native Isaac_link_encode library not found: {self._library_path}")
+        self._lib = ctypes.WinDLL(self._library_path) if os.name == "nt" else ctypes.CDLL(self._library_path)
         self._configure_abi()
         self._closed = True
 
@@ -617,7 +622,7 @@ class NativeIsaacLinkEncodePublisher:
             sendHighWaterMark=max(2, int(args_cli.native_h264_queue_size) + 1),
             reserved0=0,
         )
-        ok = self._dll.ILE_Start(
+        ok = self._lib.ILE_Start(
             str(args_cli.endpoint).encode("utf-8"),
             str(args_cli.topic).encode("utf-8"),
             ctypes.byref(config),
@@ -627,7 +632,7 @@ class NativeIsaacLinkEncodePublisher:
         self._closed = False
         print(
             "[RobotYaoBasic] Native Isaac_link_encode started: "
-            f"dll={self._dll_path}, endpoint={args_cli.endpoint}, topic={args_cli.topic}, "
+            f"library={self._library_path}, endpoint={args_cli.endpoint}, topic={args_cli.topic}, "
             f"size={int(args_cli.camera_width) * 2}x{int(args_cli.camera_height)}, "
             f"bitrate={int(args_cli.h264_bitrate) * 2}, gop={int(args_cli.h264_gop)}",
             flush=True,
@@ -635,15 +640,15 @@ class NativeIsaacLinkEncodePublisher:
 
     def _configure_abi(self) -> None:
         byte_ptr = ctypes.POINTER(ctypes.c_uint8)
-        self._dll.ILE_Start.argtypes = [
+        self._lib.ILE_Start.argtypes = [
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.POINTER(_NativeIsaacLinkEncodeConfig),
         ]
-        self._dll.ILE_Start.restype = ctypes.c_int
-        self._dll.ILE_Stop.argtypes = []
-        self._dll.ILE_Stop.restype = None
-        self._dll.ILE_PublishStereoFrame.argtypes = [
+        self._lib.ILE_Start.restype = ctypes.c_int
+        self._lib.ILE_Stop.argtypes = []
+        self._lib.ILE_Stop.restype = None
+        self._lib.ILE_PublishStereoFrame.argtypes = [
             byte_ptr,
             ctypes.c_int,
             byte_ptr,
@@ -653,9 +658,9 @@ class NativeIsaacLinkEncodePublisher:
             ctypes.c_int,
             ctypes.c_int,
         ]
-        self._dll.ILE_PublishStereoFrame.restype = ctypes.c_int
-        self._dll.ILE_GetStats.argtypes = [ctypes.POINTER(_NativeIsaacLinkEncodeStats)]
-        self._dll.ILE_GetStats.restype = None
+        self._lib.ILE_PublishStereoFrame.restype = ctypes.c_int
+        self._lib.ILE_GetStats.argtypes = [ctypes.POINTER(_NativeIsaacLinkEncodeStats)]
+        self._lib.ILE_GetStats.restype = None
 
     def publish(self, header: dict, left_rgb: np.ndarray, right_rgb: np.ndarray, force_idr: bool) -> dict[str, float | int | str]:
         if left_rgb.dtype != np.uint8 or not left_rgb.flags["C_CONTIGUOUS"]:
@@ -665,7 +670,7 @@ class NativeIsaacLinkEncodePublisher:
         header_payload = json.dumps(header, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         left_ptr = left_rgb.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         right_ptr = right_rgb.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
-        ok = self._dll.ILE_PublishStereoFrame(
+        ok = self._lib.ILE_PublishStereoFrame(
             left_ptr,
             int(left_rgb.strides[0]),
             right_ptr,
@@ -682,7 +687,7 @@ class NativeIsaacLinkEncodePublisher:
 
     def stats(self) -> dict[str, float | int | str]:
         raw = _NativeIsaacLinkEncodeStats()
-        self._dll.ILE_GetStats(ctypes.byref(raw))
+        self._lib.ILE_GetStats(ctypes.byref(raw))
         return {
             "running": int(raw.isRunning),
             "submitted": int(raw.submittedFrames),
@@ -701,7 +706,7 @@ class NativeIsaacLinkEncodePublisher:
     def close(self) -> None:
         if self._closed:
             return
-        self._dll.ILE_Stop()
+        self._lib.ILE_Stop()
         self._closed = True
 
 
@@ -771,7 +776,7 @@ class AsyncNativeStereoEncoder:
                 "failed": self._failed,
                 "last_payload_bytes": self._last_payload_bytes,
                 "queue_wait_avg": self._wait_total / sent,
-                "dll_call_avg": self._call_total / sent,
+                "native_call_avg": self._call_total / sent,
                 "native_encode_avg": self._encode_total / sent,
                 "native_send_avg": self._send_total / sent,
             }
@@ -784,10 +789,10 @@ class AsyncNativeStereoEncoder:
                 f"[RobotYaoBasic] native_stream submitted={self._submitted} sent={self._sent} "
                 f"sent_total={self._sent_total} dropped={self._dropped} failed={self._failed} "
                 f"queue_wait={1000.0 * self._wait_total / sent:.1f}ms "
-                f"dll_call={1000.0 * self._call_total / sent:.1f}ms "
-                f"dll_encode_merge_upload={1000.0 * self._encode_total / sent:.1f}ms "
-                f"dll_send={1000.0 * self._send_total / sent:.1f}ms "
-                f"dll_overhead={1000.0 * native_other_total / sent:.1f}ms "
+                f"native_call={1000.0 * self._call_total / sent:.1f}ms "
+                f"native_encode={1000.0 * self._encode_total / sent:.1f}ms "
+                f"native_send={1000.0 * self._send_total / sent:.1f}ms "
+                f"native_overhead={1000.0 * native_other_total / sent:.1f}ms "
                 f"last_payload={self._last_payload_bytes / (1024.0 * 1024.0):.2f}MiB"
             )
             self._wait_total = 0.0
@@ -840,7 +845,7 @@ class AsyncNativeStereoEncoder:
                 try:
                     publisher.close()
                 except Exception as exc:
-                    print(f"[RobotYaoBasic] Failed to close native encoder DLL: {exc}", flush=True)
+                    print(f"[RobotYaoBasic] Failed to close native encoder library: {exc}", flush=True)
 
 
 def _make_native_stereo_header(frame_id: int) -> dict:
@@ -864,7 +869,7 @@ def _make_native_stereo_header(frame_id: int) -> dict:
             "bitrate": int(args_cli.h264_bitrate) * 2,
             "gop": int(args_cli.h264_gop),
             "profile": "baseline",
-            "preset": "nvenc_low_latency_hp",
+            "preset": "native_low_latency",
             "source_format": "rgb24",
             "encoded_format": "yuv420p",
         },
@@ -1705,8 +1710,9 @@ def main() -> None:
     scene = InteractiveScene(scene_cfg)
     stereo_cameras = None
     if args_cli.with_stereo_fisheye:
+        stream_text = "with native H264 streaming" if args_cli.native_h264_stream else "without video streaming"
         print(
-            "[RobotYaoBasic] Creating stereo fisheye cameras without video streaming: "
+            f"[RobotYaoBasic] Creating stereo fisheye cameras {stream_text}: "
             f"{int(args_cli.camera_width)}x{int(args_cli.camera_height)}, fov={float(args_cli.fisheye_fov):.1f}",
             flush=True,
         )
