@@ -15,8 +15,8 @@ namespace RobotYao
         [Header("Stream")]
         [SerializeField] private string endpoint = "tcp://127.0.0.1:5556";
         [SerializeField] private string topic = "robotyao.stereo.fisheye.v1";
-        [SerializeField] private int width = 1920;
-        [SerializeField] private int height = 1920;
+        [SerializeField] private int width = 1280;
+        [SerializeField] private int height = 1280;
 
         [Header("Fisheye")]
         [SerializeField] private float fisheyeFovDegrees = 180.0f;

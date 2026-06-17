@@ -20,7 +20,7 @@ Example:
 
     .\isaaclab.bat -p .\scripts\robotyao\benchmark_basic_scene_fps.py `
       --width 1920 --height 1080 --print_every 60 `
-      --with-stereo-fisheye --camera-width 1920 --camera-height 1920 `
+      --with-stereo-fisheye --camera-width 1280 --camera-height 1280 `
       --/app/runLoops/main/rateLimitEnabled=false `
       --/app/runLoops/main/manualModeEnabled=true `
       --/app/asyncRendering=true `
@@ -62,14 +62,27 @@ parser.add_argument(
     action="store_true",
     help="Create and update head-mounted stereo fisheye cameras, but do not copy, encode, or publish frames.",
 )
-parser.add_argument("--camera-width", type=int, default=1920, help="Stereo fisheye camera image width.")
-parser.add_argument("--camera-height", type=int, default=1920, help="Stereo fisheye camera image height.")
+parser.add_argument("--camera-width", type=int, default=1280, help="Stereo fisheye camera image width.")
+parser.add_argument("--camera-height", type=int, default=1280, help="Stereo fisheye camera image height.")
 parser.add_argument("--baseline", type=float, default=0.064, help="Stereo fisheye camera baseline in meters.")
 parser.add_argument("--fisheye-fov", type=float, default=180.0, help="Stereo fisheye camera field of view in degrees.")
 parser.add_argument(
     "--native-h264-stream",
     action="store_true",
     help="Copy stereo fisheye RGB frames to Isaaclinkencode.dll for async side-by-side NVENC H264 ZMQ publishing.",
+)
+parser.add_argument(
+    "--native-h264-gpu-direct",
+    dest="native_h264_gpu_direct",
+    action="store_true",
+    default=True,
+    help="Pass CUDA camera buffers directly to Isaaclinkencode.dll when the DLL exposes the GPU-direct ABI.",
+)
+parser.add_argument(
+    "--no-native-h264-gpu-direct",
+    dest="native_h264_gpu_direct",
+    action="store_false",
+    help="Disable CUDA-buffer direct publishing and use the CPU RGB fallback path.",
 )
 parser.add_argument(
     "--native-h264-dll",
@@ -87,6 +100,15 @@ parser.add_argument(
     type=int,
     default=1,
     help="Async native encoder queue size. 1 keeps the latest frame and drops stale frames.",
+)
+parser.add_argument(
+    "--native-h264-gpu-ring-size",
+    type=int,
+    default=0,
+    help=(
+        "CUDA staging ring slots for the GPU-direct native encoder. "
+        "0 derives the size from --native-h264-queue-size."
+    ),
 )
 parser.add_argument(
     "--stream-every-n-frames",
@@ -383,7 +405,7 @@ def _make_fisheye_camera_cfg(
         update_period=0.0,
         height=height,
         width=width,
-        data_types=["rgb"],
+        data_types=["rgba" if args_cli.native_h264_stream and args_cli.native_h264_gpu_direct else "rgb"],
         update_latest_camera_pose=True,
         spawn=sim_utils.FisheyeCameraCfg(
             projection_type="fisheyePolynomial",
@@ -594,10 +616,25 @@ class _NativeIsaacLinkEncodeStats(ctypes.Structure):
     ]
 
 
+class _NativeIsaacLinkCudaFrameInput(ctypes.Structure):
+    _fields_ = [
+        ("leftDevicePtr", ctypes.c_uint64),
+        ("leftStrideBytes", ctypes.c_int),
+        ("rightDevicePtr", ctypes.c_uint64),
+        ("rightStrideBytes", ctypes.c_int),
+        ("inputFormat", ctypes.c_int),
+        ("cudaDevice", ctypes.c_int),
+        ("cudaStream", ctypes.c_uint64),
+        ("reserved0", ctypes.c_int),
+        ("reserved1", ctypes.c_int),
+    ]
+
+
 class NativeIsaacLinkEncodePublisher:
     """ctypes wrapper around Isaaclinkencode.dll."""
 
     _PIXEL_RGB24 = 0
+    _PIXEL_RGBA32 = 1
 
     def __init__(self):
         self._dll_path = os.path.abspath(os.path.expandvars(args_cli.native_h264_dll))
@@ -613,9 +650,9 @@ class NativeIsaacLinkEncodePublisher:
             fps=max(1, int(args_cli.h264_fps)),
             bitrate=max(1, int(args_cli.h264_bitrate) * 2),
             gop=max(1, int(args_cli.h264_gop)),
-            inputFormat=self._PIXEL_RGB24,
+            inputFormat=self._PIXEL_RGBA32 if args_cli.native_h264_gpu_direct else self._PIXEL_RGB24,
             sendHighWaterMark=max(2, int(args_cli.native_h264_queue_size) + 1),
-            reserved0=0,
+            reserved0=max(0, int(args_cli.native_h264_gpu_ring_size)) if args_cli.native_h264_gpu_direct else 0,
         )
         ok = self._dll.ILE_Start(
             str(args_cli.endpoint).encode("utf-8"),
@@ -629,7 +666,8 @@ class NativeIsaacLinkEncodePublisher:
             "[RobotYaoBasic] Native Isaac_link_encode started: "
             f"dll={self._dll_path}, endpoint={args_cli.endpoint}, topic={args_cli.topic}, "
             f"size={int(args_cli.camera_width) * 2}x{int(args_cli.camera_height)}, "
-            f"bitrate={int(args_cli.h264_bitrate) * 2}, gop={int(args_cli.h264_gop)}",
+            f"bitrate={int(args_cli.h264_bitrate) * 2}, gop={int(args_cli.h264_gop)}, "
+            f"gpu_ring={max(0, int(args_cli.native_h264_gpu_ring_size))}",
             flush=True,
         )
 
@@ -654,8 +692,21 @@ class NativeIsaacLinkEncodePublisher:
             ctypes.c_int,
         ]
         self._dll.ILE_PublishStereoFrame.restype = ctypes.c_int
+        self._has_cuda_publish = hasattr(self._dll, "ILE_PublishStereoCudaFrame")
+        if self._has_cuda_publish:
+            self._dll.ILE_PublishStereoCudaFrame.argtypes = [
+                ctypes.POINTER(_NativeIsaacLinkCudaFrameInput),
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_int,
+            ]
+            self._dll.ILE_PublishStereoCudaFrame.restype = ctypes.c_int
         self._dll.ILE_GetStats.argtypes = [ctypes.POINTER(_NativeIsaacLinkEncodeStats)]
         self._dll.ILE_GetStats.restype = None
+
+    @property
+    def has_cuda_publish(self) -> bool:
+        return bool(self._has_cuda_publish)
 
     def publish(self, header: dict, left_rgb: np.ndarray, right_rgb: np.ndarray, force_idr: bool) -> dict[str, float | int | str]:
         if left_rgb.dtype != np.uint8 or not left_rgb.flags["C_CONTIGUOUS"]:
@@ -678,6 +729,60 @@ class NativeIsaacLinkEncodePublisher:
         stats = self.stats()
         if not ok:
             raise RuntimeError(f"ILE_PublishStereoFrame failed: {stats.get('last_error') or 'unknown native error'}")
+        return stats
+
+    def publish_cuda(
+        self,
+        header: dict,
+        left_rgba: torch.Tensor,
+        right_rgba: torch.Tensor,
+        force_idr: bool,
+    ) -> dict[str, float | int | str]:
+        if not self._has_cuda_publish:
+            raise RuntimeError("Isaaclinkencode.dll does not expose ILE_PublishStereoCudaFrame.")
+        if left_rgba.device.type != "cuda" or right_rgba.device.type != "cuda":
+            raise RuntimeError("GPU-direct native H264 publishing requires CUDA tensors.")
+        if left_rgba.device != right_rgba.device:
+            raise RuntimeError("GPU-direct native H264 publishing requires both eye tensors on the same CUDA device.")
+        if left_rgba.dtype != torch.uint8 or right_rgba.dtype != torch.uint8:
+            raise RuntimeError("GPU-direct native H264 publishing requires uint8 RGBA tensors.")
+        if left_rgba.ndim != 3 or right_rgba.ndim != 3 or left_rgba.shape[-1] < 4 or right_rgba.shape[-1] < 4:
+            raise RuntimeError("GPU-direct native H264 publishing requires HxWx4 RGBA tensors.")
+        if left_rgba.shape[0] != int(args_cli.camera_height) or left_rgba.shape[1] != int(args_cli.camera_width):
+            raise RuntimeError(f"Left CUDA frame shape does not match configured eye size: {tuple(left_rgba.shape)}")
+        if right_rgba.shape[0] != int(args_cli.camera_height) or right_rgba.shape[1] != int(args_cli.camera_width):
+            raise RuntimeError(f"Right CUDA frame shape does not match configured eye size: {tuple(right_rgba.shape)}")
+        if left_rgba.stride(-1) != 1 or right_rgba.stride(-1) != 1:
+            raise RuntimeError("GPU-direct native H264 publishing requires tightly packed channel stride.")
+        if left_rgba.stride(-2) < 4 or right_rgba.stride(-2) < 4:
+            raise RuntimeError("GPU-direct native H264 publishing requires at least four bytes per pixel.")
+
+        header_payload = json.dumps(header, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        cuda_device = left_rgba.device.index if left_rgba.device.index is not None else torch.cuda.current_device()
+        try:
+            cuda_stream = int(torch.cuda.current_stream(device=cuda_device).cuda_stream)
+        except TypeError:
+            cuda_stream = int(torch.cuda.current_stream(cuda_device).cuda_stream)
+        frame_input = _NativeIsaacLinkCudaFrameInput(
+            leftDevicePtr=int(left_rgba.data_ptr()),
+            leftStrideBytes=int(left_rgba.stride(0) * left_rgba.element_size()),
+            rightDevicePtr=int(right_rgba.data_ptr()),
+            rightStrideBytes=int(right_rgba.stride(0) * right_rgba.element_size()),
+            inputFormat=self._PIXEL_RGBA32,
+            cudaDevice=int(cuda_device),
+            cudaStream=int(cuda_stream),
+            reserved0=0,
+            reserved1=0,
+        )
+        ok = self._dll.ILE_PublishStereoCudaFrame(
+            ctypes.byref(frame_input),
+            header_payload,
+            len(header_payload),
+            1 if force_idr else 0,
+        )
+        stats = self.stats()
+        if not ok:
+            raise RuntimeError(f"ILE_PublishStereoCudaFrame failed: {stats.get('last_error') or 'unknown native error'}")
         return stats
 
     def stats(self) -> dict[str, float | int | str]:
@@ -843,7 +948,93 @@ class AsyncNativeStereoEncoder:
                     print(f"[RobotYaoBasic] Failed to close native encoder DLL: {exc}", flush=True)
 
 
-def _make_native_stereo_header(frame_id: int) -> dict:
+class AsyncNativeStereoCudaEncoder:
+    """CUDA-buffer publisher backed by a DLL-side GPU staging ring."""
+
+    def __init__(self):
+        self._publisher = NativeIsaacLinkEncodePublisher()
+        if not self._publisher.has_cuda_publish:
+            self._publisher.close()
+            raise RuntimeError("Isaaclinkencode.dll does not expose ILE_PublishStereoCudaFrame.")
+        self._submitted = 0
+        self._submitted_window = 0
+        self._failed = 0
+        self._call_total = 0.0
+        self._call_window = 0.0
+        self._last_payload_bytes = 0
+        self._last_report_stats = self._publisher.stats()
+
+    def wait_until_ready(self, timeout: float = 10.0) -> None:
+        del timeout
+
+    def submit(self, frame_id: int, header: dict, left_rgba: torch.Tensor, right_rgba: torch.Tensor) -> bool:
+        call_start = time.perf_counter()
+        self._submitted += 1
+        self._submitted_window += 1
+        try:
+            stats = self._publisher.publish_cuda(header, left_rgba, right_rgba, force_idr=frame_id <= 1)
+        except Exception:
+            self._failed += 1
+            raise
+        call_end = time.perf_counter()
+        self._last_payload_bytes = int(stats.get("last_payload_bytes") or 0)
+        call_time = call_end - call_start
+        self._call_total += call_time
+        self._call_window += call_time
+        return True
+
+    def stats(self) -> dict[str, float | int]:
+        dll_stats = self._publisher.stats()
+        dll_submitted = int(dll_stats.get("submitted") or 0)
+        dll_sent = int(dll_stats.get("sent") or 0)
+        dll_failed = int(dll_stats.get("failed") or 0)
+        dropped_estimate = max(0, dll_submitted - dll_sent - dll_failed)
+        submitted = max(self._submitted, 1)
+        return {
+            "submitted": self._submitted,
+            "sent": dll_sent,
+            "sent_total": dll_sent,
+            "dropped": dropped_estimate,
+            "failed": self._failed + dll_failed,
+            "last_payload_bytes": int(dll_stats.get("last_payload_bytes") or self._last_payload_bytes),
+            "queue_wait_avg": 0.0,
+            "dll_call_avg": self._call_total / submitted,
+            "native_encode_avg": float(dll_stats.get("last_encode_ms") or 0.0) / 1000.0,
+            "native_send_avg": float(dll_stats.get("last_send_ms") or 0.0) / 1000.0,
+        }
+
+    def pop_line(self) -> str:
+        stats = self._publisher.stats()
+        previous = self._last_report_stats
+        submitted = max(self._submitted_window, 1)
+        dll_submitted = int(stats.get("submitted") or 0)
+        dll_encoded = int(stats.get("encoded") or 0)
+        dll_sent = int(stats.get("sent") or 0)
+        dll_failed = int(stats.get("failed") or 0)
+        encoded_delta = dll_encoded - int(previous.get("encoded") or 0)
+        sent_delta = dll_sent - int(previous.get("sent") or 0)
+        failed_delta = dll_failed - int(previous.get("failed") or 0)
+        inflight = max(0, dll_submitted - dll_sent - dll_failed)
+        line = (
+            f"[RobotYaoBasic] native_stream_gpu_ring submitted={self._submitted} "
+            f"dll_submitted={dll_submitted} encoded_delta={encoded_delta} sent_delta={sent_delta} "
+            f"sent_total={dll_sent} inflight_or_dropped={inflight} failed_delta={failed_delta} "
+            f"failed_total={self._failed + dll_failed} "
+            f"submit_call={1000.0 * self._call_window / submitted:.2f}ms "
+            f"dll_encode_last={float(stats.get('last_encode_ms') or 0.0):.1f}ms "
+            f"dll_send_last={float(stats.get('last_send_ms') or 0.0):.1f}ms "
+            f"last_payload={int(stats.get('last_payload_bytes') or self._last_payload_bytes)}B"
+        )
+        self._submitted_window = 0
+        self._call_window = 0.0
+        self._last_report_stats = stats
+        return line
+
+    def close(self) -> None:
+        self._publisher.close()
+
+
+def _make_native_stereo_header(frame_id: int, source_format: str = "rgb24") -> dict:
     eye_width = int(args_cli.camera_width)
     eye_height = int(args_cli.camera_height)
     return {
@@ -865,7 +1056,7 @@ def _make_native_stereo_header(frame_id: int) -> dict:
             "gop": int(args_cli.h264_gop),
             "profile": "baseline",
             "preset": "nvenc_low_latency_hp",
-            "source_format": "rgb24",
+            "source_format": str(source_format),
             "encoded_format": "yuv420p",
         },
         "eye_order": "left_right",
@@ -1574,10 +1765,20 @@ def run_benchmark(
     stream_stride = max(1, int(args_cli.stream_every_n_frames))
     print_every = max(1, int(args_cli.print_every))
     native_stream = None
+    native_stream_gpu_direct = False
     if args_cli.native_h264_stream:
         if stereo_cameras is None:
             raise RuntimeError("--native-h264-stream requires stereo cameras.")
-        native_stream = AsyncNativeStereoEncoder()
+        if args_cli.native_h264_gpu_direct:
+            try:
+                native_stream = AsyncNativeStereoCudaEncoder()
+                native_stream_gpu_direct = True
+                print("[RobotYaoBasic] Native H264 GPU-direct CUDA ring path enabled.", flush=True)
+            except Exception as exc:
+                print(f"[RobotYaoBasic] Native H264 GPU-direct unavailable, falling back to CPU path: {exc}", flush=True)
+                native_stream = AsyncNativeStereoEncoder()
+        else:
+            native_stream = AsyncNativeStereoEncoder()
         native_stream.wait_until_ready()
     default_joint_pos = _reset_scene(scene)
     if unity_controller is not None:
@@ -1644,21 +1845,36 @@ def run_benchmark(
             submit_t8 = camera_t6
             if native_stream is not None and frame_id % stream_stride == 0:
                 copy_t0 = time.perf_counter()
-                left_tensor = stereo_cameras[0].data.output.get("rgb")
-                right_tensor = stereo_cameras[1].data.output.get("rgb")
+                tensor_key = "rgba" if args_cli.native_h264_gpu_direct else "rgb"
+                left_tensor = stereo_cameras[0].data.output.get(tensor_key)
+                right_tensor = stereo_cameras[1].data.output.get(tensor_key)
+                if left_tensor is None or right_tensor is None:
+                    tensor_key = "rgb" if tensor_key == "rgba" else "rgba"
+                    left_tensor = stereo_cameras[0].data.output.get(tensor_key)
+                    right_tensor = stereo_cameras[1].data.output.get(tensor_key)
                 if (
                     left_tensor is not None
                     and right_tensor is not None
                     and left_tensor.shape[0] >= 1
                     and right_tensor.shape[0] >= 1
                 ):
-                    left_rgb = np.ascontiguousarray(left_tensor.detach().cpu().numpy()[0, :, :, :3], dtype=np.uint8)
-                    right_rgb = np.ascontiguousarray(right_tensor.detach().cpu().numpy()[0, :, :, :3], dtype=np.uint8)
-                    header = _make_native_stereo_header(frame_id)
-                    copy_t7 = time.perf_counter()
-                    submit_t0 = time.perf_counter()
-                    native_stream.submit(frame_id, header, left_rgb, right_rgb)
-                    submit_t8 = time.perf_counter()
+                    if native_stream_gpu_direct and tensor_key == "rgba":
+                        header = _make_native_stereo_header(frame_id, source_format="cuda_rgba32")
+                        copy_t7 = time.perf_counter()
+                        submit_t0 = time.perf_counter()
+                        native_stream.submit(frame_id, header, left_tensor[0], right_tensor[0])
+                        submit_t8 = time.perf_counter()
+                    else:
+                        header = _make_native_stereo_header(
+                            frame_id,
+                            source_format="rgba32_cpu_rgb_slice" if tensor_key == "rgba" else "rgb24",
+                        )
+                        left_rgb = np.ascontiguousarray(left_tensor.detach().cpu().numpy()[0, :, :, :3], dtype=np.uint8)
+                        right_rgb = np.ascontiguousarray(right_tensor.detach().cpu().numpy()[0, :, :, :3], dtype=np.uint8)
+                        copy_t7 = time.perf_counter()
+                        submit_t0 = time.perf_counter()
+                        native_stream.submit(frame_id, header, left_rgb, right_rgb)
+                        submit_t8 = time.perf_counter()
                 else:
                     copy_t7 = time.perf_counter()
                     submit_t8 = copy_t7

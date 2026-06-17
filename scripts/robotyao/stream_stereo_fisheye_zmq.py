@@ -7,7 +7,7 @@ Usage examples:
 
     isaaclab.bat -p scripts/robotyao/stream_stereo_fisheye_zmq.py --headless
     isaaclab.bat -p scripts/robotyao/stream_stereo_fisheye_zmq.py --width 960 --height 960
-   .\isaaclab.bat -p .\scripts\robotyao\stream_stereo_fisheye_zmq.py --task-scene --task-use-rmpflow --allow-remote-rmpflow-assets --unity-control --debug-perf-timing --width 1920 --height 1920 --encoding h264 --stereo-pack side_by_side --h264-codec h264_nvenc --fps 0 --print_every 60 --task-runtime-render-interval 0
+   .\isaaclab.bat -p .\scripts\robotyao\stream_stereo_fisheye_zmq.py --task-scene --task-use-rmpflow --allow-remote-rmpflow-assets --unity-control --debug-perf-timing --width 1280 --height 1280 --encoding h264 --stereo-pack side_by_side --h264-codec h264_nvenc --fps 0 --print_every 60 --task-runtime-render-interval 0
 The stream is a PUB multipart message:
 
     [topic, header_json, left_image_bytes, right_image_bytes]
@@ -59,8 +59,8 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="RobotYao stereo fisheye RGB ZMQ streamer.")
 parser.add_argument("--endpoint", type=str, default="tcp://*:5556", help="ZMQ PUB bind endpoint.")
 parser.add_argument("--topic", type=str, default="robotyao.stereo.fisheye.v1", help="ZMQ topic.")
-parser.add_argument("--width", type=int, default=1920, help="Camera image width.")
-parser.add_argument("--height", type=int, default=1920, help="Camera image height.")
+parser.add_argument("--width", type=int, default=1280, help="Camera image width.")
+parser.add_argument("--height", type=int, default=1280, help="Camera image height.")
 parser.add_argument(
     "--fps",
     type=float,
@@ -451,16 +451,13 @@ parser.add_argument(
 parser.add_argument(
     "--mocopi-arm-joint-control",
     action="store_true",
-    help="Use Unity Mocopi whole-body arm joint rotation deltas to directly drive the robot arm joints.",
+    help="Deprecated and ignored. RobotYao arm control uses controller 6DOF pose deltas, not whole-body joint deltas.",
 )
 parser.add_argument(
     "--unity-mocopi-input-endpoint",
     type=str,
     default="",
-    help=(
-        "Optional extra Unity Mocopi whole-body ZMQ endpoint. Leave empty when whole-body packets are "
-        "published by the native XR publisher on --unity-input-endpoint."
-    ),
+    help="Deprecated and ignored. Whole-body/Mocopi joint packets are not used for RobotYao arm control.",
 )
 parser.add_argument(
     "--mocopi-arm-joint-delta-scale",
@@ -497,6 +494,14 @@ args_cli = parser.parse_args()
 
 if args_cli.xr_control:
     args_cli.unity_control = True
+
+if args_cli.mocopi_arm_joint_control or args_cli.unity_mocopi_input_endpoint:
+    print(
+        "[RobotYao] Mocopi whole-body arm joint control is disabled; using controller 6DOF arm control.",
+        flush=True,
+    )
+    args_cli.mocopi_arm_joint_control = False
+    args_cli.unity_mocopi_input_endpoint = ""
 
 if args_cli.encoding == "h264" and (args_cli.width % 2 != 0 or args_cli.height % 2 != 0):
     raise ValueError("H264 yuv420p encoding requires even --width and --height values.")
@@ -2099,19 +2104,11 @@ class RobotYaoTaskSceneController:
         )
         self._left_arm_joint_ids, self._left_arm_joint_names = self._robot.find_joints(["left_arm_joint.*"])
         self._right_arm_joint_ids, self._right_arm_joint_names = self._robot.find_joints(["right_arm_joint.*"])
-        if args_cli.mocopi_arm_joint_control:
-            print(
-                "[RobotYao] Mocopi arm joint control enabled: "
-                f"extra_mocopi_endpoint={args_cli.unity_mocopi_input_endpoint}, "
-                f"scale={args_cli.mocopi_arm_joint_delta_scale:.3f}, "
-                f"deadband={args_cli.mocopi_arm_joint_deadband:.6f}, "
-                f"max_step={args_cli.mocopi_arm_joint_max_step:.6f}, "
-                f"left_signs={args_cli.mocopi_left_arm_joint_signs}, "
-                f"right_signs={args_cli.mocopi_right_arm_joint_signs}, "
-                f"left_arm_joints={self._left_arm_joint_names}, "
-                f"right_arm_joints={self._right_arm_joint_names}",
-                flush=True,
-            )
+        print(
+            "[RobotYao] Arm control source: controller 6DOF pose deltas "
+            "(whole-body/Mocopi joint deltas disabled).",
+            flush=True,
+        )
         self._left_gripper_joint_ids, self._left_gripper_joint_names = self._robot.find_joints(
             ["left_hand_joint1", "left_.*_Support_Joint"]
         )
@@ -2774,7 +2771,6 @@ class RobotYaoTaskSceneController:
         right_rmpflow_rot_delta = _apply_axis_map_tensor(right_scene_rot_delta, self._right_rmpflow_axis_map)
         arm_position_deadband = max(0.0, float(args_cli.arm_command_position_deadband))
         arm_rotation_deadband = max(0.0, float(args_cli.arm_command_rotation_deadband))
-        mocopi_joint_deadband = max(0.0, float(args_cli.mocopi_arm_joint_deadband))
         left_position_command_norm = float(torch.linalg.norm(left_rmpflow_delta).item())
         left_rotation_command_norm = float(torch.linalg.norm(left_rmpflow_rot_delta).item())
         right_position_command_norm = float(torch.linalg.norm(right_rmpflow_delta).item())
@@ -2793,14 +2789,12 @@ class RobotYaoTaskSceneController:
         if right_rotation_command_norm <= arm_rotation_deadband:
             right_scene_rot_delta = torch.zeros_like(right_scene_rot_delta)
             right_rmpflow_rot_delta = torch.zeros_like(right_rmpflow_rot_delta)
-        if left_direct_joint_command_norm <= mocopi_joint_deadband:
-            left_direct_joint_delta = torch.zeros_like(left_direct_joint_delta)
-            left_direct_joint_command_norm = 0.0
-        if right_direct_joint_command_norm <= mocopi_joint_deadband:
-            right_direct_joint_delta = torch.zeros_like(right_direct_joint_delta)
-            right_direct_joint_command_norm = 0.0
-        left_has_direct_joint_command = bool(args_cli.mocopi_arm_joint_control and left_direct_joint_command_norm > 0.0)
-        right_has_direct_joint_command = bool(args_cli.mocopi_arm_joint_control and right_direct_joint_command_norm > 0.0)
+        left_direct_joint_delta = torch.zeros_like(left_direct_joint_delta)
+        right_direct_joint_delta = torch.zeros_like(right_direct_joint_delta)
+        left_direct_joint_command_norm = 0.0
+        right_direct_joint_command_norm = 0.0
+        left_has_direct_joint_command = False
+        right_has_direct_joint_command = False
         left_in_follow_warmup = self._left_arm_follow_warmup_frames > 0
         right_in_follow_warmup = self._right_arm_follow_warmup_frames > 0
         left_target_tracking_active = left_follow_active_bool and not body_lift_mode and not self._left_arm_hold_after_lift
@@ -3341,17 +3335,10 @@ def _create_unity_control_device() -> RobotYaoXrSubDevice:
         arm_rotation_delta_dead_zone=args_cli.arm_command_rotation_deadband,
         follow_button_mode=args_cli.unity_follow_mode,
         debug_deltas=args_cli.debug_retargeter_deltas,
-        mocopi_arm_joint_control=args_cli.mocopi_arm_joint_control,
-        mocopi_arm_joint_delta_scale=args_cli.mocopi_arm_joint_delta_scale,
-        mocopi_arm_joint_dead_zone=args_cli.mocopi_arm_joint_deadband,
-        mocopi_arm_joint_max_step=args_cli.mocopi_arm_joint_max_step,
-        mocopi_left_joint_signs=args_cli.mocopi_left_arm_joint_signs,
-        mocopi_right_joint_signs=args_cli.mocopi_right_arm_joint_signs,
+        mocopi_arm_joint_control=False,
     )
     retargeter = RobotYaoWheeledXrRetargeter(retargeter_cfg)
     input_endpoint = args_cli.unity_input_endpoint
-    if args_cli.mocopi_arm_joint_control and args_cli.unity_mocopi_input_endpoint:
-        input_endpoint = f"{input_endpoint},{args_cli.unity_mocopi_input_endpoint}"
     device_cfg = RobotYaoXrSubDeviceCfg(
         endpoint=input_endpoint,
         topic=args_cli.unity_input_topic,

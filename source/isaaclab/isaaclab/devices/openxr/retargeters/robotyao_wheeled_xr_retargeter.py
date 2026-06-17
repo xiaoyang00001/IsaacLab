@@ -125,17 +125,19 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         left_arm_follow_active,
         right_arm_follow_active,
         base_height_vel,
-        left_arm_joint_delta_0..6,
-        right_arm_joint_delta_0..6,
+        reserved_left_arm_joint_delta_0..6,
+        reserved_right_arm_joint_delta_0..6,
     ]``
 
     Right-hand B/A starts/stops bimanual arm follow. Left-hand Y/X are passed
     through for higher-level scene actions and do not control arm follow here.
     Controller poses are expected to already be converted to Isaac Lab coordinates by
     ``ZeroMqGameSubDevice``; this retargeter differences consecutive controller
-    poses and applies position/rotation delta scales. Holding the left grip enters
-    body-lift mode, routes the left stick Y axis to the lift command, and freezes
-    arm deltas so the arms remain fixed relative to the moving body.
+    poses and applies position/rotation delta scales. The arm command is always
+    controller 6DOF (3D translation delta + 3D rotation delta); whole-body joint
+    tracking is intentionally ignored. Holding the left grip enters body-lift mode,
+    routes the left stick Y axis to the lift command, and freezes arm deltas so the
+    arms remain fixed relative to the moving body.
     """
 
     OUTPUT_SIZE = 49
@@ -182,16 +184,12 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         self._arm_rotation_delta_dead_zone = max(0.0, float(cfg.arm_rotation_delta_dead_zone))
         self._follow_button_mode = cfg.follow_button_mode
         self._debug_deltas = bool(cfg.debug_deltas)
-        self._mocopi_arm_joint_control = bool(cfg.mocopi_arm_joint_control)
+        self._mocopi_arm_joint_control = False
         self._mocopi_arm_joint_delta_scale = float(cfg.mocopi_arm_joint_delta_scale)
         self._mocopi_arm_joint_dead_zone = max(0.0, float(cfg.mocopi_arm_joint_dead_zone))
         self._mocopi_arm_joint_max_step = max(0.0, float(cfg.mocopi_arm_joint_max_step))
-        self._mocopi_left_joint_signs = _parse_joint_signs(
-            cfg.mocopi_left_joint_signs, label="mocopi_left_joint_signs"
-        )
-        self._mocopi_right_joint_signs = _parse_joint_signs(
-            cfg.mocopi_right_joint_signs, label="mocopi_right_joint_signs"
-        )
+        self._mocopi_left_joint_signs = np.ones(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
+        self._mocopi_right_joint_signs = np.ones(self.ARM_JOINT_DELTA_SIZE, dtype=np.float32)
 
         self._left_arm_follow_active = False
         self._right_arm_follow_active = False
@@ -288,16 +286,7 @@ class RobotYaoWheeledXrRetargeter(RetargeterBase):
         right_delta = self._apply_vector_dead_zone(right_delta, self._arm_position_delta_dead_zone)
         left_rot_delta = self._apply_vector_dead_zone(left_rot_delta, self._arm_rotation_delta_dead_zone)
         right_rot_delta = self._apply_vector_dead_zone(right_rot_delta, self._arm_rotation_delta_dead_zone)
-        if self._mocopi_arm_joint_control:
-            whole_body = data.get("whole_body", {})
-            if self._left_arm_follow_active and arm_delta_enabled:
-                left_joint_delta = self._compute_mocopi_arm_joint_delta("left", whole_body)
-            else:
-                self._reset_mocopi_arm_history("left")
-            if self._right_arm_follow_active and arm_delta_enabled:
-                right_joint_delta = self._compute_mocopi_arm_joint_delta("right", whole_body)
-            else:
-                self._reset_mocopi_arm_history("right")
+        self._reset_mocopi_arm_history()
 
         if self._debug_deltas and (np.any(left_raw_delta != 0.0) or np.any(left_rot_delta != 0.0)):
             print(
