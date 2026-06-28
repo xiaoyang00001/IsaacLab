@@ -204,6 +204,9 @@ class SonicDeployTargetAction(ActionTerm):
         self._settle_step_counter = 0
         self._unlock_blend_counter = 0
         self._unlock_blend_total = 0
+        self._post_unlock_damping_counter = 0
+        self._post_unlock_damping_logged = False
+        self._auto_unlock_triggered = False
         self._root_pose_anchor: torch.Tensor | None = None
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
@@ -250,6 +253,8 @@ class SonicDeployTargetAction(ActionTerm):
             f"reference_lower_body={bool(cfg.blend_reference_lower_body)} "
             f"reference_joints={len(reference_joint_ids)} "
             f"hold_reference={bool(cfg.hold_last_reference_target)} "
+            f"auto_unlock_after_packets={int(getattr(cfg, 'auto_unlock_after_packets', 0))} "
+            f"post_unlock_damping_steps={int(getattr(cfg, 'post_unlock_damping_steps', 0))} "
             f"follow_base_translation={bool(cfg.follow_base_translation_target)} "
             f"synthetic_base_motion={bool(cfg.synthetic_base_motion_from_lower_body)} "
             f"follow_base_yaw={bool(cfg.follow_base_yaw_target)} "
@@ -373,6 +378,18 @@ class SonicDeployTargetAction(ActionTerm):
             )
         return payload
 
+    def _maybe_auto_unlock_root_pose(self) -> None:
+        if self._auto_unlock_triggered:
+            return
+        threshold = int(getattr(self.cfg, "auto_unlock_after_packets", 0))
+        if threshold <= 0 or self._packet_count < threshold:
+            return
+        self._auto_unlock_triggered = True
+        self._log_info(
+            f"auto unlock after packet {self._packet_count}; equivalent to operator pressing U"
+        )
+        self.unlock_root_pose()
+
     @staticmethod
     def _append_field_name(field_names: list[str], field_name: str) -> None:
         field_name = field_name.strip()
@@ -473,6 +490,7 @@ class SonicDeployTargetAction(ActionTerm):
         )
         if target is None:
             return None
+        self._maybe_auto_unlock_root_pose()
 
         reference_field_names: list[str] = []
         for field_name in str(self.cfg.reference_target_field).split(","):
@@ -559,7 +577,10 @@ class SonicDeployTargetAction(ActionTerm):
         return self._processed_actions + delta
 
     def _stabilize_root_pose(self) -> None:
-        if not self.cfg.stabilize_root_pose or self._root_pose_unlocked:
+        if not self.cfg.stabilize_root_pose:
+            return
+        if self._root_pose_unlocked:
+            self._apply_post_unlock_velocity_damping()
             return
         # Unlock blending: gradually release root velocity damping over N steps
         # while letting PhysX control the root pose. Unlike position lerping
@@ -585,6 +606,8 @@ class SonicDeployTargetAction(ActionTerm):
                 self._root_pose_unlocked = True
                 self._unlock_blend_total = 0
                 self._unlock_blend_counter = 0
+                self._post_unlock_damping_counter = 0
+                self._post_unlock_damping_logged = False
                 # No settle restart and no final velocity write here: once the root is
                 # free, every step without deploy targets is a step of passive PD
                 # standing, which is unconditionally unstable (ankle stiffness ≪ mgh).
@@ -748,6 +771,41 @@ class SonicDeployTargetAction(ActionTerm):
             vel[:, 3:] = 0.0
             self._asset.write_root_velocity_to_sim(vel)
 
+    def _apply_post_unlock_velocity_damping(self) -> None:
+        steps = int(getattr(self.cfg, "post_unlock_damping_steps", 0))
+        if steps <= 0 or self._post_unlock_damping_counter >= steps:
+            return
+
+        self._post_unlock_damping_counter += 1
+        alpha = min(float(self._post_unlock_damping_counter) / float(steps), 1.0)
+
+        def _scale_to_free(initial_scale: float) -> float:
+            initial_scale = min(max(float(initial_scale), 0.0), 1.0)
+            return initial_scale + (1.0 - initial_scale) * alpha
+
+        xy_scale = _scale_to_free(getattr(self.cfg, "post_unlock_xy_velocity_scale", 1.0))
+        z_scale = _scale_to_free(getattr(self.cfg, "post_unlock_z_velocity_scale", 1.0))
+        angular_scale = _scale_to_free(getattr(self.cfg, "post_unlock_angular_velocity_scale", 1.0))
+        if xy_scale >= 1.0 and z_scale >= 1.0 and angular_scale >= 1.0:
+            return
+
+        if not self._post_unlock_damping_logged:
+            self._log_info(
+                "post-unlock root velocity damping active "
+                f"steps={steps} "
+                f"xy_scale0={float(getattr(self.cfg, 'post_unlock_xy_velocity_scale', 1.0)):.3f} "
+                f"z_scale0={float(getattr(self.cfg, 'post_unlock_z_velocity_scale', 1.0)):.3f} "
+                f"angular_scale0={float(getattr(self.cfg, 'post_unlock_angular_velocity_scale', 1.0)):.3f}"
+            )
+            self._post_unlock_damping_logged = True
+
+        vel = self._asset.data.root_vel_w.clone()
+        vel[:, 0] *= xy_scale
+        vel[:, 1] *= xy_scale
+        vel[:, 2] *= z_scale
+        vel[:, 3:] *= angular_scale
+        self._asset.write_root_velocity_to_sim(vel)
+
     def unlock_root_pose(self) -> None:
         if not self.cfg.stabilize_root_pose:
             self._log_info("root pose stabilization is disabled; unlock request ignored")
@@ -765,11 +823,15 @@ class SonicDeployTargetAction(ActionTerm):
             self._unlock_blend_total = blend
             self._unlock_blend_counter = 0
             self._post_unlock_steps = 0
+            self._post_unlock_damping_counter = 0
+            self._post_unlock_damping_logged = False
             self._log_info(f"root pose unlock blending started ({blend} steps); deploy targets stay live")
         else:
             # Instant unlock (no blending configured).
             self._root_pose_unlocked = True
             self._post_unlock_steps = 0
+            self._post_unlock_damping_counter = 0
+            self._post_unlock_damping_logged = False
             self._log_info("root pose unlocked by operator (instant)")
 
     def process_actions(self, actions: torch.Tensor):
@@ -864,6 +926,9 @@ class SonicDeployTargetAction(ActionTerm):
             self._root_pose_unlocked = False
             self._unlock_blend_counter = 0
             self._unlock_blend_total = 0
+            self._post_unlock_damping_counter = 0
+            self._post_unlock_damping_logged = False
+            self._auto_unlock_triggered = False
             self._settle_step_counter = 0
             self._post_unlock_steps = 0
             self._base_trans_target = None
@@ -888,6 +953,9 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_pose_unlocked = False
         self._unlock_blend_counter = 0
         self._unlock_blend_total = 0
+        self._post_unlock_damping_counter = 0
+        self._post_unlock_damping_logged = False
+        self._auto_unlock_triggered = False
         self._settle_step_counter = 0
         self._post_unlock_steps = 0
         self._base_trans_target = None

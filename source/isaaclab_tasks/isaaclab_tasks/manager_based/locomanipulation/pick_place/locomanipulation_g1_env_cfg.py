@@ -561,6 +561,13 @@ class ActionsCfg:
             unlock_blend_steps=int(
                 os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "50")
             ),
+            auto_unlock_after_packets=int(os.environ.get("SONIC_DEPLOY_AUTO_UNLOCK_AFTER_PACKETS", "0")),
+            post_unlock_damping_steps=int(os.environ.get("SONIC_DEPLOY_POST_UNLOCK_DAMPING_STEPS", "0")),
+            post_unlock_xy_velocity_scale=float(os.environ.get("SONIC_DEPLOY_POST_UNLOCK_XY_VELOCITY_SCALE", "1.0")),
+            post_unlock_z_velocity_scale=float(os.environ.get("SONIC_DEPLOY_POST_UNLOCK_Z_VELOCITY_SCALE", "1.0")),
+            post_unlock_angular_velocity_scale=float(
+                os.environ.get("SONIC_DEPLOY_POST_UNLOCK_ANGULAR_VELOCITY_SCALE", "1.0")
+            ),
             hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
             stale_timeout_s=0.5,
             fallback_to_last_action=True,

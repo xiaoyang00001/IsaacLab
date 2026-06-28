@@ -147,6 +147,29 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     Deploy targets keep flowing during the blend: in closed loop the policy must stay in
     control through the handover, so the blend only ramps root velocity damping."""
 
+    auto_unlock_after_packets: int = 0
+    """Automatically run the same unlock path as pressing ``U`` after this many valid deploy packets.
+
+    Set to ``0`` to disable. This is useful for repeatable closed-loop metrics where GUI keyboard focus
+    cannot be trusted, but the test should still match the operator workflow of pressing ``U`` once
+    deploy targets have started flowing."""
+
+    post_unlock_damping_steps: int = 0
+    """Number of physics steps to keep residual root velocity damping after unlock.
+
+    This writes only root velocity, never root pose. Set to ``0`` to disable. Use as a diagnostic for
+    free-root handover stability: if it helps, the failure is dominated by release velocity/tilt drift
+    rather than target parsing."""
+
+    post_unlock_xy_velocity_scale: float = 1.0
+    """Initial XY root velocity scale during post-unlock damping; ramps to 1.0."""
+
+    post_unlock_z_velocity_scale: float = 1.0
+    """Initial Z root velocity scale during post-unlock damping; ramps to 1.0."""
+
+    post_unlock_angular_velocity_scale: float = 1.0
+    """Initial angular root velocity scale during post-unlock damping; ramps to 1.0."""
+
     hold_after_unlock: bool = False
     """After unlock, ignore deploy targets and drive joints toward the default standing pose
     (rate-limited). Diagnostic only: with SONIC soft gains, passive PD standing is
