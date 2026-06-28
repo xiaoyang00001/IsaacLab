@@ -916,6 +916,7 @@ class SonicRobotStatePublisherAction(ActionTerm):
         super().__init__(cfg, env)
         self._asset = env.scene[cfg.asset_name]
         self._joint_ids, self._joint_names = self._resolve_joints(cfg.joint_names)
+        self._body_ids, self._body_names = self._resolve_bodies(SONIC_BODY_NAMES)
         self._raw_actions = torch.zeros((self.num_envs, 0), device=self.device)
         self._processed_actions = self._raw_actions
         self._mujoco_to_isaac_index = torch.tensor(
@@ -936,6 +937,7 @@ class SonicRobotStatePublisherAction(ActionTerm):
         self._log_info(
             f"asset={cfg.asset_name} bind={cfg.bind_endpoint} topic={cfg.topic!r} "
             f"target_order={self._target_order} resolved={len(self._joint_ids)} joints "
+            f"body_keypoints={len(self._body_ids)} "
             f"publisher_ready={self._publisher_ready}"
         )
 
@@ -995,6 +997,20 @@ class SonicRobotStatePublisherAction(ActionTerm):
             resolved_names.append(matched_names[0])
         return resolved_ids, resolved_names
 
+    def _resolve_bodies(self, body_names: tuple[str, ...]) -> tuple[list[int], list[str]]:
+        resolved_ids: list[int] = []
+        resolved_names: list[str] = []
+        for body_name in body_names:
+            body_ids, matched_names = self._asset.find_bodies([f"^{body_name}$"])
+            if len(body_ids) != 1:
+                raise ValueError(
+                    f"Expected exactly one body match for '{body_name}' on asset '{self.cfg.asset_name}', "
+                    f"but got {len(body_ids)} matches: {matched_names}"
+                )
+            resolved_ids.append(int(body_ids[0]))
+            resolved_names.append(matched_names[0])
+        return resolved_ids, resolved_names
+
     def _connect_publisher(self) -> None:
         try:
             import msgpack
@@ -1034,7 +1050,11 @@ class SonicRobotStatePublisherAction(ActionTerm):
         else:
             joint_tau = torque_src[env_idx, self._joint_ids].detach().cpu()
         root_quat = self._asset.data.root_quat_w[env_idx].detach().cpu()
+        root_pos = self._asset.data.root_pos_w[env_idx].detach().cpu()
+        root_lin_vel = self._asset.data.root_lin_vel_w[env_idx].detach().cpu()
         root_ang_vel = self._asset.data.root_ang_vel_b[env_idx].detach().cpu()
+        body_pos14_w = self._asset.data.body_pos_w[env_idx, self._body_ids].detach().cpu()
+        body_quat14_w = self._asset.data.body_quat_w[env_idx, self._body_ids].detach().cpu()
 
         # IMU accelerometer: specific force = (a_kinematic_w - g_w) in body frame.
         # g_w = [0,0,-9.81], so: a_imu_w = a_kinematic_w + [0,0,9.81].
@@ -1063,9 +1083,14 @@ class SonicRobotStatePublisherAction(ActionTerm):
             "joint_vel": joint_vel.tolist(),
             "joint_acc": joint_acc.tolist(),
             "joint_tau": joint_tau.tolist(),
+            "root_pos_w": root_pos.tolist(),
             "root_quat_w": root_quat.tolist(),
+            "root_lin_vel_w": root_lin_vel.tolist(),
             "root_ang_vel_b": root_ang_vel.tolist(),
             "root_accel_b": root_accel_b,
+            "body_names": list(self._body_names),
+            "body_pos14_w": body_pos14_w.tolist(),
+            "body_quat14_w": body_quat14_w.tolist(),
         }
         raw = self.cfg.topic.encode("utf-8") + self._msgpack.packb(payload, use_bin_type=True)
         try:
