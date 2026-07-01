@@ -6,6 +6,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
@@ -318,6 +319,8 @@ WALKER_WHOLE_BODY_JOINTS = [
 ]
 
 RUNTIME_NET_CFG = build_dual_machine_runtime_cfg()
+if not _env_flag("LOCIMANIP_ENABLE_OBJECT_SYNC", False):
+    RUNTIME_NET_CFG = replace(RUNTIME_NET_CFG, object_sync_role="none")
 
 
 def _ensure_valid_urdf_file(local_urdf_path: str) -> str:
@@ -471,12 +474,12 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # 本地仓库背景
+    # Warehouse background from the Isaac 5.1 asset root.
     background = AssetBaseCfg(
         prim_path="/World/envs/env_.*/Background",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[-4.68,14.39363, 0], rot=[0.7071, 0.0, 0.0, 0.7071]),
         spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/warehouse.usd",
         ),
     )
     # Humanoid robot w/ arms higher
@@ -931,19 +934,20 @@ class EventsCfg:
     # 状态感知速度覆写：仅在箱子处于传送带范围内时驱动，
     # 离带后（被提起/掉落/移出）自动停止，不再对抗机器人抓取力。
     # 传送带参考位置由 drive_object_on_conveyor 首次调用时自动记录，无需硬编码。
-    drive_test_box = EventTerm(
-        func=locomanip_mdp.drive_object_on_conveyor,
-        mode="interval",
-        interval_range_s=(0.01, 0.01),
-        params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
-    )
+    if RUNTIME_NET_CFG.object_sync_role != "subscriber":
+        drive_test_box = EventTerm(
+            func=locomanip_mdp.drive_object_on_conveyor,
+            mode="interval",
+            interval_range_s=(0.01, 0.01),
+            params={"object_name": "test_box", "velocity_x": 0.0, "velocity_y": -0.5},
+        )
 
-    drive_test_box1 = EventTerm(
-        func=locomanip_mdp.drive_object_on_conveyor,
-        mode="interval",
-        interval_range_s=(0.01, 0.01),
-        params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
-    )
+        drive_test_box1 = EventTerm(
+            func=locomanip_mdp.drive_object_on_conveyor,
+            mode="interval",
+            interval_range_s=(0.01, 0.01),
+            params={"object_name": "test_box1", "velocity_x": 0.0, "velocity_y": -0.5},
+        )
 
 
 ##

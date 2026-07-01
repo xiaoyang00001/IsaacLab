@@ -8,6 +8,7 @@ MACHINE_A_IP = os.environ.get("ISAACLAB_MACHINE_A_IP", "192.168.50.68")
 MACHINE_B_IP = os.environ.get("ISAACLAB_MACHINE_B_IP", "192.168.50.105")
 TRACKING_HUB_IP = os.environ.get("ISAACLAB_TRACKING_HUB_IP", MACHINE_A_IP)
 DEPLOY_LOCAL_MACHINE_IP = os.environ.get("ISAACLAB_LOCAL_MACHINE_IP", MACHINE_A_IP)
+ZMQ_BIND_HOST = os.environ.get("ISAACLAB_ZMQ_BIND_HOST", "0.0.0.0")
 
 
 @dataclass(frozen=True)
@@ -35,12 +36,12 @@ class DualMachineRuntimeCfg:
 
     @property
     def object_sync_endpoint(self) -> str:
-        host = self.local_machine_ip if self.object_sync_role == "publisher" else self.peer_machine_ip
+        host = ZMQ_BIND_HOST if self.object_sync_role == "publisher" else self.peer_machine_ip
         return f"tcp://{host}:{self.object_sync_port}"
 
     @property
     def local_robot_sync_endpoint(self) -> str:
-        return f"tcp://{self.local_machine_ip}:{self.robot_sync_port}"
+        return f"tcp://{ZMQ_BIND_HOST}:{self.robot_sync_port}"
 
     @property
     def remote_robot_sync_endpoint(self) -> str:

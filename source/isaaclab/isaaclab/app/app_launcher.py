@@ -717,10 +717,6 @@ class AppLauncher:
         # If nothing is provided resolve the experience file based on the headless flag
         kit_app_exp_path = os.environ["EXP_PATH"]
         isaaclab_app_exp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4, "apps")
-        # For Isaac Sim 4.5 compatibility, we use the 4.5 app files in a different folder
-        # if launcher_args.get("use_isaacsim_45", False):
-        if self.is_isaac_sim_version_4_5():
-            isaaclab_app_exp_path = os.path.join(isaaclab_app_exp_path, "isaacsim_4_5")
 
         if self._sim_experience_file == "":
             # check if the headless flag is set

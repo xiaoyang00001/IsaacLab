@@ -1,0 +1,10 @@
+[package]
+
+version = "0.0.0"
+title = "Local extensions placeholder"
+description = "Placeholder metadata for local extension sources."
+category = "local"
+keywords = ["local"]
+
+[core]
+reloadable = false
