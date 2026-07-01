@@ -72,6 +72,9 @@ if args_cli.enable_pinocchio:
     # Pinocchio 必须在 AppLauncher 之前导入，确保拿到 IsaacLab 环境里的版本，而不是
     # Isaac Sim 自带路径里的版本。Pink IK controller 和部分 humanoid retargeter 都依赖它。
     import pinocchio  # noqa: F401
+
+import h5py
+
 if "handtracking" in args_cli.teleop_device.lower():
     # OpenXR hand tracking 需要 Isaac Sim 以 XR 模式启动；启动后再开会太晚。
     app_launcher_args["xr"] = True

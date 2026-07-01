@@ -8,7 +8,7 @@ rem SPDX-License-Identifier: BSD-3-Clause
 
 rem Configurations
 set "ISAACLAB_PATH=%~dp0"
-set "DEFAULT_CONDA_PREFIX=C:\Users\nolovr\miniconda3\envs\isaaclab-pin"
+set "DEFAULT_CONDA_PREFIX=C:\Users\nolovr\miniconda3\envs\isaaclab-sonic"
 set "DEFAULT_USD_EXT=D:\reboot\isaac-sim\extscache\omni.usd.libs-1.0.1+69cbf6ad.wx64.r.cp311"
 goto main
 
