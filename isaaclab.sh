@@ -12,8 +12,8 @@
 # Exits if error occurs
 set -e
 
-# Set tab-spaces
-tabs 4
+# Set tab-spaces when a compatible terminal is available.
+tabs 4 &>/dev/null || true
 
 # get source directory
 export ISAACLAB_PATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -41,50 +41,6 @@ install_system_deps() {
                 build-essential
         fi
     fi
-}
-
-# Returns success (exit code 0 / "true") if the detected Isaac Sim version starts with 4.5,
-# otherwise returns non-zero ("false"). Works with both symlinked binary installs and pip installs.
-is_isaacsim_version_4_5() {
-    local version=""
-    local python_exe
-    python_exe=$(extract_python_exe)
-
-    # 0) Fast path: read VERSION file from the symlinked _isaac_sim directory (binary install)
-    # If the repository has _isaac_sim → <IsaacSimRoot> symlink, the VERSION file is the simplest source of truth.
-    if [[ -f "${ISAACLAB_PATH}/_isaac_sim/VERSION" ]]; then
-        # Read first line of the VERSION file; don't fail the whole script on errors.
-        version=$(head -n1 "${ISAACLAB_PATH}/_isaac_sim/VERSION" || true)
-    fi
-
-    # 1) Package-path probe: import isaacsim and walk up to ../../VERSION (pip or nonstandard layouts)
-    # If we still don't know the version, ask Python where the isaacsim package lives
-    if [[ -z "$version" ]]; then
-        local sim_file=""
-        # Print isaacsim.__file__; suppress errors so set -e won't abort.
-        sim_file=$("${python_exe}" -c 'import isaacsim, os; print(isaacsim.__file__)' 2>/dev/null || true)
-        if [[ -n "$sim_file" ]]; then
-            local version_path
-            version_path="$(dirname "$sim_file")/../../VERSION"
-            # If that VERSION file exists, read it.
-            [[ -f "$version_path" ]] && version=$(head -n1 "$version_path" || true)
-        fi
-    fi
-
-    # 2) Fallback: use package metadata via importlib.metadata.version("isaacsim")
-    if [[ -z "$version" ]]; then
-        version=$("${python_exe}" <<'PY' 2>/dev/null || true
-from importlib.metadata import version, PackageNotFoundError
-try:
-    print(version("isaacsim"))
-except PackageNotFoundError:
-    pass
-PY
-)
-    fi
-
-    # Final decision: return success if version begins with "4.5", 0 if match, 1 otherwise.
-    [[ "$version" == 4.5* ]]
 }
 
 # check if running in docker
@@ -354,20 +310,7 @@ setup_conda_env() {
         echo -e "[INFO] Creating conda environment named '${env_name}'..."
         echo -e "[INFO] Installing dependencies from ${ISAACLAB_PATH}/environment.yml"
 
-        # patch Python version if needed, but back up first
-        cp "${ISAACLAB_PATH}/environment.yml"{,.bak}
-        if is_isaacsim_version_4_5; then
-            echo "[INFO] Detected Isaac Sim 4.5 → forcing python=3.10"
-            sed -i 's/^  - python=3\.11/  - python=3.10/' "${ISAACLAB_PATH}/environment.yml"
-        else
-            echo "[INFO] Isaac Sim >= 5.0 detected, installing python=3.11"
-        fi
-
         conda env create -y --file ${ISAACLAB_PATH}/environment.yml -n ${env_name}
-        # (optional) restore original environment.yml:
-        if [[ -f "${ISAACLAB_PATH}/environment.yml.bak" ]]; then
-            mv "${ISAACLAB_PATH}/environment.yml.bak" "${ISAACLAB_PATH}/environment.yml"
-        fi
     fi
 
     # cache current paths for later
