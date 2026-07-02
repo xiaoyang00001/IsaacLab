@@ -5,8 +5,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+import math
+import re
+import time
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 
 from isaaclab.assets.articulation import Articulation
@@ -18,6 +23,537 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
     from .configs.action_cfg import AgileBasedLowerBodyActionCfg
+
+
+ISAACLAB_29DOF_JOINT_NAMES = [
+    "left_hip_pitch_joint",
+    "right_hip_pitch_joint",
+    "waist_yaw_joint",
+    "left_hip_roll_joint",
+    "right_hip_roll_joint",
+    "waist_roll_joint",
+    "left_hip_yaw_joint",
+    "right_hip_yaw_joint",
+    "waist_pitch_joint",
+    "left_knee_joint",
+    "right_knee_joint",
+    "left_shoulder_pitch_joint",
+    "right_shoulder_pitch_joint",
+    "left_ankle_pitch_joint",
+    "right_ankle_pitch_joint",
+    "left_shoulder_roll_joint",
+    "right_shoulder_roll_joint",
+    "left_ankle_roll_joint",
+    "right_ankle_roll_joint",
+    "left_shoulder_yaw_joint",
+    "right_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "right_elbow_joint",
+    "left_wrist_roll_joint",
+    "right_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "right_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_wrist_yaw_joint",
+]
+
+ISAACLAB_TO_MUJOCO_DOF = [
+    0,
+    3,
+    6,
+    9,
+    13,
+    17,
+    1,
+    4,
+    7,
+    10,
+    14,
+    18,
+    2,
+    5,
+    8,
+    11,
+    15,
+    19,
+    21,
+    23,
+    25,
+    27,
+    12,
+    16,
+    20,
+    22,
+    24,
+    26,
+    28,
+]
+
+MUJOCO_29DOF_JOINT_NAMES = [ISAACLAB_29DOF_JOINT_NAMES[i] for i in ISAACLAB_TO_MUJOCO_DOF]
+
+LEFT_HAND_JOINT_NAMES = [
+    "left_hand_thumb_0_joint",
+    "left_hand_thumb_1_joint",
+    "left_hand_thumb_2_joint",
+    "left_hand_index_0_joint",
+    "left_hand_index_1_joint",
+    "left_hand_middle_0_joint",
+    "left_hand_middle_1_joint",
+]
+RIGHT_HAND_JOINT_NAMES = [
+    "right_hand_thumb_0_joint",
+    "right_hand_thumb_1_joint",
+    "right_hand_thumb_2_joint",
+    "right_hand_index_0_joint",
+    "right_hand_index_1_joint",
+    "right_hand_middle_0_joint",
+    "right_hand_middle_1_joint",
+]
+
+
+@dataclass
+class _MirrorSample:
+    joint_pos_mujoco: np.ndarray | None = None
+    joint_vel_mujoco: np.ndarray | None = None
+    left_hand_pos: np.ndarray | None = None
+    right_hand_pos: np.ndarray | None = None
+    left_hand_vel: np.ndarray | None = None
+    right_hand_vel: np.ndarray | None = None
+    root_pos_w: np.ndarray | None = None
+    root_quat_w: np.ndarray | None = None
+    fresh: bool = False
+
+
+def _normalize_quat_wxyz(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32).reshape(4)
+    norm = float(np.linalg.norm(quat))
+    if norm < 1.0e-6 or not math.isfinite(norm):
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    return quat / norm
+
+
+def _body_q_to_mujoco_order(values: np.ndarray, joint_order: str) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    if values.size < len(MUJOCO_29DOF_JOINT_NAMES):
+        raise ValueError(f"Joint vector has {values.size} values, expected at least 29")
+    q29 = values[: len(MUJOCO_29DOF_JOINT_NAMES)]
+    if joint_order == "isaaclab":
+        return q29[ISAACLAB_TO_MUJOCO_DOF].copy()
+    if joint_order == "mujoco":
+        return q29.copy()
+    raise ValueError(f"Unsupported joint order: {joint_order}")
+
+
+class _ZmqLatestSubscriber:
+    def __init__(self, host: str, port: int, topic: str, timeout: float):
+        import msgpack
+        import zmq
+
+        self.msgpack = msgpack
+        self.zmq = zmq
+        self.topic = topic.encode("utf-8")
+        self.timeout = timeout
+        self.ctx = zmq.Context()
+        self.socket = self.ctx.socket(zmq.SUB)
+        self.socket.setsockopt(zmq.RCVHWM, 1)
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.setsockopt_string(zmq.SUBSCRIBE, topic)
+        self.endpoint = f"tcp://{host}:{port}"
+        self.socket.connect(self.endpoint)
+        self.last_msg: dict[str, Any] | None = None
+        self.last_rx_time = 0.0
+        print(f"[INFO] MuJoCo G1 mirror ZMQ connected: {self.endpoint}/{topic}")
+
+    def close(self) -> None:
+        self.socket.close(0)
+        self.ctx.term()
+
+    @property
+    def fresh(self) -> bool:
+        return self.last_msg is not None and (time.monotonic() - self.last_rx_time) <= self.timeout
+
+    def _decode(self, parts: list[bytes]) -> dict[str, Any] | None:
+        if not parts:
+            return None
+        if len(parts) >= 2 and parts[0] == self.topic:
+            payload = parts[-1]
+        else:
+            raw = parts[0]
+            payload = raw[len(self.topic) :] if raw.startswith(self.topic) else raw
+        return self.msgpack.unpackb(payload, raw=False)
+
+    def poll_latest(self) -> dict[str, Any] | None:
+        latest = None
+        while True:
+            try:
+                parts = self.socket.recv_multipart(flags=self.zmq.NOBLOCK)
+            except self.zmq.Again:
+                break
+            latest = self._decode(parts)
+        if latest is not None:
+            self.last_msg = latest
+            self.last_rx_time = time.monotonic()
+        return latest if latest is not None else self.last_msg
+
+
+class MuJoCoG1MirrorAction(ActionTerm):
+    """Mirror MuJoCo/SONIC G1 root and joint state into the Isaac Lab robot.
+
+    The term has zero action dimensions. It listens to the same ZMQ debug streams used by
+    ``isaaclab_g1_sim2sim_viewer.py`` and writes state directly only after data is received.
+    Without a live publisher it stays idle, allowing the normal motion-controller locomotion
+    action to continue working.
+    """
+
+    cfg: "MuJoCoG1MirrorActionCfg"
+
+    def __init__(self, cfg: "MuJoCoG1MirrorActionCfg", env: "ManagerBasedEnv"):
+        super().__init__(cfg, env)
+        self._raw_actions = torch.zeros(self.num_envs, 0, device=self.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._export_IO_descriptor = False
+        self._enabled = cfg.enabled and self.num_envs == 1
+
+        self._body_mujoco_ids, self._body_isaac_ids = self._build_body_joint_ids(cfg.mirror_joint_names)
+        self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
+        self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
+        self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
+
+        self._subscriber: _ZmqLatestSubscriber | None = None
+        self._root_subscriber: _ZmqLatestSubscriber | None = None
+        self._last_sample: _MirrorSample | None = None
+        self._root_pose = self._asset.data.default_root_state[:, :7].clone()
+        self._root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
+        self._foot_min_z: float | None = None
+        self._source_origin_xy: torch.Tensor | None = None
+        self._source_root_is_moving = False
+        self._stance_slot: int | None = None
+        self._anchor_xy: torch.Tensor | None = None
+        self._warned_disabled = False
+        self._warned_stale = False
+        self._printed_first_sample = False
+
+        if self._enabled:
+            try:
+                self._subscriber = _ZmqLatestSubscriber(cfg.zmq_host, cfg.zmq_port, cfg.zmq_topic, cfg.zmq_timeout)
+                if cfg.root_zmq:
+                    self._root_subscriber = _ZmqLatestSubscriber(
+                        cfg.root_zmq_host,
+                        cfg.root_zmq_port,
+                        cfg.root_zmq_topic,
+                        cfg.zmq_timeout,
+                    )
+            except Exception as exc:
+                self._enabled = False
+                print(f"[WARN] MuJoCo G1 mirror disabled; failed to create ZMQ subscriber: {exc}")
+        elif cfg.enabled and self.num_envs != 1:
+            print("[WARN] MuJoCo G1 mirror is disabled because it only supports num_envs=1 for XR first-person use.")
+
+    def __del__(self):
+        for subscriber in (getattr(self, "_subscriber", None), getattr(self, "_root_subscriber", None)):
+            if subscriber is not None:
+                try:
+                    subscriber.close()
+                except Exception:
+                    pass
+        try:
+            super().__del__()
+        except Exception:
+            pass
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions = actions
+        self._processed_actions = actions
+
+    def apply_actions(self):
+        if not self._enabled or self._subscriber is None:
+            return
+
+        sample = self._sample()
+        if sample is None:
+            return
+        self._last_sample = sample
+        if not self._printed_first_sample:
+            root_state = "yes" if sample.root_pos_w is not None or sample.root_quat_w is not None else "no"
+            print(
+                "[INFO] MuJoCo G1 mirror received first packet: "
+                f"mirrored_body_joints={len(self._body_isaac_ids)}, "
+                f"mirror_hands={self.cfg.mirror_hands}, root={root_state}"
+            )
+            self._printed_first_sample = True
+
+        joint_pos = self._asset.data.joint_pos.clone()
+        joint_vel = self._asset.data.joint_vel.clone()
+
+        if sample.joint_pos_mujoco is not None:
+            q = torch.tensor(sample.joint_pos_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
+            joint_pos[:, self._body_isaac_ids] = q.unsqueeze(0)
+        if sample.joint_vel_mujoco is not None:
+            dq = torch.tensor(sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
+            joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
+
+        if self.cfg.mirror_hands:
+            if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
+                joint_pos[:, self._left_hand_ids] = torch.tensor(
+                    sample.left_hand_pos[:7], dtype=torch.float32, device=self.device
+                ).unsqueeze(0)
+            if sample.right_hand_pos is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
+                joint_pos[:, self._right_hand_ids] = torch.tensor(
+                    sample.right_hand_pos[:7], dtype=torch.float32, device=self.device
+                ).unsqueeze(0)
+            if sample.left_hand_vel is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
+                joint_vel[:, self._left_hand_ids] = torch.tensor(
+                    sample.left_hand_vel[:7], dtype=torch.float32, device=self.device
+                ).unsqueeze(0)
+            if sample.right_hand_vel is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
+                joint_vel[:, self._right_hand_ids] = torch.tensor(
+                    sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
+                ).unsqueeze(0)
+
+        self._asset.write_joint_state_to_sim(joint_pos, joint_vel)
+
+        if sample.root_pos_w is not None or sample.root_quat_w is not None:
+            if sample.root_pos_w is not None:
+                self._root_pose[:, :3] = torch.tensor(sample.root_pos_w, dtype=torch.float32, device=self.device)
+            if sample.root_quat_w is not None:
+                self._root_pose[:, 3:7] = torch.tensor(sample.root_quat_w, dtype=torch.float32, device=self.device)
+            self._source_root_is_moving |= self._detect_source_root_motion(self._root_pose)
+            self._asset.write_root_link_pose_to_sim(self._root_pose)
+            self._asset.write_root_link_velocity_to_sim(self._root_velocity)
+        else:
+            self._root_pose = self._asset.data.root_link_state_w[:, :7].clone()
+
+        if self.cfg.root_motion_mode in {"stance", "auto"}:
+            self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
+        if self.cfg.ground_lock:
+            self._apply_ground_lock()
+
+    def _sample(self) -> _MirrorSample | None:
+        msg = self._subscriber.poll_latest() if self._subscriber is not None else None
+        if msg is None:
+            return None
+
+        fresh = self._subscriber.fresh if self._subscriber is not None else False
+        if not fresh and not self._warned_stale:
+            print("[WARN] MuJoCo G1 mirror ZMQ stream is stale; holding last mirrored pose.")
+            self._warned_stale = True
+
+        q = self._select_body_q(msg)
+        dq = self._select_body_dq(msg)
+        msg_order = str(msg.get("target_order", msg.get("joint_order", self.cfg.zmq_joint_order))).lower()
+        if msg_order not in {"mujoco", "isaaclab"}:
+            msg_order = self.cfg.zmq_joint_order
+
+        sample = _MirrorSample(fresh=fresh)
+        if q is not None:
+            sample.joint_pos_mujoco = _body_q_to_mujoco_order(q, msg_order)
+        elif self._last_sample is not None:
+            sample.joint_pos_mujoco = self._last_sample.joint_pos_mujoco
+        if dq is not None and dq.size >= 29:
+            sample.joint_vel_mujoco = _body_q_to_mujoco_order(dq, msg_order)
+        elif self._last_sample is not None:
+            sample.joint_vel_mujoco = self._last_sample.joint_vel_mujoco
+
+        sample.left_hand_pos = self._select_hand_q(msg, "left")
+        sample.right_hand_pos = self._select_hand_q(msg, "right")
+        sample.left_hand_vel = self._select_hand_dq(msg, "left")
+        sample.right_hand_vel = self._select_hand_dq(msg, "right")
+
+        root_msg = None
+        if self._root_subscriber is not None:
+            root_msg = self._root_subscriber.poll_latest()
+        root_source = root_msg if root_msg is not None else msg
+        root_pos = self._select_root_pos(root_source)
+        root_quat = self._select_root_quat(root_source)
+        if root_pos is not None and root_pos.size >= 3:
+            sample.root_pos_w = root_pos[:3].copy()
+            sample.root_pos_w[2] += self.cfg.root_z_offset
+        if root_quat is not None and root_quat.size >= 4:
+            sample.root_quat_w = _normalize_quat_wxyz(root_quat[:4])
+
+        if sample.joint_pos_mujoco is None:
+            return None
+        return sample
+
+    @staticmethod
+    def _first_array(msg: dict[str, Any] | None, keys: tuple[str, ...]) -> np.ndarray | None:
+        if msg is None:
+            return None
+        for key in keys:
+            if key in msg:
+                arr = np.asarray(msg[key], dtype=np.float32).reshape(-1)
+                if arr.size > 0:
+                    return arr
+        return None
+
+    def _select_body_q(self, msg: dict[str, Any]) -> np.ndarray | None:
+        if self.cfg.zmq_pose_source == "target":
+            return self._first_array(msg, ("body_q_target", "joint_pos", "q", "dof_pos"))
+        if self.cfg.zmq_pose_source == "measured":
+            return self._first_array(msg, ("body_q_measured", "body_q", "joint_pos", "q", "dof_pos"))
+        target = self._first_array(msg, ("body_q_target",))
+        if target is not None and float(np.max(np.abs(target[: min(target.size, 29)]))) > 1.0e-4:
+            return target
+        return self._first_array(msg, ("body_q_measured", "body_q", "joint_pos", "q", "dof_pos"))
+
+    def _select_body_dq(self, msg: dict[str, Any]) -> np.ndarray | None:
+        if self.cfg.zmq_pose_source == "target":
+            return self._first_array(msg, ("body_dq_target", "joint_vel", "dq", "dof_vel"))
+        return self._first_array(msg, ("body_dq_measured", "body_dq", "joint_vel", "dq", "dof_vel"))
+
+    def _select_hand_q(self, msg: dict[str, Any], side: str) -> np.ndarray | None:
+        measured_keys = (f"{side}_hand_q", f"{side}_hand_q_measured")
+        target_keys = (f"{side}_hand_q_target", f"last_{side}_hand_action")
+        if self.cfg.zmq_pose_source == "target":
+            return self._first_array(msg, target_keys + measured_keys)
+        if self.cfg.zmq_pose_source == "measured":
+            return self._first_array(msg, measured_keys + target_keys)
+        target = self._first_array(msg, target_keys)
+        if target is not None and target.size >= 7 and float(np.max(np.abs(target[:7]))) > 1.0e-4:
+            return target[:7].copy()
+        measured = self._first_array(msg, measured_keys)
+        return measured[:7].copy() if measured is not None and measured.size >= 7 else None
+
+    def _select_hand_dq(self, msg: dict[str, Any], side: str) -> np.ndarray | None:
+        keys = (f"{side}_hand_dq", f"{side}_hand_dq_measured", f"{side}_hand_dq_target")
+        arr = self._first_array(msg, keys)
+        return arr[:7].copy() if arr is not None and arr.size >= 7 else None
+
+    def _select_root_pos(self, msg: dict[str, Any] | None) -> np.ndarray | None:
+        if self.cfg.zmq_pose_source == "target":
+            return self._first_array(msg, ("root_pos_w", "base_trans_target", "base_pos", "root_pos"))
+        if self.cfg.zmq_pose_source == "measured":
+            return self._first_array(msg, ("root_pos_w", "base_trans_measured", "base_pos", "root_pos"))
+        target = self._first_array(msg, ("root_pos_w", "base_trans_target", "base_pos", "root_pos"))
+        if target is not None and float(np.linalg.norm(target[: min(target.size, 3)])) > 1.0e-4:
+            return target
+        return self._first_array(msg, ("base_trans_measured",))
+
+    def _select_root_quat(self, msg: dict[str, Any] | None) -> np.ndarray | None:
+        if self.cfg.zmq_pose_source == "target":
+            return self._first_array(msg, ("root_quat_w", "base_quat_target", "base_quat", "root_quat"))
+        if self.cfg.zmq_pose_source == "measured":
+            return self._first_array(msg, ("root_quat_w", "base_quat_measured", "base_quat", "root_quat"))
+        return self._first_array(
+            msg,
+            ("root_quat_w", "base_quat_measured", "base_quat_target", "base_quat", "root_quat"),
+        )
+
+    def _build_body_joint_ids(self, mirror_patterns: list[str]) -> tuple[list[int], list[int]]:
+        compiled = [re.compile(pattern) for pattern in mirror_patterns]
+        isaac_name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}
+        mujoco_ids: list[int] = []
+        isaac_ids: list[int] = []
+        for mujoco_id, name in enumerate(MUJOCO_29DOF_JOINT_NAMES):
+            if not any(pattern.fullmatch(name) for pattern in compiled):
+                continue
+            isaac_id = isaac_name_to_id.get(name)
+            if isaac_id is not None:
+                mujoco_ids.append(mujoco_id)
+                isaac_ids.append(isaac_id)
+        if not isaac_ids:
+            raise RuntimeError("MuJoCo G1 mirror did not match any Isaac Lab joints.")
+        return mujoco_ids, isaac_ids
+
+    def _build_joint_ids(self, joint_names: list[str]) -> list[int]:
+        isaac_name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}
+        return [isaac_name_to_id[name] for name in joint_names if name in isaac_name_to_id]
+
+    def _build_body_ids(self, body_names: list[str]) -> list[int]:
+        body_name_to_id = {name: idx for idx, name in enumerate(self._asset.body_names)}
+        return [body_name_to_id[name] for name in body_names if name in body_name_to_id]
+
+    def _detect_source_root_motion(self, root_pose: torch.Tensor) -> bool:
+        source_xy = root_pose[0, :2].detach().clone()
+        if self._source_origin_xy is None:
+            self._source_origin_xy = source_xy
+            return False
+        return torch.linalg.norm(source_xy - self._source_origin_xy).item() > self.cfg.source_root_motion_eps
+
+    def _apply_stance_root_if_needed(self, source_has_root: bool) -> None:
+        if not self._foot_body_ids:
+            return
+        if self.cfg.root_motion_mode == "auto" and source_has_root and self._source_root_is_moving:
+            self._stance_slot = None
+            self._anchor_xy = None
+            return
+
+        self._env.sim.forward()
+        self._asset.update(0.0)
+        foot_pos = self._asset.data.body_pos_w[0, self._foot_body_ids, :3].detach()
+        foot_min_z = self._resolve_foot_min_z()
+        foot_height = foot_pos[:, 2] - (self.cfg.ground_height + foot_min_z)
+        candidate_slot = int(torch.argmin(foot_height).item())
+
+        if self._stance_slot is None or self._anchor_xy is None:
+            self._stance_slot = candidate_slot
+            self._anchor_xy = foot_pos[candidate_slot, :2].clone()
+            return
+
+        current_height = float(foot_height[self._stance_slot].item())
+        candidate_height = float(foot_height[candidate_slot].item())
+        current_contact = current_height <= self.cfg.stance_foot_height_tolerance
+        candidate_contact = candidate_height <= self.cfg.stance_foot_height_tolerance
+        should_switch = (
+            candidate_slot != self._stance_slot
+            and candidate_contact
+            and ((not current_contact) or candidate_height < current_height - self.cfg.stance_foot_switch_margin)
+        )
+        if should_switch:
+            self._stance_slot = candidate_slot
+            self._anchor_xy = foot_pos[candidate_slot, :2].clone()
+            return
+
+        delta_xy = self._anchor_xy - foot_pos[self._stance_slot, :2]
+        delta_norm = float(torch.linalg.norm(delta_xy).item())
+        if self.cfg.stance_root_max_step > 0.0 and delta_norm > self.cfg.stance_root_max_step:
+            delta_xy = delta_xy * (self.cfg.stance_root_max_step / max(delta_norm, 1.0e-9))
+            self._anchor_xy = foot_pos[self._stance_slot, :2] + delta_xy
+
+        if float(torch.linalg.norm(delta_xy).item()) > 1.0e-7:
+            self._root_pose[:, :2] += delta_xy.unsqueeze(0)
+            self._asset.write_root_link_pose_to_sim(self._root_pose)
+            self._asset.write_root_link_velocity_to_sim(self._root_velocity)
+            self._env.sim.forward()
+            self._asset.update(0.0)
+
+    def _apply_ground_lock(self) -> None:
+        if not self._foot_body_ids:
+            return
+        self._env.sim.forward()
+        self._asset.update(0.0)
+        target_min_z = self.cfg.ground_height + self._resolve_foot_min_z()
+        current_min_z = float(torch.min(self._asset.data.body_pos_w[:, self._foot_body_ids, 2]).item())
+        z_correction = max(target_min_z - current_min_z, 0.0)
+        if z_correction > 1.0e-5:
+            self._root_pose[:, 2] += z_correction
+            self._asset.write_root_link_pose_to_sim(self._root_pose)
+            self._asset.write_root_link_velocity_to_sim(self._root_velocity)
+            self._env.sim.forward()
+            self._asset.update(0.0)
+
+    def _resolve_foot_min_z(self) -> float:
+        if self._foot_min_z is None:
+            if self.cfg.ground_lock_clearance >= 0.0:
+                self._foot_min_z = self.cfg.ground_lock_clearance
+            elif self._foot_body_ids:
+                foot_z = self._asset.data.body_pos_w[:, self._foot_body_ids, 2]
+                self._foot_min_z = max(float(torch.min(foot_z).item()) - self.cfg.ground_height, 0.0)
+            else:
+                self._foot_min_z = 0.0
+        return self._foot_min_z
 
 
 class AgileBasedLowerBodyAction(ActionTerm):

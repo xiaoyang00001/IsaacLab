@@ -105,7 +105,6 @@ class XrCfg:
     If True, the anchor height will be fixed to the initial height of the anchor prim.
     """
 
-
 from typing import Any
 
 

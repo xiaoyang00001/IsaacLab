@@ -135,6 +135,10 @@ fabricUpdateJointStates = false
 ### When Direct GPU mode is enabled (suppressReadback=true) use direct interop between PhysX GPU and Fabric
 fabricUseGPUInterop = true
 
+# Extension manager settings
+[settings.app.extensions]
+fsWatcherEnabled = false
+
 # Register extension folder from this repo in kit
 [settings.app.exts]
 folders = [
@@ -144,12 +148,8 @@ folders = [
     "${exe-path}/../extsDeprecated",  # deprecated isaac extensions
     "${exe-path}/../extscache",  # isaac cache extensions
     "${exe-path}/../extsPhysics",  # isaac physics extensions
-    "${exe-path}/../isaacsim/exts",  # isaac extensions for pip
-    "${exe-path}/../isaacsim/extsDeprecated",  # deprecated isaac extensions
-    "${exe-path}/../isaacsim/extscache",  # isaac cache extensions for pip
-    "${exe-path}/../isaacsim/extsPhysics",  # isaac physics extensions for pip
     "${app}", # needed to find other app files
-    "${app}/../source", # needed to find extensions in Isaac Lab
+    "${app}/../source", # Isaac Lab extensions
 ]
 
 # Asset path

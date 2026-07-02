@@ -159,6 +159,14 @@ class G1TriHandUpperBodyMotionControllerRetargeter(RetargeterBase):
         # Extract specific inputs using enum
         trigger = inputs[DeviceBase.MotionControllerInputIndex.TRIGGER.value]  # 0.0 to 1.0 (analog)
         squeeze = inputs[DeviceBase.MotionControllerInputIndex.SQUEEZE.value]  # 0.0 to 1.0 (analog)
+        button_0 = inputs[DeviceBase.MotionControllerInputIndex.BUTTON_0.value]  # A/X click
+        button_1 = inputs[DeviceBase.MotionControllerInputIndex.BUTTON_1.value]  # B/Y click
+
+        # Support both analog controls and digital buttons:
+        #   trigger or A/X closes index + thumb
+        #   squeeze or B/Y closes middle + thumb
+        trigger = max(trigger, button_0)
+        squeeze = max(squeeze, button_1)
 
         # Grasping logic:
         #   If trigger is pressed, we grasp with index and thumb.

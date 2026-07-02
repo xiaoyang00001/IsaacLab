@@ -27,6 +27,7 @@ optional arguments:
 # Standard library imports
 import argparse
 import contextlib
+import sys
 
 # Isaac Lab AppLauncher
 from isaaclab.app import AppLauncher
@@ -73,6 +74,29 @@ args_cli = parser.parse_args()
 if args_cli.task is None:
     parser.error("--task is required")
 
+G1_LOCOMANIP_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-Abs-v0"
+G1_LOCOMANIP_TASK_ALIASES = {
+    "Isaac-PickPlace-Locomanipulation-G1-Abs": G1_LOCOMANIP_TASK_ID,
+    G1_LOCOMANIP_TASK_ID: G1_LOCOMANIP_TASK_ID,
+}
+
+
+def _cli_flag_present(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv)
+
+
+args_cli.task = G1_LOCOMANIP_TASK_ALIASES.get(args_cli.task, args_cli.task)
+
+if (
+    args_cli.task == G1_LOCOMANIP_TASK_ID
+    and not _cli_flag_present("--teleop_device")
+    and args_cli.teleop_device == "keyboard"
+):
+    args_cli.teleop_device = "motion_controllers"
+
+if args_cli.task == G1_LOCOMANIP_TASK_ID:
+    args_cli.enable_pinocchio = True
+
 app_launcher_args = vars(args_cli)
 
 if args_cli.enable_pinocchio:
@@ -80,7 +104,7 @@ if args_cli.enable_pinocchio:
     # installed by IsaacLab and not the one installed by Isaac Sim.
     # pinocchio is required by the Pink IK controllers and the GR1T2 retargeter
     import pinocchio  # noqa: F401
-if "handtracking" in args_cli.teleop_device.lower():
+if args_cli.teleop_device.lower() in {"handtracking", "motion_controllers"}:
     app_launcher_args["xr"] = True
 
 # launch the simulator
@@ -291,14 +315,14 @@ def setup_teleop_device(callbacks: dict[str, Callable]) -> object:
                 teleop_interface = Se3SpaceMouse(Se3SpaceMouseCfg(pos_sensitivity=0.2, rot_sensitivity=0.5))
             else:
                 logger.error(f"Unsupported teleop device: {args_cli.teleop_device}")
-                logger.error("Supported devices: keyboard, spacemouse, handtracking")
+                logger.error("Supported devices: keyboard, spacemouse, handtracking, motion_controllers")
                 exit(1)
 
             # Add callbacks to fallback device
             for key, callback in callbacks.items():
                 teleop_interface.add_callback(key, callback)
     except Exception as e:
-        logger.error(f"Failed to create teleop device: {e}")
+        logger.exception(f"Failed to create teleop device: {e}")
         exit(1)
 
     if teleop_interface is None:
@@ -417,7 +441,10 @@ def run_simulation_loop(
     current_recorded_demo_count = 0
     success_step_count = 0
     should_reset_recording_instance = False
-    running_recording_instance = not args_cli.xr
+    # The G1 locomanipulation task is used as a live MuJoCo/ZMQ mirror in XR.
+    # It must step immediately so the mirror action can consume incoming packets,
+    # even before a recording START event is received.
+    running_recording_instance = (not args_cli.xr) or args_cli.task == G1_LOCOMANIP_TASK_ID
 
     # Callback closures for the teleop device
     def reset_recording_instance():
@@ -460,8 +487,18 @@ def run_simulation_loop(
         while simulation_app.is_running():
             # Get keyboard command
             action = teleop_interface.advance()
-            # Expand to batch dimension
-            actions = action.repeat(env.num_envs, 1)
+            action_dim = getattr(env.action_manager, "total_action_dim", None)
+            if action_dim == 0:
+                actions = torch.zeros((env.num_envs, 0), device=env.device)
+            else:
+                if not isinstance(action, torch.Tensor):
+                    raise TypeError(
+                        f"Teleop device '{args_cli.teleop_device}' returned {type(action).__name__}, "
+                        f"but environment expects {action_dim} action values."
+                    )
+                action = action.to(env.device)
+                # Expand to batch dimension
+                actions = action.repeat(env.num_envs, 1)
 
             # Perform action on environment
             if running_recording_instance:

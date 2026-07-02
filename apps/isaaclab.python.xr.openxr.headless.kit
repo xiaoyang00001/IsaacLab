@@ -24,7 +24,7 @@ rtx.hydra.readTransformsFromFabricInRenderDelegate = true
 
 # xr optimizations
 xr.skipInputDeviceUSDWrites = true
-'rtx-transient'.resourcemanager.enableTextureStreaming = false
+'rtx-transient'.resourcemanager.enableTextureStreaming = true
 
 [settings.isaaclab]
 # This is used to check that this experience file is loaded when using cameras
@@ -41,6 +41,10 @@ xr.profile.ar.enabled = true
 interceptSysStdOutput = false
 logSysStdOutput = false
 
+# Extension manager settings
+[settings.app.extensions]
+fsWatcherEnabled = false
+
 # Register extension folder from this repo in kit
 [settings.app.exts]
 folders = [
@@ -50,12 +54,8 @@ folders = [
     "${exe-path}/../extsDeprecated",  # deprecated isaac extensions
     "${exe-path}/../extscache",  # isaac cache extensions
     "${exe-path}/../extsPhysics",  # isaac physics extensions
-    "${exe-path}/../isaacsim/exts",  # isaac extensions for pip
-    "${exe-path}/../isaacsim/extsDeprecated",  # deprecated isaac extensions
-    "${exe-path}/../isaacsim/extscache",  # isaac cache extensions for pip
-    "${exe-path}/../isaacsim/extsPhysics",  # isaac physics extensions for pip
     "${app}", # needed to find other app files
-    "${app}/../source", # needed to find extensions in Isaac Lab
+    "${app}/../source", # Isaac Lab extensions
 ]
 
 [settings]

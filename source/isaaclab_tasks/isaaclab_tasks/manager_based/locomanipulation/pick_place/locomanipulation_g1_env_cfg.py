@@ -3,21 +3,15 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+from pathlib import Path
+
 import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
+from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.g1_lower_body_standing import G1LowerBodyStandingRetargeterCfg
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.g1_motion_controller_locomotion import (
-    G1LowerBodyStandingMotionControllerRetargeterCfg,
-)
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_motion_ctrl_retargeter import (
-    G1TriHandUpperBodyMotionControllerRetargeterCfg,
-)
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_retargeter import (
-    G1TriHandUpperBodyRetargeterCfg,
-)
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -27,25 +21,203 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
-    AgileTeacherPolicyObservationsCfg,
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+    MuJoCoG1MirrorActionCfg,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
-
-from isaaclab_assets.robots.unitree import G1_29DOF_CFG
-
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_controller_cfg import (  # isort: skip
-    G1_UPPER_BODY_IK_ACTION_CFG,
-)
-
 
 ##
 # Scene definition
 ##
+
+
+def _find_gr00t_g1_43dof_usd() -> str:
+    """Resolve the GR00T G1 43-DoF USD used by the sim2sim viewer."""
+
+    candidates = []
+    if "GR00T_WBC_ROOT" in os.environ:
+        candidates.append(Path(os.environ["GR00T_WBC_ROOT"]).expanduser())
+    candidates.extend(
+        [
+            Path("/home/nolovr/GR00T-WholeBodyControl"),
+            Path(__file__).resolve().parents[6] / "GR00T-WholeBodyControl",
+            Path.cwd() / "GR00T-WholeBodyControl",
+        ]
+    )
+    for root in candidates:
+        for usd_name in (
+            "g1_43dof_isaaclab_nomdl.usd",
+            "g1_43dof.usd",
+            "g1_43dof_isaaclab_no_material.usda",
+            "g1_43dof_isaaclab_nomdl.usda",
+            "g1_43dof_s3.usda",
+        ):
+            usd_path = root / "gear_sonic/data/robots/g1" / usd_name
+            if usd_path.exists():
+                return str(usd_path.resolve())
+    searched = "\n  ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "Could not locate GR00T G1 43-DoF USD. Set GR00T_WBC_ROOT to the GR00T-WholeBodyControl path. "
+        f"Searched:\n  {searched}"
+    )
+
+
+G1_43DOF_GR00T_CFG = ArticulationCfg(
+    prim_path="/World/envs/env_.*/Robot",
+    spawn=UsdFileCfg(
+        usd_path=_find_gr00t_g1_43dof_usd(),
+        activate_contact_sensors=False,
+        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,
+            fix_root_link=False,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=4,
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.78),
+        rot=(0.7071, 0.0, 0.0, 0.7071),
+        joint_pos={
+            ".*_hip_pitch_joint": -0.10,
+            ".*_knee_joint": 0.30,
+            ".*_ankle_pitch_joint": -0.20,
+            "left_shoulder_pitch_joint": 0.2,
+            "right_shoulder_pitch_joint": 0.2,
+            "left_shoulder_roll_joint": 0.2,
+            "right_shoulder_roll_joint": -0.2,
+            "left_elbow_joint": 0.6,
+            "right_elbow_joint": 0.6,
+        },
+        joint_vel={".*": 0.0},
+    ),
+    soft_joint_pos_limit_factor=0.9,
+    actuators={
+        "legs": DCMotorCfg(
+            joint_names_expr=[
+                ".*_hip_yaw_joint",
+                ".*_hip_roll_joint",
+                ".*_hip_pitch_joint",
+                ".*_knee_joint",
+            ],
+            effort_limit={
+                ".*_hip_yaw_joint": 88.0,
+                ".*_hip_roll_joint": 88.0,
+                ".*_hip_pitch_joint": 88.0,
+                ".*_knee_joint": 139.0,
+            },
+            velocity_limit={
+                ".*_hip_yaw_joint": 32.0,
+                ".*_hip_roll_joint": 32.0,
+                ".*_hip_pitch_joint": 32.0,
+                ".*_knee_joint": 20.0,
+            },
+            stiffness={
+                ".*_hip_yaw_joint": 100.0,
+                ".*_hip_roll_joint": 100.0,
+                ".*_hip_pitch_joint": 100.0,
+                ".*_knee_joint": 200.0,
+            },
+            damping={
+                ".*_hip_yaw_joint": 2.5,
+                ".*_hip_roll_joint": 2.5,
+                ".*_hip_pitch_joint": 2.5,
+                ".*_knee_joint": 5.0,
+            },
+            armature={
+                ".*_hip_.*": 0.03,
+                ".*_knee_joint": 0.03,
+            },
+            saturation_effort=180.0,
+        ),
+        "feet": DCMotorCfg(
+            joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
+            stiffness={
+                ".*_ankle_pitch_joint": 20.0,
+                ".*_ankle_roll_joint": 20.0,
+            },
+            damping={
+                ".*_ankle_pitch_joint": 0.2,
+                ".*_ankle_roll_joint": 0.1,
+            },
+            effort_limit={
+                ".*_ankle_pitch_joint": 50.0,
+                ".*_ankle_roll_joint": 50.0,
+            },
+            velocity_limit={
+                ".*_ankle_pitch_joint": 37.0,
+                ".*_ankle_roll_joint": 37.0,
+            },
+            armature=0.03,
+            saturation_effort=80.0,
+        ),
+        "waist": ImplicitActuatorCfg(
+            joint_names_expr=["waist_.*_joint"],
+            effort_limit_sim={
+                "waist_yaw_joint": 88.0,
+                "waist_roll_joint": 50.0,
+                "waist_pitch_joint": 50.0,
+            },
+            velocity_limit_sim={
+                "waist_yaw_joint": 32.0,
+                "waist_roll_joint": 37.0,
+                "waist_pitch_joint": 37.0,
+            },
+            stiffness={
+                "waist_yaw_joint": 5000.0,
+                "waist_roll_joint": 5000.0,
+                "waist_pitch_joint": 5000.0,
+            },
+            damping={
+                "waist_yaw_joint": 5.0,
+                "waist_roll_joint": 5.0,
+                "waist_pitch_joint": 5.0,
+            },
+            armature=0.001,
+        ),
+        "arms": ImplicitActuatorCfg(
+            joint_names_expr=[
+                ".*_shoulder_pitch_joint",
+                ".*_shoulder_roll_joint",
+                ".*_shoulder_yaw_joint",
+                ".*_elbow_joint",
+                ".*_wrist_.*_joint",
+            ],
+            effort_limit_sim=300,
+            velocity_limit_sim=100,
+            stiffness=3000.0,
+            damping=10.0,
+            armature={
+                ".*_shoulder_.*": 0.001,
+                ".*_elbow_.*": 0.001,
+                ".*_wrist_.*_joint": 0.001,
+            },
+        ),
+        "hands": ImplicitActuatorCfg(
+            joint_names_expr=[
+                ".*_hand_index_.*",
+                ".*_hand_middle_.*",
+                ".*_hand_thumb_.*",
+            ],
+            effort_limit_sim=30.0,
+            velocity_limit_sim=10.0,
+            stiffness=20.0,
+            damping=2.0,
+            armature=0.001,
+        ),
+    },
+)
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """Scene configuration for locomanipulation environment with G1 robot.
@@ -58,25 +230,35 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -0.3], rot=[1.0, 0.0, 0.0, 0.0]),
-        spawn=UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, 0.66], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=sim_utils.CuboidCfg(
+            size=(1.2, 0.8, 0.08),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.58, 0.54), roughness=0.65),
         ),
     )
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
-        spawn=UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
-            scale=(0.75, 0.75, 0.75),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.76], rot=[1, 0, 0, 0]),
+        spawn=sim_utils.CuboidCfg(
+            size=(0.14, 0.08, 0.12),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                enable_gyroscopic_forces=True,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=1,
+                max_depenetration_velocity=5.0,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
         ),
     )
 
-    # Humanoid robot w/ arms higher
-    robot: ArticulationCfg = G1_29DOF_CFG
+    # Humanoid robot from the GR00T sim2sim viewer asset.
+    robot: ArticulationCfg = G1_43DOF_GR00T_CFG
 
     # Ground plane
     ground = AssetBaseCfg(
@@ -95,19 +277,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
-
-    lower_body_joint_pos = AgileBasedLowerBodyActionCfg(
-        asset_name="robot",
-        joint_names=[
-            ".*_hip_.*_joint",
-            ".*_knee_joint",
-            ".*_ankle_.*_joint",
-        ],
-        policy_output_scale=0.25,
-        obs_group_name="lower_body_policy",  # need to be the same name as the on in ObservationCfg
-        policy_path=f"{ISAACLAB_NUCLEUS_DIR}/Policies/Agile/agile_locomotion.pt",
-    )
+    # This task is a MuJoCo/GR00T state mirror. Do not add IK or locomotion action
+    # terms here, otherwise they will overwrite the mirrored robot state.
+    mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(asset_name="robot")
 
 
 @configclass
@@ -149,8 +321,6 @@ class ObservationsCfg:
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
-    lower_body_policy: AgileTeacherPolicyObservationsCfg = AgileTeacherPolicyObservationsCfg()
-
 
 @configclass
 class TerminationsCfg:
@@ -194,7 +364,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
 
     # Position of the XR anchor in the world frame
     xr: XrCfg = XrCfg(
-        anchor_pos=(0.0, 0.0, -0.35),
+        anchor_pos=(0.0, 0.0, 0.0),
         anchor_rot=(1.0, 0.0, 0.0, 0.0),
     )
 
@@ -206,48 +376,28 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
         self.sim.render_interval = 2
+        # The default Isaac Lab GPU PhysX buffers target large batched training scenes.
+        # This task is a single-env XR mirror, so smaller buffers avoid VRAM exhaustion on 8 GB GPUs.
+        self.sim.physx.gpu_max_rigid_contact_count = 2**20
+        self.sim.physx.gpu_max_rigid_patch_count = 2**14
+        self.sim.physx.gpu_found_lost_pairs_capacity = 2**16
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 2**18
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2**16
+        self.sim.physx.gpu_collision_stack_size = 2**24
+        self.sim.physx.gpu_heap_capacity = 2**24
+        self.sim.physx.gpu_temp_buffer_capacity = 2**22
 
-        # Set the URDF and mesh paths for the IK controller
-        urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
-
-        # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
-        self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
-
-        self.xr.anchor_prim_path = "/World/envs/env_0/Robot/pelvis"
-        self.xr.fixed_anchor_height = True
-        # Ensure XR anchor rotation follows the robot pelvis (yaw only), with smoothing for comfort
+        self.xr.anchor_prim_path = "/World/envs/env_0/Robot/head_link"
+        self.xr.fixed_anchor_height = False
+        # Anchor XR to the robot head position; HMD translation filtering is handled by the SteamVR driver.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
 
+        teleop_device = "cpu"
         self.teleop_devices = DevicesCfg(
             devices={
-                "handtracking": OpenXRDeviceCfg(
-                    retargeters=[
-                        G1TriHandUpperBodyRetargeterCfg(
-                            enable_visualization=True,
-                            # OpenXR hand tracking has 26 joints per hand
-                            num_open_xr_hand_joints=2 * 26,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                        ),
-                        G1LowerBodyStandingRetargeterCfg(
-                            sim_device=self.sim.device,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
                 "motion_controllers": OpenXRDeviceCfg(
-                    retargeters=[
-                        G1TriHandUpperBodyMotionControllerRetargeterCfg(
-                            enable_visualization=True,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                        ),
-                        G1LowerBodyStandingMotionControllerRetargeterCfg(
-                            sim_device=self.sim.device,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
+                    retargeters=[],
+                    sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),
             }

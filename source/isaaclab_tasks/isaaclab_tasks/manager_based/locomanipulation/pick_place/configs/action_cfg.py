@@ -8,7 +8,7 @@ from dataclasses import MISSING
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions import AgileBasedLowerBodyAction
+from ..mdp.actions import AgileBasedLowerBodyAction, MuJoCoG1MirrorAction
 
 
 @configclass
@@ -32,3 +32,87 @@ class AgileBasedLowerBodyActionCfg(ActionTermCfg):
 
     policy_output_scale: float = 1.0
     """Scales the output of the policy."""
+
+
+@configclass
+class MuJoCoG1MirrorActionCfg(ActionTermCfg):
+    """Configuration for mirroring MuJoCo/SONIC G1 walking state into Isaac Lab."""
+
+    class_type: type[ActionTerm] = MuJoCoG1MirrorAction
+
+    enabled: bool = True
+    """Whether to enable the ZMQ mirror. If no packets arrive, the action stays idle."""
+
+    zmq_host: str = "127.0.0.1"
+    """MuJoCo debug publisher host."""
+
+    zmq_port: int = 5557
+    """MuJoCo debug publisher port."""
+
+    zmq_topic: str = "g1_debug"
+    """MuJoCo debug publisher topic."""
+
+    zmq_timeout: float = 0.5
+    """Seconds before the last received ZMQ packet is considered stale."""
+
+    zmq_joint_order: str = "mujoco"
+    """Fallback joint order for incoming 29-DoF body joint vectors: ``mujoco`` or ``isaaclab``."""
+
+    zmq_pose_source: str = "measured"
+    """Which pose fields to mirror: ``measured``, ``target``, or ``auto``."""
+
+    root_zmq: bool = True
+    """Whether to also subscribe to a dedicated root-state stream."""
+
+    root_zmq_host: str = "127.0.0.1"
+    """Dedicated root-state publisher host."""
+
+    root_zmq_port: int = 5558
+    """Dedicated root-state publisher port."""
+
+    root_zmq_topic: str = "g1_root"
+    """Dedicated root-state publisher topic."""
+
+    root_z_offset: float = 0.0
+    """Additive offset applied to mirrored root height."""
+
+    root_motion_mode: str = "auto"
+    """Root translation mode: ``auto`` uses moving source root, otherwise stance fallback; ``source``; or ``stance``."""
+
+    source_root_motion_eps: float = 1.0e-3
+    """Source root xy displacement threshold used by ``root_motion_mode='auto'``."""
+
+    mirror_joint_names: list[str] = [
+        ".*_hip_.*_joint",
+        ".*_knee_joint",
+        ".*_ankle_.*_joint",
+        "waist_.*_joint",
+        ".*_shoulder_.*_joint",
+        ".*_elbow_joint",
+        ".*_wrist_.*_joint",
+    ]
+    """Regex list of 29-DoF MuJoCo body joints to mirror into Isaac Lab."""
+
+    mirror_hands: bool = True
+    """Whether to mirror hand joints from MuJoCo."""
+
+    foot_body_names: list[str] = ["left_ankle_roll_link", "right_ankle_roll_link"]
+    """Foot bodies used for stance-root estimation and ground locking."""
+
+    ground_lock: bool = True
+    """Whether to keep the mirrored feet at or above the initial standing clearance."""
+
+    ground_height: float = 0.0
+    """World z height of the ground."""
+
+    ground_lock_clearance: float = -1.0
+    """Minimum foot-body z above ground. Negative means infer from the default pose."""
+
+    stance_foot_height_tolerance: float = 0.045
+    """Foot-body height tolerance above standing clearance for support-foot root estimation."""
+
+    stance_foot_switch_margin: float = 0.015
+    """Height margin for switching support foot during stance-root estimation."""
+
+    stance_root_max_step: float = 0.035
+    """Maximum xy correction per physics step for stance-root estimation. Non-positive disables clamping."""

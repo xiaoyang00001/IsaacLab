@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 from isaaclab.devices.openxr.common import HAND_JOINT_NAMES
 from isaaclab.devices.retargeter_base import RetargeterBase
+from isaaclab.sim.utils.prims import create_prim
 
 from ..device_base import DeviceBase, DeviceCfg
 from .xr_anchor_utils import XrAnchorSynchronizer
@@ -34,8 +35,6 @@ XRCoreEventType = None
 
 with contextlib.suppress(ModuleNotFoundError):
     from omni.kit.xr.core import XRCore, XRCoreEventType, XRPoseValidityFlags
-
-from isaacsim.core.prims import SingleXFormPrim
 
 
 class OpenXRDevice(DeviceBase):
@@ -105,9 +104,16 @@ class OpenXRDevice(DeviceBase):
         else:
             self._xr_anchor_headset_path = "/World/XRAnchor"
 
-        _ = SingleXFormPrim(
-            self._xr_anchor_headset_path, position=self._xr_cfg.anchor_pos, orientation=self._xr_cfg.anchor_rot
-        )
+        try:
+            create_prim(
+                self._xr_anchor_headset_path,
+                prim_type="Xform",
+                translation=self._xr_cfg.anchor_pos,
+                orientation=self._xr_cfg.anchor_rot,
+            )
+        except ValueError as e:
+            if "already exists" not in str(e):
+                raise
 
         if hasattr(carb, "settings"):
             carb.settings.get_settings().set_float(

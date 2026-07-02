@@ -34,7 +34,7 @@ rtx.hydra.readTransformsFromFabricInRenderDelegate = true
 
 # xr optimizations
 xr.skipInputDeviceUSDWrites = true
-'rtx-transient'.resourcemanager.enableTextureStreaming = false
+'rtx-transient'.resourcemanager.enableTextureStreaming = true
 
 [dependencies]
 "isaaclab.python" = {}
@@ -53,10 +53,12 @@ app.xr.enabled = true
 app.profilerBackend = "nvtx"
 
 # xr settings
-xr.ui.enabled = false
+xr.ui.enabled = true
+xr.ar.enabled = true
 xr.depth.aov = "GBufferDepth"
 defaults.xr.profile.ar.anchorMode = "custom anchor"
 rtx.rendermode = "RaytracedLighting"
+persistent.xr.system.openxr.runtime = "system"
 persistent.xr.profile.ar.renderQuality = "performance"
 persistent.xr.profile.ar.render.nearPlane = 0.15
 xr.openxr.components."omni.kit.xr.openxr.ext.hand_tracking".enabled = true
@@ -67,6 +69,10 @@ xr.openxr.components."isaacsim.xr.openxr.hand_tracking".enabled = true
 interceptSysStdOutput = false
 logSysStdOutput = false
 
+# Extension manager settings
+[settings.app.extensions]
+fsWatcherEnabled = false
+
 # Register extension folder from this repo in kit
 [settings.app.exts]
 folders = [
@@ -76,12 +82,8 @@ folders = [
     "${exe-path}/../extsDeprecated",  # deprecated isaac extensions
     "${exe-path}/../extscache",  # isaac cache extensions
     "${exe-path}/../extsPhysics",  # isaac physics extensions
-    "${exe-path}/../isaacsim/exts",  # isaac extensions for pip
-    "${exe-path}/../isaacsim/extsDeprecated",  # deprecated isaac extensions
-    "${exe-path}/../isaacsim/extscache",  # isaac cache extensions for pip
-    "${exe-path}/../isaacsim/extsPhysics",  # isaac physics extensions for pip
     "${app}", # needed to find other app files
-    "${app}/../source", # needed to find extensions in Isaac Lab
+    "${app}/../source", # Isaac Lab extensions
 ]
 
 # Asset path
