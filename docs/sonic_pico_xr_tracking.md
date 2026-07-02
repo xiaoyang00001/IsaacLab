@@ -52,7 +52,7 @@ powershell -ExecutionPolicy Bypass -File "<GR00T_ROOT>\scripts\start_windows_isa
 
 - [x] 根因分析：AR 按钮缺失 = 启动未走 XR kit（见上方链路）
 - [x] `-Xr` 开关落地，两仓库同步提交：
-  - IsaacLab `602e8ee1b`（分支 `sonic-pico-closed-loop`）
+  - IsaacLab `1f6e7c322`（分支 `sonic-pico-closed-loop-congxian`，rebase 前旧 hash 602e8ee1b）
   - GR00T `4b396da`（分支 `realtime-bvh-g1-retarget-0628`，含教程文档更新）
 - [x] 启动验证（部分）：XR experience 加载成功（`[ext: isaaclab.python.xr.openxr-2.3.2] startup`），
   44s `app ready`，**AR 按钮已在 viewport 出现**
