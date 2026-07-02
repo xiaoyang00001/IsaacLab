@@ -107,12 +107,18 @@ Isaac Sim 启动高峰需提交约 20 GB）：
 
 ## 待办
 
+目标已确认为 OpenXR 路径（非 SONIC/PICO 的 zmq_manager 旁路），Windows 端 runtime 落地是当前主线：
+
 - [ ] **P0** 清理提交内存后完整启动验证：场景加载、`Teleoperation started`、AR 按钮截图留档
-- [ ] **P1** Windows OpenXR runtime 配置：PICO Connect 串流 → SteamVR，系统默认 OpenXR runtime
-  设为 SteamVR；点击 Start AR 实测进会话（CloudXR runtime 容器为 Linux-only，Windows 只能走本地 runtime）
+- [ ] **P0** Windows OpenXR runtime 配置与实测：PICO Connect 串流 → SteamVR，系统默认 OpenXR runtime
+  设为 SteamVR；点击 Start AR 实测进会话（Ubuntu 侧已验证的 CloudXR pip runtime 是 Linux-only 路径体系，
+  Windows 需要独立验证 SteamVR 路线或其他本地 runtime）——这是路径 A 能否真正跑通 PICO 会话的关键路径
 - [ ] **P1** XR 会话激活状态下复测 `env_hz` 是否仍钉 50 Hz 实时（闭环七条件之一；XR 渲染开销更高，
   掉速会导致步态相位畸变）
-- [ ] **P2** `SonicSoloLocomanipulationEnvCfg` 无 `xr: XrCfg` 锚点配置，进 AR 后 anchor 在世界原点；
-  视角不合适时补 XrCfg（anchor_pos/anchor_rot 对准 sonic_robot）
+- [ ] **P1** `SonicSoloLocomanipulationEnvCfg` 无 `xr: XrCfg` 锚点配置，进 AR 后 anchor 在世界原点；
+  需要补 XrCfg（anchor_pos/anchor_rot 对准 sonic_robot）才能让 PICO 视角落在机器人身上
 - [ ] **P2** PICO 手柄/手追踪作为遥操输入：需给环境配置 `teleop_devices`（现仅观察，不接输入）
+
+知识库跟踪页（更详细，含踩坑记录）：机器人知识库
+`NVIDIA/IsaacLab/SONIC-Windows-IsaacLab-XR模式与AR按钮集成跟踪.md`
 - [ ] **P3** 收敛双份脚本拷贝（GR00T 为唯一源或反之），消除手动双写成本
