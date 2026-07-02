@@ -51,6 +51,13 @@ param(
 
     [switch]$Headless,
 
+    # Launch in XR mode: AppLauncher switches to apps/isaaclab.python.xr.openxr.kit,
+    # which loads omni.kit.xr.profile.ar etc. so the viewport shows the AR/VR button
+    # (required for PICO headset teleop). Keep this file ASCII-only: Windows
+    # PowerShell 5.1 reads BOM-less scripts as ANSI and non-ASCII bytes corrupt
+    # the param block.
+    [switch]$Xr,
+
     [switch]$EnablePinocchio,
 
     [string[]]$KitArg = @()
@@ -132,6 +139,11 @@ if ($Headless) {
     $isaacArgs += "--headless"
 }
 
+if ($Xr) {
+    # --xr is an AppLauncher argparse flag; it must be a script arg, not --kit_args.
+    $isaacArgs += "--xr"
+}
+
 if ($EnablePinocchio) {
     $isaacArgs += "--enable_pinocchio"
 }
@@ -141,7 +153,7 @@ Write-Host "[sonic-windows-isaaclab] UbuntuIp: $UbuntuIp"
 Write-Host "[sonic-windows-isaaclab] WindowsIp: $WindowsIp"
 Write-Host "[sonic-windows-isaaclab] Deploy endpoint: $($env:SONIC_DEPLOY_ENDPOINT)"
 Write-Host "[sonic-windows-isaaclab] State bind: $($env:SONIC_STATE_ZMQ_BIND), topic: $StateTopic"
-Write-Host "[sonic-windows-isaaclab] Task: $Task, device: $Device"
+Write-Host "[sonic-windows-isaaclab] Task: $Task, device: $Device, xr: $($Xr.IsPresent)"
 Write-Host "[sonic-windows-isaaclab] Starting isaaclab.bat"
 
 Set-Location $IsaacLabRoot
