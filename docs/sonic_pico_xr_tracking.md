@@ -102,6 +102,36 @@ Isaac Sim 启动高峰需提交约 20 GB）：
 - 澄清：第 1 次日志末尾的 `Out of memory.` 是 PowerShell 宿主被崩溃线程转储撑爆的次生错误，
   不是 Isaac Sim 死因；`-Xr` 功能本身与三次失败无关。
 
+### 问题 4：Windows 端 `xrCreateInstance failed`——SteamVR 在跑，但没有 PICO 客户端注册头显
+
+2026-07-02 手动实测（锚点配置已生效，`Teleoperation started` 正常）时，仿真启动阶段打出：
+
+```text
+Error [GENERAL | xrCreateInstance | OpenXR-Loader] : LoaderInstance::CreateInstance chained CreateInstance call failed
+Error [GENERAL | xrCreateInstance | OpenXR-Loader] : xrCreateInstance failed
+```
+
+随后日志里还出现一段 `XR session start`（54.4s）到 `XR session end`（72.9s，约 18.6 秒）——
+Kit 的 hydra 渲染设置为 XR 会话切换过一次又切回来，但没有产出可用画面，83.6s 整个 App 关闭。
+
+现场排查（PowerShell 注册表 + 进程检查）：
+
+| 检查项 | 结果 |
+|------|------|
+| `HKLM:\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` | 已设置，指向 `...\SteamVR\steamxr_win64.json` |
+| SteamVR 安装 | 存在（`Program Files (x86)\Steam\steamapps\common\SteamVR`） |
+| `vrserver`/`vrmonitor` 进程 | **在跑**（当天 14:40 就启动，非本次新起） |
+| PICO 客户端（PICO Connect / Streaming Assistant 等） | **未安装**——文件夹扫描 + 注册表已安装程序列表均为空 |
+
+结论：OpenXR runtime 默认值和 SteamVR 服务本身都没问题，**缺的是 PICO 官方 Windows
+客户端**——没有它，PICO 头显无法在 SteamVR 里注册成一个可用的 HMD 设备，
+`xrCreateInstance`/session 建立自然失败，与 `-Xr`/锚点代码无关。
+
+下一步需要用户决定：安装 PICO 对应的 Windows streaming 客户端（PICO 4 系列是
+"Streaming Assistant"，PICO 企业/教育版可能是 "PICO Connect" 或 "PICO Business
+Streaming"，需按头显具体型号确认），装好后头显应能出现在 SteamVR 设备列表里，
+再重新测 `-Xr` 启动。
+
 ## 本机环境（2026-07-02 实测）
 
 - GPU：NVIDIA RTX 3060 Laptop 6 GB（Kit 枚举 GPU 0 Active，5996 MB）+ Intel UHD；
@@ -166,7 +196,7 @@ self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg
 ## 待办
 
 - [x] ~~清理提交内存后完整启动验证~~ 2026-07-02 已通过（日志证据见上方"当前状态"）
-- [ ] **P0** Windows OpenXR runtime 配置与实测：PICO Connect 串流 → SteamVR，系统默认 OpenXR runtime
+- [ ] **P0** Windows OpenXR runtime 配置与实测——2026-07-02 实测已定位缺口，见下方"问题 4"：PICO Connect 串流 → SteamVR，系统默认 OpenXR runtime
   设为 SteamVR；点击 Start AR 实测进会话（Ubuntu 侧已验证的 CloudXR pip runtime 是 Linux-only 路径体系，
   Windows 需要独立验证 SteamVR 路线或其他本地 runtime）——这是路径 A 能否真正跑通 PICO 会话的关键路径
 - [ ] **P1** XR 会话激活状态下复测 `env_hz` 是否仍钉 50 Hz 实时（闭环七条件之一；XR 渲染开销更高，
