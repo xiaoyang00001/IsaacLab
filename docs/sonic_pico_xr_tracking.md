@@ -56,7 +56,12 @@ powershell -ExecutionPolicy Bypass -File "<GR00T_ROOT>\scripts\start_windows_isa
   - GR00T `4b396da`（分支 `realtime-bvh-g1-retarget-0628`，含教程文档更新）
 - [x] 启动验证（部分）：XR experience 加载成功（`[ext: isaaclab.python.xr.openxr-2.3.2] startup`），
   44s `app ready`，**AR 按钮已在 viewport 出现**
-- [ ] 完整启动验证（SonicSolo 场景加载 + teleop 主循环）——被本机内存问题阻塞，见问题 3
+- [x] 完整启动验证（SonicSolo 场景加载 + teleop 主循环）：2026-07-02 二次实测在 commit
+  余量仅 6GB（比三连崩时更紧）下顺利通过，`app ready` 41s，`Teleoperation started`，
+  `SonicRobotStatePublisher` 稳定跑过 6000+ 步无崩溃——说明问题 3 不是必现，视当次系统负载而定
+- [x] XR 锚点绑定 `sonic_robot/pelvis`：日志确认
+  `Anchor Prim Path: /World/envs/env_0/SONICRobot/pelvis (Dynamic Anchoring)`，
+  详见下方"XR 锚点"一节
 
 ## 已解决问题记录
 
@@ -105,20 +110,72 @@ Isaac Sim 启动高峰需提交约 20 GB）：
 - 驱动 576.83，Graphics API D3D12
 - conda env：`env_isaaclab`（miniconda3）
 
+## XR 锚点：视角绑定 sonic_robot（2026-07-02）
+
+目标确认为 OpenXR 路径，且视角要以 sonic_robot 的位置为参照（仿照
+`locomanipulation_g1_env_cfg.py` 里 `Robot`/`RemoteRobot` 双机的 pelvis 锚定方式）。
+
+**关键机制**：`env_cfg.xr = XrCfg(...)` 单独赋值不会生效——`XrCfg` 只在
+`OpenXRDevice.__init__` 里被真正消费（创建锚点 prim、订阅 Kit `pre_sync_update`
+持续同步）。全仓库唯一构造 `OpenXRDevice` 的地方是
+`create_teleop_device()`，而它只有在 `env_cfg.teleop_devices.devices` 里存在
+一个 key 等于 `args_cli.teleop_device` 的 `OpenXRDeviceCfg` 条目时才会触发
+（`teleop_se3_agent.py` deploy_target_mode 分支的设备选择逻辑）。因此完整链路是：
+
+```text
+-Xr 开关
+  -> --xr                        (XR kit 切换，见上方)
+  -> --teleop_device handtracking (脚本联动追加)
+  -> env_cfg.teleop_devices.devices["handtracking"] 命中
+  -> create_teleop_device("handtracking", ...) -> OpenXRDevice(xr_cfg=self.xr)
+  -> XRAnchor prim 挂在 anchor_prim_path 下，Dynamic Anchoring 跟随该 prim 移动
+```
+
+`SonicSoloLocomanipulationEnvCfg`/`SonicFullsceneLocomanipulationEnvCfg`
+`__post_init__` 新增：
+
+```python
+self.xr = XrCfg(
+    anchor_pos=(0.0, 0.0, -0.82),
+    anchor_rot=(1.0, 0.0, 0.0, 0.0),
+    anchor_prim_path="/World/envs/env_0/SONICRobot/pelvis",
+    fixed_anchor_height=True,
+)
+self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg=self.xr)})
+```
+
+`sonic_robot` 在两个场景里都是同一个 `SONIC_G1_29DOF_CFG`，prim path 固定为
+`{ENV_REGEX_NS}/SONICRobot`（源码定位：`locomanipulation_g1_env_cfg.py:491`），
+带 `pelvis` link。`anchor_pos` Z 偏移 -0.82 与参考配置一致：把锚点从 pelvis
+高度下沉到落地点附近，用户真实站立时的头部高度会自然落在机器人大致的视线
+高度，而不是锁死一个刚性头部摄像机（旋转模式沿用参考的默认 FIXED，不随
+机器人转身而转动房间朝向，避免眩晕）。`-0.82` 这个数值来自参考配置的经验值，
+真机验证后可能需要微调。
+
+`teleop_interface.add_callback("U"/"R"/...)` 传给 `OpenXRDevice` 时会被无校验地
+存进 `self._additional_callbacks` 字典（`add_callback` 实现见
+`openxr_device.py:241-249`），不会抛异常——这些键盘式回调名在 OpenXR 手势
+消息总线上永远不会被触发，只是静默挂在那里，不影响锚点构造成功。
+
+**代码改动**：
+
+- `sonic_solo_locomanipulation_env_cfg.py`、`sonic_fullscene_locomanipulation_env_cfg.py`
+  新增 import（`DevicesCfg`、`OpenXRDeviceCfg`、`XrCfg`）+ `__post_init__` 锚点配置
+- `start_windows_isaaclab_sonic.ps1`：`-Xr` 分支追加 `--teleop_device handtracking`
+
 ## 待办
 
-目标已确认为 OpenXR 路径（非 SONIC/PICO 的 zmq_manager 旁路），Windows 端 runtime 落地是当前主线：
-
-- [ ] **P0** 清理提交内存后完整启动验证：场景加载、`Teleoperation started`、AR 按钮截图留档
+- [x] ~~清理提交内存后完整启动验证~~ 2026-07-02 已通过（日志证据见上方"当前状态"）
 - [ ] **P0** Windows OpenXR runtime 配置与实测：PICO Connect 串流 → SteamVR，系统默认 OpenXR runtime
   设为 SteamVR；点击 Start AR 实测进会话（Ubuntu 侧已验证的 CloudXR pip runtime 是 Linux-only 路径体系，
   Windows 需要独立验证 SteamVR 路线或其他本地 runtime）——这是路径 A 能否真正跑通 PICO 会话的关键路径
 - [ ] **P1** XR 会话激活状态下复测 `env_hz` 是否仍钉 50 Hz 实时（闭环七条件之一；XR 渲染开销更高，
   掉速会导致步态相位畸变）
-- [ ] **P1** `SonicSoloLocomanipulationEnvCfg` 无 `xr: XrCfg` 锚点配置，进 AR 后 anchor 在世界原点；
-  需要补 XrCfg（anchor_pos/anchor_rot 对准 sonic_robot）才能让 PICO 视角落在机器人身上
-- [ ] **P2** PICO 手柄/手追踪作为遥操输入：需给环境配置 `teleop_devices`（现仅观察，不接输入）
+- [ ] **P1** 真机验证后微调 `anchor_pos` Z 偏移（-0.82 是参考值，未在真实头显上标定过）
+- [ ] **P2** PICO 手柄/手追踪作为遥操输入：当前只是挂了空 retargeter 列表的观察锚点，
+  真正遥操需要给 `OpenXRDeviceCfg` 配 retargeters（deploy_target_mode 目前从不调用
+  `teleop_interface.advance()`，接输入需要额外改造主循环）
+- [ ] **P3** 收敛双份脚本拷贝（GR00T 为唯一源或反之），消除手动双写成本
 
 知识库跟踪页（更详细，含踩坑记录）：机器人知识库
 `NVIDIA/IsaacLab/SONIC-Windows-IsaacLab-XR模式与AR按钮集成跟踪.md`
-- [ ] **P3** 收敛双份脚本拷贝（GR00T 为唯一源或反之），消除手动双写成本

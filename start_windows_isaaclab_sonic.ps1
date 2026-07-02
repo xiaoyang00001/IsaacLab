@@ -142,6 +142,14 @@ if ($Headless) {
 if ($Xr) {
     # --xr is an AppLauncher argparse flag; it must be a script arg, not --kit_args.
     $isaacArgs += "--xr"
+    # The XrCfg anchor bound to sonic_robot/pelvis only takes effect once an
+    # OpenXRDevice is actually constructed (see openxr_device.py __init__).
+    # teleop_se3_agent.py's deploy_target_mode only builds that device when
+    # --teleop_device resolves to a key present in env_cfg.teleop_devices
+    # (here "handtracking"); the deploy zero-action loop never calls
+    # .advance() on it, so this is safe to pass unconditionally with -Xr.
+    $isaacArgs += "--teleop_device"
+    $isaacArgs += "handtracking"
 }
 
 if ($EnablePinocchio) {

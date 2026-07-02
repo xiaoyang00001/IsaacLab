@@ -28,6 +28,8 @@ deploy 看到"冻结-跳变"状态流 → 站立失稳（主配置 post_init 有
 """
 
 from isaaclab.assets import ArticulationCfg
+from isaaclab.devices.device_base import DevicesCfg
+from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -152,3 +154,14 @@ class SonicFullsceneLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 3600.0
         self.sim.dt = 1 / 200
         self.sim.render_interval = 4  # 每 env 步渲染一次（时序均匀），勿设 >decimation
+
+        # XR 锚点：与 SonicSolo 同一套配置（sonic_robot 在两个场景里是同一个
+        # SONIC_G1_29DOF_CFG，prim_path 同为 {ENV_REGEX_NS}/SONICRobot），
+        # 详细原理见 sonic_solo_locomanipulation_env_cfg.py 同位置注释。
+        self.xr = XrCfg(
+            anchor_pos=(0.0, 0.0, -0.82),
+            anchor_rot=(1.0, 0.0, 0.0, 0.0),
+            anchor_prim_path="/World/envs/env_0/SONICRobot/pelvis",
+            fixed_anchor_height=True,
+        )
+        self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg=self.xr)})
