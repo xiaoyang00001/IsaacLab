@@ -123,6 +123,7 @@ class _MirrorSample:
     root_quat_w: np.ndarray | None = None
     root_lin_vel_w: np.ndarray | None = None
     root_ang_vel_w: np.ndarray | None = None
+    body_source: str = "none"
     root_source: str = "none"
     root_fresh: bool = False
     fresh: bool = False
@@ -308,7 +309,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             print(
                 "[INFO] MuJoCo G1 mirror received first packet: "
                 f"mirrored_body_joints={len(self._body_isaac_ids)}, "
-                f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, root_source={sample.root_source}"
+                f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, "
+                f"body_source={sample.body_source}, root_source={sample.root_source}"
             )
             self._printed_first_sample = True
 
@@ -447,7 +449,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             src_delta_xy = src_pos[:2] - src0
         print(
             "[INFO] MuJoCo G1 root mirror: "
-            f"source={sample.root_source}, fresh={sample.root_fresh}, mode={self.cfg.root_position_mode}, "
+            f"body_source={sample.body_source}, root_source={sample.root_source}, "
+            f"fresh={sample.root_fresh}, mode={self.cfg.root_position_mode}, "
             f"src_xyz=[{src_pos[0]:.3f}, {src_pos[1]:.3f}, {src_pos[2]:.3f}], "
             f"src_delta_xy=[{src_delta_xy[0]:.3f}, {src_delta_xy[1]:.3f}], "
             f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}]"
@@ -511,22 +514,35 @@ class MuJoCoG1MirrorAction(ActionTerm):
         return target
 
     def _sample(self) -> _MirrorSample | None:
-        msg = self._subscriber.poll_latest() if self._subscriber is not None else None
-        if msg is None:
+        debug_msg = self._subscriber.poll_latest() if self._subscriber is not None else None
+        root_msg = self._root_subscriber.poll_latest() if self._root_subscriber is not None else None
+
+        body_msg = root_msg if self._has_body_state(root_msg) else debug_msg
+        if body_msg is None:
             return None
 
-        fresh = self._subscriber.fresh if self._subscriber is not None else False
+        using_root_full_state = body_msg is root_msg
+        fresh = (
+            self._root_subscriber.fresh
+            if using_root_full_state and self._root_subscriber is not None
+            else self._subscriber.fresh
+            if self._subscriber is not None
+            else False
+        )
         if not fresh and not self._warned_stale:
             print("[WARN] MuJoCo G1 mirror ZMQ stream is stale; holding last mirrored pose.")
             self._warned_stale = True
 
-        q = self._select_body_q(msg)
-        dq = self._select_body_dq(msg)
-        msg_order = str(msg.get("target_order", msg.get("joint_order", self.cfg.zmq_joint_order))).lower()
+        q = self._select_body_q(body_msg)
+        dq = self._select_body_dq(body_msg)
+        msg_order = str(body_msg.get("target_order", body_msg.get("joint_order", self.cfg.zmq_joint_order))).lower()
         if msg_order not in {"mujoco", "isaaclab"}:
             msg_order = self.cfg.zmq_joint_order
 
-        sample = _MirrorSample(fresh=fresh)
+        sample = _MirrorSample(
+            fresh=fresh,
+            body_source=self.cfg.root_zmq_topic if using_root_full_state else self.cfg.zmq_topic,
+        )
         if q is not None:
             sample.joint_pos_mujoco = _body_q_to_mujoco_order(q, msg_order)
         elif self._last_sample is not None:
@@ -536,25 +552,31 @@ class MuJoCoG1MirrorAction(ActionTerm):
         elif self._last_sample is not None:
             sample.joint_vel_mujoco = self._last_sample.joint_vel_mujoco
 
-        sample.left_hand_pos = self._select_hand_q(msg, "left")
-        sample.right_hand_pos = self._select_hand_q(msg, "right")
-        sample.left_hand_vel = self._select_hand_dq(msg, "left")
-        sample.right_hand_vel = self._select_hand_dq(msg, "right")
+        sample.left_hand_pos = self._select_hand_q(body_msg, "left")
+        sample.right_hand_pos = self._select_hand_q(body_msg, "right")
+        sample.left_hand_vel = self._select_hand_dq(body_msg, "left")
+        sample.right_hand_vel = self._select_hand_dq(body_msg, "right")
+        if debug_msg is not None and body_msg is not debug_msg:
+            if sample.left_hand_pos is None:
+                sample.left_hand_pos = self._select_hand_q(debug_msg, "left")
+            if sample.right_hand_pos is None:
+                sample.right_hand_pos = self._select_hand_q(debug_msg, "right")
+            if sample.left_hand_vel is None:
+                sample.left_hand_vel = self._select_hand_dq(debug_msg, "left")
+            if sample.right_hand_vel is None:
+                sample.right_hand_vel = self._select_hand_dq(debug_msg, "right")
 
-        root_msg = None
         root_source_name = self.cfg.zmq_topic
         root_fresh = fresh
-        if self._root_subscriber is not None:
-            root_msg = self._root_subscriber.poll_latest()
-            if root_msg is not None:
-                root_source_name = self.cfg.root_zmq_topic
-                root_fresh = self._root_subscriber.fresh
-            elif self.cfg.root_zmq_required:
-                root_source_name = "none"
+        if root_msg is not None:
+            root_source_name = self.cfg.root_zmq_topic
+            root_fresh = self._root_subscriber.fresh if self._root_subscriber is not None else fresh
+        elif self.cfg.root_zmq_required:
+            root_source_name = "none"
         if self._root_subscriber is not None and self.cfg.root_zmq_required:
             root_source = root_msg
         else:
-            root_source = root_msg if root_msg is not None else msg
+            root_source = root_msg if root_msg is not None else debug_msg
         root_pos = self._select_root_pos(root_source)
         root_quat = self._select_root_quat(root_source)
         root_lin_vel = self._select_root_lin_vel(root_source)
@@ -575,6 +597,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if sample.joint_pos_mujoco is None:
             return None
         return sample
+
+    @staticmethod
+    def _has_body_state(msg: dict[str, Any] | None) -> bool:
+        return msg is not None and any(
+            key in msg for key in ("body_q", "body_q_measured", "body_q_target", "joint_pos", "q", "dof_pos")
+        )
 
     @staticmethod
     def _first_array(msg: dict[str, Any] | None, keys: tuple[str, ...]) -> np.ndarray | None:
