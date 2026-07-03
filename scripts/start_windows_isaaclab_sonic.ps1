@@ -58,6 +58,14 @@ param(
     # the param block.
     [switch]$Xr,
 
+    # XR viewpoint mode (consumed via SONIC_XR_VIEW by the SONIC env cfgs):
+    #   first - first-person view rigidly anchored to the robot head
+    #           (torso_link/head_link, orientation follows robot yaw)
+    #   third - third-person view: XR room floor aligned to the robot's feet
+    #           (pelvis anchor, -0.82 drop, fixed height, orientation fixed)
+    [ValidateSet("first", "third")]
+    [string]$XrView = "first",
+
     [switch]$EnablePinocchio,
 
     [string[]]$KitArg = @()
@@ -113,6 +121,8 @@ $env:SONIC_PUBLISH_STATE_ZMQ = "1"
 $env:SONIC_STATE_ZMQ_BIND = "tcp://*:${StatePort}"
 $env:SONIC_STATE_ZMQ_TOPIC = $StateTopic
 
+$env:SONIC_XR_VIEW = $XrView
+
 $env:SONIC_G1_PHYSICS_MODE = "$PhysicsMode"
 $env:SONIC_G1_VISUAL_SERVO_MODE = "$VisualServoMode"
 $env:SONIC_G1_SELF_COLLISIONS = "$SelfCollisions"
@@ -161,7 +171,7 @@ Write-Host "[sonic-windows-isaaclab] UbuntuIp: $UbuntuIp"
 Write-Host "[sonic-windows-isaaclab] WindowsIp: $WindowsIp"
 Write-Host "[sonic-windows-isaaclab] Deploy endpoint: $($env:SONIC_DEPLOY_ENDPOINT)"
 Write-Host "[sonic-windows-isaaclab] State bind: $($env:SONIC_STATE_ZMQ_BIND), topic: $StateTopic"
-Write-Host "[sonic-windows-isaaclab] Task: $Task, device: $Device, xr: $($Xr.IsPresent)"
+Write-Host "[sonic-windows-isaaclab] Task: $Task, device: $Device, xr: $($Xr.IsPresent), xr view: $XrView"
 Write-Host "[sonic-windows-isaaclab] Starting isaaclab.bat"
 
 Set-Location $IsaacLabRoot
