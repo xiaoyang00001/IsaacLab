@@ -291,7 +291,14 @@ class ActionsCfg:
     # This task mirrors MuJoCo/GR00T state for root/body motion. The same action term
     # also consumes motion-controller gripper inputs; do not add IK or locomotion
     # action terms here, otherwise they will overwrite the mirrored robot state.
-    mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(asset_name="robot")
+    mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(
+        asset_name="robot",
+        zmq_host=os.environ.get("ISAACLAB_G1_ZMQ_HOST", "127.0.0.1"),
+        root_zmq_host=os.environ.get(
+            "ISAACLAB_G1_ROOT_ZMQ_HOST",
+            os.environ.get("ISAACLAB_G1_ZMQ_HOST", "127.0.0.1"),
+        ),
+    )
 
 
 @configclass
