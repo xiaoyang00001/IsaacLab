@@ -43,7 +43,7 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     enabled: bool = True
     """Whether to enable the ZMQ mirror. If no packets arrive, the action stays idle."""
 
-    zmq_host: str = "127.0.0.1"
+    zmq_host: str = "192.168.10.230"
     """MuJoCo debug publisher host."""
 
     zmq_port: int = 5557
@@ -64,7 +64,7 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     root_zmq: bool = True
     """Whether to also subscribe to a dedicated root-state stream."""
 
-    root_zmq_host: str = "127.0.0.1"
+    root_zmq_host: str = "192.168.10.230"
     """Dedicated root-state publisher host."""
 
     root_zmq_port: int = 5558

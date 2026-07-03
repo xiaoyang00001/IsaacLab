@@ -13,6 +13,7 @@ controllers)."""
 
 import argparse
 from collections.abc import Callable
+import sys
 
 from isaaclab.app import AppLauncher
 
@@ -42,6 +43,29 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
 
+G1_LOCOMANIP_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-Abs-v0"
+G1_LOCOMANIP_TASK_ALIASES = {
+    "Isaac-PickPlace-Locomanipulation-G1-Abs": G1_LOCOMANIP_TASK_ID,
+    G1_LOCOMANIP_TASK_ID: G1_LOCOMANIP_TASK_ID,
+}
+
+
+def _cli_flag_present(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv)
+
+
+args_cli.task = G1_LOCOMANIP_TASK_ALIASES.get(args_cli.task, args_cli.task)
+
+if (
+    args_cli.task == G1_LOCOMANIP_TASK_ID
+    and not _cli_flag_present("--teleop_device")
+    and args_cli.teleop_device == "keyboard"
+):
+    args_cli.teleop_device = "motion_controllers"
+
+if args_cli.task == G1_LOCOMANIP_TASK_ID:
+    args_cli.enable_pinocchio = True
+
 app_launcher_args = vars(args_cli)
 
 if args_cli.enable_pinocchio:
@@ -49,7 +73,7 @@ if args_cli.enable_pinocchio:
     # not the one installed by Isaac Sim pinocchio is required by the Pink IK controllers and the
     # GR1T2 retargeter
     import pinocchio  # noqa: F401
-if "handtracking" in args_cli.teleop_device.lower():
+if args_cli.teleop_device.lower() in {"handtracking", "motion_controllers"}:
     app_launcher_args["xr"] = True
 
 # launch omniverse app
@@ -179,7 +203,7 @@ def main() -> None:
     }
 
     # For hand tracking devices, add additional callbacks
-    if args_cli.xr:
+    if args_cli.xr and args_cli.task != G1_LOCOMANIP_TASK_ID:
         # Default to inactive for hand tracking
         teleoperation_active = False
     else:

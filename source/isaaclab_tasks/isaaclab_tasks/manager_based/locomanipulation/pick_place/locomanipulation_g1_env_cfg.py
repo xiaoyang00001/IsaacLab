@@ -28,7 +28,7 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
     MuJoCoG1MirrorActionCfg,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
-
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 ##
 # Scene definition
 ##
@@ -42,7 +42,7 @@ def _find_gr00t_g1_43dof_usd() -> str:
         candidates.append(Path(os.environ["GR00T_WBC_ROOT"]).expanduser())
     candidates.extend(
         [
-            Path("/home/nolovr/GR00T-WholeBodyControl"),
+            Path("F:/ISAACWholeBody/GR00T-WholeBodyControl"),
             Path(__file__).resolve().parents[6] / "GR00T-WholeBodyControl",
             Path.cwd() / "GR00T-WholeBodyControl",
         ]
@@ -231,7 +231,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, 0.66], rot=[1.0, 0.0, 0.0, 0.0]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -1000.66], rot=[1.0, 0.0, 0.0, 0.0]),
         spawn=sim_utils.CuboidCfg(
             size=(1.2, 0.8, 0.08),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
@@ -247,7 +247,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.76], rot=[1, 0, 0, 0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, -100.76], rot=[1, 0, 0, 0]),
         spawn=sim_utils.CuboidCfg(
             size=(0.14, 0.08, 0.12),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -267,21 +267,56 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
         ),
     )
-
+    # 本地仓库背景
+    background = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Background",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[-3.60667,-0.64341, 0], rot=[0.7071, 0.0, 0.0, 0.7071]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
+        ),
+    )
     # Humanoid robot from the GR00T sim2sim viewer asset.
     robot: ArticulationCfg = G1_43DOF_GR00T_CFG
 
+    # test_box = RigidObjectCfg(
+    #     prim_path="{ENV_REGEX_NS}/TestBox",
+    #     init_state=RigidObjectCfg.InitialStateCfg(
+    #         pos=[0.78886, 1.17033, 0.845],
+    #         rot=[1.0, 0.0, 0.0, 0.0],
+    #     ),
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+    #             solver_position_iteration_count=8,
+    #             max_depenetration_velocity=10.0,
+    #         )
+    #     ),
+    # )
+    # test_box1 = RigidObjectCfg(
+    #     prim_path="{ENV_REGEX_NS}/TestBox1",
+    #     init_state=RigidObjectCfg.InitialStateCfg(
+    #         pos=[0.42787, 1.67696, 0.845],
+    #         rot=[1.0, 0.0, 0.0, 0.0],
+    #     ),
+    #     spawn=UsdFileCfg(
+    #         usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+    #             solver_position_iteration_count=8,
+    #             max_depenetration_velocity=10.0,
+    #         )
+    #     ),
+    # )
     # Ground plane
-    ground = AssetBaseCfg(
-        prim_path="/World/GroundPlane",
-        spawn=GroundPlaneCfg(),
-    )
+    # ground = AssetBaseCfg(
+    #     prim_path="/World/GroundPlane",
+    #     spawn=GroundPlaneCfg(),
+    # )
 
-    # Lights
-    light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
-    )
+    # # Lights
+    # light = AssetBaseCfg(
+    #     prim_path="/World/light",
+    #     spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+    # )
 
 
 @configclass
@@ -291,7 +326,14 @@ class ActionsCfg:
     # This task mirrors MuJoCo/GR00T state for root/body motion. The same action term
     # also consumes motion-controller gripper inputs; do not add IK or locomotion
     # action terms here, otherwise they will overwrite the mirrored robot state.
-    mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(asset_name="robot")
+    mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(
+        asset_name="robot",
+        zmq_host=os.environ.get("ISAACLAB_G1_ZMQ_HOST", "192.168.10.230"),
+        root_zmq_host=os.environ.get(
+            "ISAACLAB_G1_ROOT_ZMQ_HOST",
+            os.environ.get("ISAACLAB_G1_ZMQ_HOST", "192.168.10.230"),
+        ),
+    )
 
 
 @configclass
