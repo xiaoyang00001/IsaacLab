@@ -172,10 +172,24 @@ Streaming"，需按头显具体型号确认），装好后头显应能出现在 
 原机器一直能跑纯属巧合：激活的 `env_isaaclab` 里 pip 装了 `isaacsim 5.1.0`，
 死路径静默失败后裸 python 恰好 import 得到。
 
-修复（新机器）：建 conda env 并 `pip install "isaacsim[all,extscache]==5.1.0"
---extra-index-url https://pypi.nvidia.com`，再 `isaaclab.bat -i none` 装入
-isaaclab 源码包，在激活该 env 的窗口里启动；或按新机器实际路径改
-`_conda_python.bat`。验证：`python -c "from isaacsim import SimulationApp"`。
+**补充证据（2026-07-03）**：该机器 `isaaclab.bat -s` 能正常启动——这不矛盾。
+`-s` 走 `:extract_isaacsim_exe`：`pip show isaacsim-rl` 失败后直接回落到
+`_isaac_sim\isaac-sim.bat`（Kit 原生启动器，不经过 python 选择逻辑）。它能起
+只证明 `_isaac_sim` 二进制目录存在完好，对 python 环境什么都证明不了；同时
+反证报错时 shell 里 `CONDA_PREFIX` 非空（常见诱因：conda init 在 PowerShell
+profile 里自动激活 base）。
+
+修复（新机器，按简单程度排序）：
+
+1. **首选（`_isaac_sim` 已存在时，本例适用）**：启动前 `conda deactivate`
+   或 `$env:CONDA_PREFIX=""` 让变量为空 → `isaaclab.bat` 改用
+   `_isaac_sim\python.bat`（自带 isaacsim）；首次需 `isaaclab.bat -i none`
+   把 isaaclab 源码装进 kit python。
+2. 备选：建 conda env 并 `pip install "isaacsim[all,extscache]==5.1.0"
+   --extra-index-url https://pypi.nvidia.com`，再 `isaaclab.bat -i none`，
+   在激活该 env 的窗口启动；或按新机器实际路径改 `_conda_python.bat`。
+
+验证：`isaaclab.bat -p -c "from isaacsim import SimulationApp; print('ok')"`。
 
 长期整改（待办）：`isaaclab.bat`/`_conda_python.bat` 里的机器专属路径改为读
 环境变量，本地差异不入库——这类硬编码随分支传播到每台新机器都会以不同方式炸。
