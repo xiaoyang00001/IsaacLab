@@ -10,36 +10,108 @@ py-spy 实测（2026-06-10）：完整 locomanipulation 场景 env_hz≈18.5（0
 deploy 按墙钟 50Hz 推进步态相位，sim 必须接近实时行走才有意义。
 
 本场景只保留：sonic_robot + 高摩擦 GroundPlane + 天光 + SONIC deploy/发布 action 项，
-裁掉仓库 USD、其余 3 台 G1、传送带、pick-place 全套机构。任务 id 含
-"Locomanipulation" 以复用 teleop_se3_agent.py 的 deploy_target_mode 与 U 键回调。
+以及一个可关闭的轻量抱取演示物体（SONIC_SOLO_DEMO_OBJECT=0 关闭）。裁掉仓库 USD、
+其余 3 台 G1、传送带、pick-place 全套机构。任务 id 含 "Locomanipulation" 以复用
+teleop_se3_agent.py 的 deploy_target_mode 与 U 键回调。
 
 SONIC 相关 action 项直接从主配置 `ActionsCfg` 实例摘取，保证两个场景的
 环境变量行为（transport 选择、发布开关、全部调参）永远一致，不会漂移。
+抱取演示物体的配置（台座/纸箱/物理事件）同样以本文件的模块级常量为唯一来源，
+SonicFullscene 直接导入引用，防止两场景漂移。
 """
 
 import os
 
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs import mdp
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 import isaaclab.sim as sim_utils
+from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 
 from . import locomanipulation_g1_env_cfg as _main
 
 # 主配置的 ActionsCfg 在类体执行时已按环境变量决定 transport 与发布 term；
 # 实例化一份并摘取 SONIC 相关项（dataclass 实例化时 deepcopy 默认值，互不影响）。
 _MAIN_ACTIONS = _main.ActionsCfg()
+
+# ---------------------------------------------------------------------------
+# 抱取演示物体（移植自 sonic-hug-object-demo 分支 c7660b80f）
+# 位置：SONIC 出生点 (-2.0, 11.008) 正前方 +X 1.05m、胸腰高度——solo 与
+# fullscene 两场景的 SONIC 出生点同为主配置硬拷贝，故坐标可共用（fullscene
+# 中该点位于行走通道，距传送带 y 向 4m+，无碰撞）。
+# ---------------------------------------------------------------------------
+_ENABLE_DEMO_OBJECT = _main._env_flag("SONIC_SOLO_DEMO_OBJECT", True)
+_DEMO_OBJECT_POS = (-0.95, 11.008, 0.72)
+_DEMO_STAND_POS = (-0.95, 11.008, 0.25)
+
+# 台座：kinematic 深色方块，把纸箱垫到胸腰高度，机器人撞不动
+HUG_BOX_STAND_CFG = RigidObjectCfg(
+    prim_path="{ENV_REGEX_NS}/HugBoxStand",
+    init_state=RigidObjectCfg.InitialStateCfg(
+        pos=_DEMO_STAND_POS,
+        rot=(1.0, 0.0, 0.0, 0.0),
+    ),
+    spawn=sim_utils.CuboidCfg(
+        size=(0.46, 0.56, 0.50),
+        collision_props=sim_utils.CollisionPropertiesCfg(),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            kinematic_enabled=True,
+            disable_gravity=True,
+        ),
+        visual_material=sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.18, 0.18, 0.18),
+            roughness=0.85,
+        ),
+    ),
+)
+
+# 纸箱：复用主场景同款纸箱 USD，质量/阻尼在 prestartup 事件里调轻便于臂遥操
+HUG_BOX_CFG = RigidObjectCfg(
+    prim_path="{ENV_REGEX_NS}/HugBox",
+    init_state=RigidObjectCfg.InitialStateCfg(
+        pos=_DEMO_OBJECT_POS,
+        rot=(1.0, 0.0, 0.0, 0.0),
+    ),
+    spawn=UsdFileCfg(
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
+        collision_props=sim_utils.CollisionPropertiesCfg(
+            contact_offset=0.01,
+            rest_offset=0.0,
+        ),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            solver_position_iteration_count=12,
+            solver_velocity_iteration_count=2,
+            max_depenetration_velocity=3.0,
+        ),
+    ),
+)
+
+# USD 纸箱的刚体物理补齐（质量/阻尼/凸包碰撞），需 replicate_physics=False
+# 才能对 /World/envs/env_{}/HugBox 逐 env 写 USD 属性
+SETUP_HUG_BOX_PHYSICS_EVENT = EventTerm(
+    func=locomanip_mdp.setup_usd_rigid_object_physics,
+    mode="prestartup",
+    params={
+        "prim_path_template": "/World/envs/env_{}/HugBox",
+        "mass": 0.8,
+        "linear_damping": 3.0,
+        "angular_damping": 0.4,
+        "mesh_approximation": "convexHull",
+    },
+)
 
 
 def build_sonic_xr_cfg() -> XrCfg:
@@ -106,6 +178,10 @@ class SonicSoloSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
     )
 
+    if _ENABLE_DEMO_OBJECT:
+        hug_box_stand = HUG_BOX_STAND_CFG
+        hug_box = HUG_BOX_CFG
+
 
 @configclass
 class SonicSoloActionsCfg:
@@ -143,12 +219,22 @@ class SonicSoloTerminationsCfg:
 
 
 @configclass
+class SonicSoloEventsCfg:
+    """USD 演示道具的启动物理补齐。"""
+
+    if _ENABLE_DEMO_OBJECT:
+        setup_hug_box_physics = SETUP_HUG_BOX_PHYSICS_EVENT
+
+
+@configclass
 class SonicSoloLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
     """SONIC 闭环物理调试极简环境。"""
 
-    scene: SonicSoloSceneCfg = SonicSoloSceneCfg(num_envs=1, env_spacing=8.0)
+    # replicate_physics=False：prestartup 事件要逐 env 写 HugBox 的 USD 物理属性
+    scene: SonicSoloSceneCfg = SonicSoloSceneCfg(num_envs=1, env_spacing=8.0, replicate_physics=False)
     observations: SonicSoloObservationsCfg = SonicSoloObservationsCfg()
     actions: SonicSoloActionsCfg = SonicSoloActionsCfg()
+    events: SonicSoloEventsCfg = SonicSoloEventsCfg()
     terminations: SonicSoloTerminationsCfg = SonicSoloTerminationsCfg()
 
     commands = None

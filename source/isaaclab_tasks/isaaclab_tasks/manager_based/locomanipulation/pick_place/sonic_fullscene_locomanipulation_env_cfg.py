@@ -12,7 +12,8 @@
 
 本场景 = 仓库视觉与交互保留，陪跑算力裁除：
   保留：warehouse.usd 背景（含传送带视觉）+ packing_table + 转向盘 +
-        sonic_obstacle + 高摩擦地面 + sonic_robot（唯一 articulation）
+        sonic_obstacle + 高摩擦地面 + sonic_robot（唯一 articulation）+
+        抱取演示物体（SONIC_FULLSCENE_DEMO_OBJECT=0 关闭，配置与 SonicSolo 同源）
   裁掉：robot / remote_robot / walker_robot 三台陪跑 G1（actuator 簿记大头、
         upper_body_ik pinocchio、双机 ZMQ 同步的宿主全在它们身上）
   按需：传送带物理 + 流水箱子——SONIC_FULLSCENE_CONVEYOR=1 时加载，默认关
@@ -39,6 +40,9 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as loco
 
 from . import locomanipulation_g1_env_cfg as _main
 from .sonic_solo_locomanipulation_env_cfg import (
+    HUG_BOX_CFG,
+    HUG_BOX_STAND_CFG,
+    SETUP_HUG_BOX_PHYSICS_EVENT,
     SonicSoloActionsCfg,
     SonicSoloObservationsCfg,
     SonicSoloTerminationsCfg,
@@ -48,6 +52,11 @@ from .sonic_solo_locomanipulation_env_cfg import (
 # 传送带按需加载（带体物理 + 流水箱子 + 箱子对齐/驱动事件）。
 # 默认关：闭环验证期减负——drive_test_box 是每步 interval 事件。
 SONIC_FULLSCENE_CONVEYOR = _main._env_flag("SONIC_FULLSCENE_CONVEYOR", False)
+
+# 抱取演示物体（台座 + 轻量纸箱，配置常量与 SonicSolo 同源导入）。
+# 默认开：一个 kinematic 台座 + 一个 0.8kg 刚体，对 env_hz 影响可忽略；
+# 事件仅 prestartup 一次性执行。位置在 SONIC 出生点正前方 1.05m 行走通道上。
+SONIC_FULLSCENE_DEMO_OBJECT = _main._env_flag("SONIC_FULLSCENE_DEMO_OBJECT", True)
 
 # 主配置的场景/事件在类体执行时已按环境变量定型；实例化一份摘取所需项
 # （dataclass 实例化时 deepcopy 默认值，互不影响），与 SonicSolo 摘取
@@ -76,6 +85,10 @@ class SonicFullsceneSceneCfg(InteractiveSceneCfg):
     if SONIC_FULLSCENE_CONVEYOR:
         test_box = _MAIN_SCENE.test_box
         test_box1 = _MAIN_SCENE.test_box1
+
+    if SONIC_FULLSCENE_DEMO_OBJECT:
+        hug_box_stand = HUG_BOX_STAND_CFG
+        hug_box = HUG_BOX_CFG
 
     # 高摩擦地面 μ=1.0/combine=max（warehouse 碰撞区域外的兜底，闭环七条件之一）
     ground = _MAIN_SCENE.ground
@@ -128,6 +141,9 @@ class SonicFullsceneEventsCfg:
         align_test_boxes_to_conveyor_reset = _MAIN_EVENTS.align_test_boxes_to_conveyor_reset
         drive_test_box = _MAIN_EVENTS.drive_test_box
         drive_test_box1 = _MAIN_EVENTS.drive_test_box1
+
+    if SONIC_FULLSCENE_DEMO_OBJECT:
+        setup_hug_box_physics = SETUP_HUG_BOX_PHYSICS_EVENT
 
 
 @configclass
