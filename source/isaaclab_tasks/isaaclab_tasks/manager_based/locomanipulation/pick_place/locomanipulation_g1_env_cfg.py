@@ -333,6 +333,9 @@ class ActionsCfg:
             "ISAACLAB_G1_ROOT_ZMQ_HOST",
             os.environ.get("ISAACLAB_G1_ZMQ_HOST", "192.168.10.230"),
         ),
+        root_motion_mode="source",
+        root_zmq_required=True,
+        root_position_mode="relative",
     )
 
 

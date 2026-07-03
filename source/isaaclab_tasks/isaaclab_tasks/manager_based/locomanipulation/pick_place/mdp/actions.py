@@ -121,6 +121,8 @@ class _MirrorSample:
     right_hand_vel: np.ndarray | None = None
     root_pos_w: np.ndarray | None = None
     root_quat_w: np.ndarray | None = None
+    root_source: str = "none"
+    root_fresh: bool = False
     fresh: bool = False
 
 
@@ -225,6 +227,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._last_sample: _MirrorSample | None = None
         self._root_pose = self._asset.data.default_root_state[:, :7].clone()
         self._root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
+        self._source_root_pos0: torch.Tensor | None = None
+        self._target_root_pos0 = self._root_pose[:, :3].clone()
         self._foot_min_z: float | None = None
         self._source_origin_xy: torch.Tensor | None = None
         self._source_root_is_moving = False
@@ -232,8 +236,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._anchor_xy: torch.Tensor | None = None
         self._warned_disabled = False
         self._warned_stale = False
+        self._warned_root_missing = False
+        self._warned_root_position_mode = False
         self._warned_gripper_unavailable = False
         self._printed_first_sample = False
+        self._last_root_debug_time = 0.0
 
         if self._enabled:
             try:
@@ -299,7 +306,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             print(
                 "[INFO] MuJoCo G1 mirror received first packet: "
                 f"mirrored_body_joints={len(self._body_isaac_ids)}, "
-                f"mirror_hands={self.cfg.mirror_hands}, root={root_state}"
+                f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, root_source={sample.root_source}"
             )
             self._printed_first_sample = True
 
@@ -347,19 +354,84 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
         if sample.root_pos_w is not None or sample.root_quat_w is not None:
             if sample.root_pos_w is not None:
-                self._root_pose[:, :3] = torch.tensor(sample.root_pos_w, dtype=torch.float32, device=self.device)
+                source_root_pos = torch.tensor(sample.root_pos_w, dtype=torch.float32, device=self.device).view(1, 3)
+                self._root_pose[:, :3] = self._map_source_root_position(source_root_pos)
             if sample.root_quat_w is not None:
                 self._root_pose[:, 3:7] = torch.tensor(sample.root_quat_w, dtype=torch.float32, device=self.device)
             self._source_root_is_moving |= self._detect_source_root_motion(self._root_pose)
             self._asset.write_root_link_pose_to_sim(self._root_pose)
             self._asset.write_root_link_velocity_to_sim(self._root_velocity)
         else:
+            self._warn_missing_root_once()
             self._root_pose = self._asset.data.root_link_state_w[:, :7].clone()
 
         if self.cfg.root_motion_mode in {"stance", "auto"}:
             self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
         if self.cfg.ground_lock:
             self._apply_ground_lock()
+        self._print_root_debug(sample)
+
+    def _map_source_root_position(self, source_root_pos: torch.Tensor) -> torch.Tensor:
+        mode = str(self.cfg.root_position_mode).lower()
+        if mode in {"relative", "delta"}:
+            if self._source_root_pos0 is None:
+                self._source_root_pos0 = source_root_pos.clone()
+                self._target_root_pos0 = self._root_pose[:, :3].clone()
+            return self._target_root_pos0 + (source_root_pos - self._source_root_pos0)
+        if mode in {"absolute", "source"}:
+            return source_root_pos
+        if not self._warned_root_position_mode:
+            print(
+                f"[WARN] MuJoCo G1 mirror unknown root_position_mode={self.cfg.root_position_mode!r}; "
+                "falling back to relative root displacement."
+            )
+            self._warned_root_position_mode = True
+        if self._source_root_pos0 is None:
+            self._source_root_pos0 = source_root_pos.clone()
+            self._target_root_pos0 = self._root_pose[:, :3].clone()
+        return self._target_root_pos0 + (source_root_pos - self._source_root_pos0)
+
+    def _warn_missing_root_once(self) -> None:
+        if self._warned_root_missing:
+            return
+        if self._root_subscriber is not None and self.cfg.root_zmq_required:
+            print(
+                "[WARN] MuJoCo G1 mirror has body joint packets but no dedicated root packets yet. "
+                f"Expected tcp://{self.cfg.root_zmq_host}:{self.cfg.root_zmq_port}/{self.cfg.root_zmq_topic}; "
+                "the robot will walk in place until root_pos_w/root_quat_w arrive."
+            )
+        self._warned_root_missing = True
+
+    def _print_root_debug(self, sample: _MirrorSample) -> None:
+        interval = float(self.cfg.root_debug_interval_s)
+        if interval <= 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_root_debug_time < interval:
+            return
+        self._last_root_debug_time = now
+
+        applied_pos = self._root_pose[0, :3].detach().cpu().numpy()
+        if sample.root_pos_w is None:
+            print(
+                "[INFO] MuJoCo G1 root mirror: source=none, "
+                f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}], "
+                "waiting for g1_root."
+            )
+            return
+
+        src_pos = sample.root_pos_w
+        src_delta_xy = np.zeros(2, dtype=np.float32)
+        if self._source_root_pos0 is not None:
+            src0 = self._source_root_pos0[0, :2].detach().cpu().numpy()
+            src_delta_xy = src_pos[:2] - src0
+        print(
+            "[INFO] MuJoCo G1 root mirror: "
+            f"source={sample.root_source}, fresh={sample.root_fresh}, mode={self.cfg.root_position_mode}, "
+            f"src_xyz=[{src_pos[0]:.3f}, {src_pos[1]:.3f}, {src_pos[2]:.3f}], "
+            f"src_delta_xy=[{src_delta_xy[0]:.3f}, {src_delta_xy[1]:.3f}], "
+            f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}]"
+        )
 
     def _apply_controller_gripper_targets(self) -> None:
         if not self.cfg.controller_gripper_enabled or self.action_dim == 0:
@@ -450,9 +522,19 @@ class MuJoCoG1MirrorAction(ActionTerm):
         sample.right_hand_vel = self._select_hand_dq(msg, "right")
 
         root_msg = None
+        root_source_name = self.cfg.zmq_topic
+        root_fresh = fresh
         if self._root_subscriber is not None:
             root_msg = self._root_subscriber.poll_latest()
-        root_source = root_msg if root_msg is not None else msg
+            if root_msg is not None:
+                root_source_name = self.cfg.root_zmq_topic
+                root_fresh = self._root_subscriber.fresh
+            elif self.cfg.root_zmq_required:
+                root_source_name = "none"
+        if self._root_subscriber is not None and self.cfg.root_zmq_required:
+            root_source = root_msg
+        else:
+            root_source = root_msg if root_msg is not None else msg
         root_pos = self._select_root_pos(root_source)
         root_quat = self._select_root_quat(root_source)
         if root_pos is not None and root_pos.size >= 3:
@@ -460,6 +542,9 @@ class MuJoCoG1MirrorAction(ActionTerm):
             sample.root_pos_w[2] += self.cfg.root_z_offset
         if root_quat is not None and root_quat.size >= 4:
             sample.root_quat_w = _normalize_quat_wxyz(root_quat[:4])
+        if sample.root_pos_w is not None or sample.root_quat_w is not None:
+            sample.root_source = root_source_name
+            sample.root_fresh = root_fresh
 
         if sample.joint_pos_mujoco is None:
             return None

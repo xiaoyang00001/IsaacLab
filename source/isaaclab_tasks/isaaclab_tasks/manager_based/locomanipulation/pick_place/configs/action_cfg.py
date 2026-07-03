@@ -76,8 +76,17 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     root_z_offset: float = 0.0
     """Additive offset applied to mirrored root height."""
 
-    root_motion_mode: str = "auto"
-    """Root translation mode: ``auto`` uses moving source root, otherwise stance fallback; ``source``; or ``stance``."""
+    root_motion_mode: str = "source"
+    """Root translation mode: ``source`` uses the dedicated root stream; ``auto``/``stance`` use foot fallback."""
+
+    root_zmq_required: bool = True
+    """Whether root motion must come from the dedicated root-state stream instead of falling back to debug packets."""
+
+    root_position_mode: str = "relative"
+    """Root position mapping: ``relative`` applies MuJoCo displacement to the Isaac start pose; ``absolute`` copies it."""
+
+    root_debug_interval_s: float = 2.0
+    """Seconds between root mirror status prints. Non-positive disables periodic root status prints."""
 
     source_root_motion_eps: float = 1.0e-3
     """Source root xy displacement threshold used by ``root_motion_mode='auto'``."""
