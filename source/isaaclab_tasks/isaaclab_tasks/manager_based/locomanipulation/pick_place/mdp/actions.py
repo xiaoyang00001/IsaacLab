@@ -121,6 +121,8 @@ class _MirrorSample:
     right_hand_vel: np.ndarray | None = None
     root_pos_w: np.ndarray | None = None
     root_quat_w: np.ndarray | None = None
+    root_lin_vel_w: np.ndarray | None = None
+    root_ang_vel_w: np.ndarray | None = None
     root_source: str = "none"
     root_fresh: bool = False
     fresh: bool = False
@@ -310,6 +312,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             )
             self._printed_first_sample = True
 
+        source_root_applied = self._apply_source_root_state(sample)
+
         joint_pos = self._asset.data.joint_pos.clone()
         joint_vel = self._asset.data.joint_vel.clone()
 
@@ -352,24 +356,36 @@ class MuJoCoG1MirrorAction(ActionTerm):
             )
         self._apply_controller_gripper_targets()
 
-        if sample.root_pos_w is not None or sample.root_quat_w is not None:
-            if sample.root_pos_w is not None:
-                source_root_pos = torch.tensor(sample.root_pos_w, dtype=torch.float32, device=self.device).view(1, 3)
-                self._root_pose[:, :3] = self._map_source_root_position(source_root_pos)
-            if sample.root_quat_w is not None:
-                self._root_pose[:, 3:7] = torch.tensor(sample.root_quat_w, dtype=torch.float32, device=self.device)
-            self._source_root_is_moving |= self._detect_source_root_motion(self._root_pose)
-            self._asset.write_root_link_pose_to_sim(self._root_pose)
-            self._asset.write_root_link_velocity_to_sim(self._root_velocity)
-        else:
-            self._warn_missing_root_once()
-            self._root_pose = self._asset.data.root_link_state_w[:, :7].clone()
-
         if self.cfg.root_motion_mode in {"stance", "auto"}:
             self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
-        if self.cfg.ground_lock:
+        if self.cfg.ground_lock and not source_root_applied:
             self._apply_ground_lock()
         self._print_root_debug(sample)
+
+    def _apply_source_root_state(self, sample: _MirrorSample) -> bool:
+        if sample.root_pos_w is None and sample.root_quat_w is None:
+            self._warn_missing_root_once()
+            self._root_pose = self._asset.data.root_link_state_w[:, :7].clone()
+            return False
+
+        if sample.root_pos_w is not None:
+            source_root_pos = torch.tensor(sample.root_pos_w, dtype=torch.float32, device=self.device).view(1, 3)
+            self._root_pose[:, :3] = self._map_source_root_position(source_root_pos)
+        if sample.root_quat_w is not None:
+            self._root_pose[:, 3:7] = torch.tensor(sample.root_quat_w, dtype=torch.float32, device=self.device)
+        if sample.root_lin_vel_w is not None:
+            self._root_velocity[:, :3] = torch.tensor(
+                sample.root_lin_vel_w, dtype=torch.float32, device=self.device
+            ).view(1, 3)
+        if sample.root_ang_vel_w is not None:
+            self._root_velocity[:, 3:6] = torch.tensor(
+                sample.root_ang_vel_w, dtype=torch.float32, device=self.device
+            ).view(1, 3)
+
+        self._source_root_is_moving |= self._detect_source_root_motion(self._root_pose)
+        self._asset.write_root_link_pose_to_sim(self._root_pose)
+        self._asset.write_root_link_velocity_to_sim(self._root_velocity)
+        return True
 
     def _map_source_root_position(self, source_root_pos: torch.Tensor) -> torch.Tensor:
         mode = str(self.cfg.root_position_mode).lower()
@@ -537,11 +553,17 @@ class MuJoCoG1MirrorAction(ActionTerm):
             root_source = root_msg if root_msg is not None else msg
         root_pos = self._select_root_pos(root_source)
         root_quat = self._select_root_quat(root_source)
+        root_lin_vel = self._select_root_lin_vel(root_source)
+        root_ang_vel = self._select_root_ang_vel(root_source)
         if root_pos is not None and root_pos.size >= 3:
             sample.root_pos_w = root_pos[:3].copy()
             sample.root_pos_w[2] += self.cfg.root_z_offset
         if root_quat is not None and root_quat.size >= 4:
             sample.root_quat_w = _normalize_quat_wxyz(root_quat[:4])
+        if root_lin_vel is not None and root_lin_vel.size >= 3:
+            sample.root_lin_vel_w = root_lin_vel[:3].copy()
+        if root_ang_vel is not None and root_ang_vel.size >= 3:
+            sample.root_ang_vel_w = root_ang_vel[:3].copy()
         if sample.root_pos_w is not None or sample.root_quat_w is not None:
             sample.root_source = root_source_name
             sample.root_fresh = root_fresh
@@ -613,6 +635,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
             msg,
             ("root_quat_w", "base_quat_measured", "base_quat_target", "base_quat", "root_quat"),
         )
+
+    def _select_root_lin_vel(self, msg: dict[str, Any] | None) -> np.ndarray | None:
+        return self._first_array(msg, ("root_lin_vel_w", "base_lin_vel", "root_lin_vel"))
+
+    def _select_root_ang_vel(self, msg: dict[str, Any] | None) -> np.ndarray | None:
+        return self._first_array(msg, ("root_ang_vel_w", "base_ang_vel", "root_ang_vel"))
 
     def _build_body_joint_ids(self, mirror_patterns: list[str]) -> tuple[list[int], list[int]]:
         compiled = [re.compile(pattern) for pattern in mirror_patterns]
