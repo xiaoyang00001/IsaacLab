@@ -172,6 +172,12 @@ Streaming"，需按头显具体型号确认），装好后头显应能出现在 
 原机器一直能跑纯属巧合：激活的 `env_isaaclab` 里 pip 装了 `isaacsim 5.1.0`，
 死路径静默失败后裸 python 恰好 import 得到。
 
+**根因实锤（2026-07-03，用户在该机器上确认）**：`_conda_python.bat` 第 8 行
+`set "ISAAC_SIM_PATH=D:\reboot\isaac-sim"`——该机器不存在此路径，第 11/14/17 行
+派生的 `USD_LIBS_PATH`/`PATH`/`PYTHONPATH` 注入全部落空，加上第 5 行 nolovr
+conda 激活静默失败，最终第 20 行裸跑 `python.exe %*` 落到无 isaacsim 的 PATH
+python 上。与下述三步诊断链完全吻合。
+
 **补充证据（2026-07-03）**：该机器 `isaaclab.bat -s` 能正常启动——这不矛盾。
 `-s` 走 `:extract_isaacsim_exe`：`pip show isaacsim-rl` 失败后直接回落到
 `_isaac_sim\isaac-sim.bat`（Kit 原生启动器，不经过 python 选择逻辑）。它能起
