@@ -30,6 +30,7 @@ deploy 看到"冻结-跳变"状态流 → 站立失稳（主配置 post_init 有
 from isaaclab.assets import ArticulationCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
+from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -155,13 +156,15 @@ class SonicFullsceneLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 1 / 200
         self.sim.render_interval = 4  # 每 env 步渲染一次（时序均匀），勿设 >decimation
 
-        # XR 锚点：与 SonicSolo 同一套配置（sonic_robot 在两个场景里是同一个
-        # SONIC_G1_29DOF_CFG，prim_path 同为 {ENV_REGEX_NS}/SONICRobot），
-        # 详细原理见 sonic_solo_locomanipulation_env_cfg.py 同位置注释。
+        # XR 第一视角锚点：与 SonicSolo 同一套配置（sonic_robot 在两个场景里是
+        # 同一个 SONIC_G1_29DOF_CFG，prim_path 同为 {ENV_REGEX_NS}/SONICRobot），
+        # head 锚 + 朝向跟随，详细原理与真机标定注意事项见
+        # sonic_solo_locomanipulation_env_cfg.py 同位置注释。
         self.xr = XrCfg(
-            anchor_pos=(0.0, 0.0, -0.82),
+            anchor_pos=(0.0, 0.0, 0.0),
             anchor_rot=(1.0, 0.0, 0.0, 0.0),
-            anchor_prim_path="/World/envs/env_0/SONICRobot/pelvis",
-            fixed_anchor_height=True,
+            anchor_prim_path="/World/envs/env_0/SONICRobot/torso_link/head_link",
+            anchor_rotation_mode=XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED,
+            fixed_anchor_height=False,
         )
         self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg=self.xr)})

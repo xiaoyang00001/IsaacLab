@@ -46,9 +46,17 @@ powershell -ExecutionPolicy Bypass -File "<GR00T_ROOT>\scripts\start_windows_isa
 
 仅验证 AR 按钮时 `-UbuntuIp` 可用 `127.0.0.1` 占位（ZMQ SUB 静默重连，不影响启动）。
 
-## 当前状态（2026-07-02）
+## 当前状态（2026-07-03）
 
 已完成：
+
+- [x] XR 视角升级为**头部第一视角**（2026-07-03）：配方移植自分支 `晓阳全身001`
+  （提交 `1baae7a94`"提交固定第一视角矛点" + `8b0b218c1`"提交接入全身数据"，
+  作者 xiaoyang@nolovr.com），详见下方"XR 第一视角"一节。三处改动：
+  两个 SONIC env cfg 换 head 锚点配方；`isaaclab.python.xr.openxr.kit` 补
+  `persistent.xr.system.openxr.runtime = "system"`；`openxr_device.py` 锚点
+  prim 创建改用 `create_prim` 容忍已存在（原 `SingleXFormPrim` 在 reset/二次
+  构造时可能撞已存在 prim）
 
 - [x] 根因分析：AR 按钮缺失 = 启动未走 XR kit（见上方链路）
 - [x] `-Xr` 开关落地，两仓库同步提交：
@@ -140,7 +148,61 @@ Streaming"，需按头显具体型号确认），装好后头显应能出现在 
 - 驱动 576.83，Graphics API D3D12
 - conda env：`env_isaaclab`（miniconda3）
 
-## XR 锚点：视角绑定 sonic_robot（2026-07-02）
+## XR 第一视角（2026-07-03）：head 锚点 + 朝向跟随
+
+> 本节配方**取代**下一节 2026-07-02 的 pelvis 锚定方案（该节保留作机制说明——
+> 设备构造链路、`create_teleop_device` 触发条件等仍然有效）。
+
+配方移植自分支 `晓阳全身001`（同名文件 `locomanipulation_g1_env_cfg.py` 在该分支
+是另一版本：基于上游 main 的 MuJoCo/GR00T 全身镜像任务，G1 43dof，实测头部第一视角
+可用）。两种模式对比：
+
+| | pelvis 方案（2026-07-02，已弃用） | head 方案（当前） |
+|---|---|---|
+| 锚点 prim | `pelvis` | `torso_link/head_link` |
+| anchor_pos | (0,0,-0.82) 落地 | (0,0,0) |
+| 高度 | `fixed_anchor_height=True` 锁初始高度 | `False` 跟随头部 |
+| 朝向 | FIXED 不随转身 | `FOLLOW_PRIM_SMOOTHED` 平滑跟随（yaw-only） |
+| 语义 | 房间地板对齐机器人脚下，佩戴者自由观察 | 视点刚性绑机器人头部，真第一人称 |
+
+SONIC 两个场景（`SonicSolo`/`SonicFullscene`）`__post_init__` 现为：
+
+```python
+self.xr = XrCfg(
+    anchor_pos=(0.0, 0.0, 0.0),
+    anchor_rot=(1.0, 0.0, 0.0, 0.0),
+    anchor_prim_path="/World/envs/env_0/SONICRobot/torso_link/head_link",
+    anchor_rotation_mode=XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED,
+    fixed_anchor_height=False,
+)
+```
+
+**prim 路径注意**：我们的 `SONIC_G1_29DOF_CFG` 用 Nucleus 标准
+`Robots/Unitree/G1/g1.usd`（Isaac 5.1），已离线解包确认 `head_link` **嵌套在
+torso_link 下**（`torso_link/head_link`，同级还有 `d435_link`/`mid360_link`/
+`logo_link`）；晓阳的 GR00T 43dof USD 则是根下 `/Robot/head_link`——直接抄他的
+路径会**静默失效**（`XrAnchorSynchronizer.sync_headset_to_anchor` 找不到 prim
+时每帧直接 return，无报错日志）。
+
+**依赖假设（真机标定点）**：晓阳配方注明 "HMD translation filtering is handled
+by the SteamVR driver"——头显自身平移被驱动侧滤掉（NOLO 驱动特性），视点才会刚性
+钉在机器人头上。若 PICO 走标准串流不滤平移，佩戴者真实身高会叠加在 head_link
+之上导致视点偏高，届时给 `anchor_pos` 加负 Z 补偿。
+
+同时移植的周边修复（均来自该分支）：
+
+- `apps/isaaclab.python.xr.openxr.kit` 新增
+  `persistent.xr.system.openxr.runtime = "system"`：强制 Kit 用系统注册的
+  OpenXR runtime（HKLM ActiveRuntime → SteamVR），与 P0 问题 4 的排查直接相关。
+  该分支还开了 `xr.ui.enabled`/`xr.ar.enabled`/texture streaming，我们暂不动
+  （AR 按钮已工作，少动变量）。
+- `openxr_device.py`：锚点 prim 创建 `SingleXFormPrim` → `create_prim`
+  （容忍 already exists）。
+- 该分支还有手柄遥操输入侧改动（`G1GripperMotionControllerRetargeter`、
+  trigger/squeeze 的 click/grip 兜底、左 X 键绑 RESET、移除右 A 键默认
+  toggle_anchor_rotation），属 P2 遥操输入范畴，本次未移植。
+
+## XR 锚点：视角绑定 sonic_robot（2026-07-02，配方已被上节取代）
 
 目标确认为 OpenXR 路径，且视角要以 sonic_robot 的位置为参照（仿照
 `locomanipulation_g1_env_cfg.py` 里 `Robot`/`RemoteRobot` 双机的 pelvis 锚定方式）。
@@ -201,7 +263,9 @@ self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg
   Windows 需要独立验证 SteamVR 路线或其他本地 runtime）——这是路径 A 能否真正跑通 PICO 会话的关键路径
 - [ ] **P1** XR 会话激活状态下复测 `env_hz` 是否仍钉 50 Hz 实时（闭环七条件之一；XR 渲染开销更高，
   掉速会导致步态相位畸变）
-- [ ] **P1** 真机验证后微调 `anchor_pos` Z 偏移（-0.82 是参考值，未在真实头显上标定过）
+- [ ] **P1** 真机验证第一视角：确认 HMD 平移是否被驱动滤掉（晓阳配方的前提）；
+  若视点偏高给 `anchor_pos` 加负 Z 补偿；若步态晃动引起眩晕考虑退回
+  `fixed_anchor_height=True` 或换 pelvis 方案（2026-07-02 节保留了旧配方）
 - [ ] **P2** PICO 手柄/手追踪作为遥操输入：当前只是挂了空 retargeter 列表的观察锚点，
   真正遥操需要给 `OpenXRDeviceCfg` 配 retargeters（deploy_target_mode 目前从不调用
   `teleop_interface.advance()`，接输入需要额外改造主循环）

@@ -57,6 +57,9 @@ xr.ui.enabled = false
 xr.depth.aov = "GBufferDepth"
 defaults.xr.profile.ar.anchorMode = "custom anchor"
 rtx.rendermode = "RaytracedLighting"
+# Force the OS-registered OpenXR runtime (SteamVR via HKLM ActiveRuntime) instead of
+# letting Kit pick its own; ported from the xiaoyang full-body branch (SteamVR-verified).
+persistent.xr.system.openxr.runtime = "system"
 persistent.xr.profile.ar.renderQuality = "performance"
 persistent.xr.profile.ar.render.nearPlane = 0.15
 xr.openxr.components."omni.kit.xr.openxr.ext.hand_tracking".enabled = true
