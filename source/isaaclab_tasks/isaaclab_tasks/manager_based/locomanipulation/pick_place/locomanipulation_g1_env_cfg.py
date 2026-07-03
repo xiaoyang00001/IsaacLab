@@ -12,6 +12,7 @@ from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
+from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -210,10 +211,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_hand_middle_.*",
                 ".*_hand_thumb_.*",
             ],
-            effort_limit_sim=30.0,
-            velocity_limit_sim=10.0,
-            stiffness=20.0,
-            damping=2.0,
+            effort_limit_sim=60.0,
+            velocity_limit_sim=20.0,
+            stiffness=80.0,
+            damping=4.0,
             armature=0.001,
         ),
     },
@@ -235,6 +236,11 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             size=(1.2, 0.8, 0.08),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             collision_props=sim_utils.CollisionPropertiesCfg(),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.2,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.58, 0.54), roughness=0.65),
         ),
     )
@@ -253,6 +259,11 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.4,
+                dynamic_friction=1.1,
+                restitution=0.0,
+            ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
         ),
     )
@@ -277,8 +288,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    # This task is a MuJoCo/GR00T state mirror. Do not add IK or locomotion action
-    # terms here, otherwise they will overwrite the mirrored robot state.
+    # This task mirrors MuJoCo/GR00T state for root/body motion. The same action term
+    # also consumes motion-controller gripper inputs; do not add IK or locomotion
+    # action terms here, otherwise they will overwrite the mirrored robot state.
     mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(asset_name="robot")
 
 
@@ -396,7 +408,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.teleop_devices = DevicesCfg(
             devices={
                 "motion_controllers": OpenXRDeviceCfg(
-                    retargeters=[],
+                    retargeters=[
+                        G1GripperMotionControllerRetargeterCfg(sim_device=teleop_device),
+                    ],
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),

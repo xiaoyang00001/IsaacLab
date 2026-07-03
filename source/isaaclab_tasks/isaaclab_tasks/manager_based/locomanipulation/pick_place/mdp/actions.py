@@ -209,7 +209,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def __init__(self, cfg: "MuJoCoG1MirrorActionCfg", env: "ManagerBasedEnv"):
         super().__init__(cfg, env)
-        self._raw_actions = torch.zeros(self.num_envs, 0, device=self.device)
+        self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
         self._export_IO_descriptor = False
         self._enabled = cfg.enabled and self.num_envs == 1
@@ -217,6 +217,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._body_mujoco_ids, self._body_isaac_ids = self._build_body_joint_ids(cfg.mirror_joint_names)
         self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
+        self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
 
         self._subscriber: _ZmqLatestSubscriber | None = None
@@ -231,6 +232,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._anchor_xy: torch.Tensor | None = None
         self._warned_disabled = False
         self._warned_stale = False
+        self._warned_gripper_unavailable = False
         self._printed_first_sample = False
 
         if self._enabled:
@@ -263,7 +265,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     @property
     def action_dim(self) -> int:
-        return 0
+        return 4 if self.cfg.controller_gripper_enabled else 0
 
     @property
     def raw_actions(self) -> torch.Tensor:
@@ -275,14 +277,21 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions = actions
-        self._processed_actions = actions
+        if self.action_dim == 0:
+            self._processed_actions = actions
+            return
+        target_actions = torch.clamp(actions, 0.0, 1.0)
+        alpha = min(max(float(self.cfg.controller_gripper_action_alpha), 0.0), 1.0)
+        self._processed_actions = self._processed_actions + alpha * (target_actions - self._processed_actions)
 
     def apply_actions(self):
         if not self._enabled or self._subscriber is None:
+            self._apply_controller_gripper_targets()
             return
 
         sample = self._sample()
         if sample is None:
+            self._apply_controller_gripper_targets()
             return
         self._last_sample = sample
         if not self._printed_first_sample:
@@ -304,7 +313,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             dq = torch.tensor(sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
             joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
 
-        if self.cfg.mirror_hands:
+        mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
+        if mirror_hands_from_mujoco:
             if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
                 joint_pos[:, self._left_hand_ids] = torch.tensor(
                     sample.left_hand_pos[:7], dtype=torch.float32, device=self.device
@@ -322,7 +332,18 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
 
-        self._asset.write_joint_state_to_sim(joint_pos, joint_vel)
+        self._asset.write_joint_state_to_sim(
+            joint_pos[:, self._body_isaac_ids],
+            joint_vel[:, self._body_isaac_ids],
+            joint_ids=self._body_isaac_ids,
+        )
+        if mirror_hands_from_mujoco and self._all_hand_ids:
+            self._asset.write_joint_state_to_sim(
+                joint_pos[:, self._all_hand_ids],
+                joint_vel[:, self._all_hand_ids],
+                joint_ids=self._all_hand_ids,
+            )
+        self._apply_controller_gripper_targets()
 
         if sample.root_pos_w is not None or sample.root_quat_w is not None:
             if sample.root_pos_w is not None:
@@ -339,6 +360,63 @@ class MuJoCoG1MirrorAction(ActionTerm):
             self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
         if self.cfg.ground_lock:
             self._apply_ground_lock()
+
+    def _apply_controller_gripper_targets(self) -> None:
+        if not self.cfg.controller_gripper_enabled or self.action_dim == 0:
+            return
+        if (
+            len(self._left_hand_ids) != len(LEFT_HAND_JOINT_NAMES)
+            or len(self._right_hand_ids) != len(RIGHT_HAND_JOINT_NAMES)
+        ):
+            if not self._warned_gripper_unavailable:
+                print(
+                    "[WARN] MuJoCo G1 mirror controller gripper disabled; "
+                    f"left_hand_joints={len(self._left_hand_ids)}, right_hand_joints={len(self._right_hand_ids)}"
+                )
+                self._warned_gripper_unavailable = True
+            return
+
+        left_target = self._compose_hand_target(
+            index_close=self._processed_actions[:, 0],
+            middle_close=self._processed_actions[:, 1],
+            is_left=True,
+        )
+        right_target = self._compose_hand_target(
+            index_close=self._processed_actions[:, 2],
+            middle_close=self._processed_actions[:, 3],
+            is_left=False,
+        )
+        target = torch.cat((left_target, right_target), dim=-1)
+        limits = self._asset.data.soft_joint_pos_limits[:, self._all_hand_ids, :]
+        target = torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
+        self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
+
+    def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
+        target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
+        thumb_close = torch.minimum(index_close, middle_close)
+
+        thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
+        thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
+        thumb_2 = self.cfg.controller_gripper_thumb_2_angle * thumb_close
+        index = self.cfg.controller_gripper_finger_close_angle * index_close
+        middle = self.cfg.controller_gripper_finger_close_angle * middle_close
+
+        target[:, 0] = thumb_yaw
+        if is_left:
+            target[:, 1] = thumb_1
+            target[:, 2] = thumb_2
+            target[:, 3] = -index
+            target[:, 4] = -index
+            target[:, 5] = -middle
+            target[:, 6] = -middle
+        else:
+            target[:, 1] = -thumb_1
+            target[:, 2] = -thumb_2
+            target[:, 3] = index
+            target[:, 4] = index
+            target[:, 5] = middle
+            target[:, 6] = middle
+        return target
 
     def _sample(self) -> _MirrorSample | None:
         msg = self._subscriber.poll_latest() if self._subscriber is not None else None

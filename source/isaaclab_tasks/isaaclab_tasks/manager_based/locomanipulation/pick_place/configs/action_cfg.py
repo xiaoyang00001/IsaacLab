@@ -96,6 +96,28 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     mirror_hands: bool = True
     """Whether to mirror hand joints from MuJoCo."""
 
+    controller_gripper_enabled: bool = True
+    """Whether the action consumes motion-controller gripper inputs for the G1 hands.
+
+    When enabled, the action dimension is four:
+    ``[left_index, left_middle, right_index, right_middle]``.
+    """
+
+    controller_gripper_finger_close_angle: float = 1.0
+    """Maximum index/middle finger close angle in radians at full trigger/grip press."""
+
+    controller_gripper_thumb_yaw_angle: float = 0.5
+    """Maximum thumb base yaw offset in radians used to bias the thumb toward the active finger."""
+
+    controller_gripper_thumb_1_angle: float = 0.4
+    """Maximum thumb middle joint close angle in radians."""
+
+    controller_gripper_thumb_2_angle: float = 0.7
+    """Maximum thumb tip joint close angle in radians."""
+
+    controller_gripper_action_alpha: float = 0.65
+    """Low-pass smoothing factor applied to incoming controller gripper commands."""
+
     foot_body_names: list[str] = ["left_ankle_roll_link", "right_ankle_roll_link"]
     """Foot bodies used for stance-root estimation and ground locking."""
 

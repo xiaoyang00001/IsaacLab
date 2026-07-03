@@ -146,14 +146,7 @@ class OpenXRDevice(DeviceBase):
             except Exception as e:
                 logger.warning(f"XR: Failed to initialize anchor synchronizer: {e}")
 
-        # Default convenience binding: toggle anchor rotation with right controller 'a' button
-        with contextlib.suppress(Exception):
-            self._bind_button_press(
-                "/user/hand/right",
-                "a",
-                "isaaclab_right_a",
-                lambda ev: self._toggle_anchor_rotation(),
-            )
+        # Controller A/B/X/Y buttons are reserved for task-level controls.
 
     def __del__(self):
         """Clean up resources when the object is destroyed.
@@ -240,6 +233,14 @@ class OpenXRDevice(DeviceBase):
                 take any arguments.
         """
         self._additional_callbacks[key] = func
+        if key == "RESET":
+            with contextlib.suppress(Exception):
+                self._bind_button_press(
+                    "/user/hand/left",
+                    "x",
+                    "isaaclab_left_x_reset",
+                    lambda _ev: self._invoke_callback("RESET", reset_device=True),
+                )
 
     def _get_raw_data(self) -> Any:
         """Get the latest tracking data from the OpenXR runtime.
@@ -431,6 +432,13 @@ class OpenXRDevice(DeviceBase):
         if self._anchor_sync is not None:
             self._anchor_sync.toggle_anchor_rotation()
 
+    def _invoke_callback(self, key: str, reset_device: bool = False):
+        callback = self._additional_callbacks.get(key)
+        if callback is not None:
+            callback()
+        if reset_device:
+            self.reset()
+
     def _query_controller(self, input_device) -> np.ndarray:
         """Query motion controller pose and inputs as a 2x7 array.
 
@@ -457,8 +465,16 @@ class OpenXRDevice(DeviceBase):
             thumbstick_y = float(input_device.get_input_gesture_value("thumbstick", "y"))
         if input_device.has_input_gesture("trigger", "value"):
             trigger = float(input_device.get_input_gesture_value("trigger", "value"))
+        elif input_device.has_input_gesture("trigger", "click"):
+            trigger = float(input_device.get_input_gesture_value("trigger", "click"))
         if input_device.has_input_gesture("squeeze", "value"):
             squeeze = float(input_device.get_input_gesture_value("squeeze", "value"))
+        elif input_device.has_input_gesture("grip", "value"):
+            squeeze = float(input_device.get_input_gesture_value("grip", "value"))
+        elif input_device.has_input_gesture("squeeze", "click"):
+            squeeze = float(input_device.get_input_gesture_value("squeeze", "click"))
+        elif input_device.has_input_gesture("grip", "click"):
+            squeeze = float(input_device.get_input_gesture_value("grip", "click"))
 
         # Determine which button pair exists on this device
         if input_device.has_input_gesture("x", "click") or input_device.has_input_gesture("y", "click"):
