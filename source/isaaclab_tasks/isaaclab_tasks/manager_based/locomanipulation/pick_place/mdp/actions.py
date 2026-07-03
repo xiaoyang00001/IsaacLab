@@ -348,12 +348,16 @@ class MuJoCoG1MirrorAction(ActionTerm):
             joint_vel[:, self._body_isaac_ids],
             joint_ids=self._body_isaac_ids,
         )
+        self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
+        self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
             self._asset.write_joint_state_to_sim(
                 joint_pos[:, self._all_hand_ids],
                 joint_vel[:, self._all_hand_ids],
                 joint_ids=self._all_hand_ids,
             )
+            self._asset.set_joint_position_target(joint_pos[:, self._all_hand_ids], joint_ids=self._all_hand_ids)
+            self._asset.set_joint_velocity_target(joint_vel[:, self._all_hand_ids], joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
 
         if self.cfg.root_motion_mode in {"stance", "auto"}:
