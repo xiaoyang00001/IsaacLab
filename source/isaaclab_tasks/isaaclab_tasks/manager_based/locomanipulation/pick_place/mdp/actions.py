@@ -234,6 +234,7 @@ class SonicDeployTargetAction(ActionTerm):
                 )
         self._last_target_field = "<none>"
         self._last_reference_field = "<none>"
+        self._invalid_payload_fields_logged: set[str] = set()
 
         self._target_order = str(cfg.target_order).lower()
         if self._target_order not in ("mujoco", "isaaclab"):
@@ -383,6 +384,13 @@ class SonicDeployTargetAction(ActionTerm):
     def _wrap_to_pi(angle: torch.Tensor) -> torch.Tensor:
         return torch.atan2(torch.sin(angle), torch.cos(angle))
 
+    def _log_invalid_payload_field_once(self, field_name: str, reason: str) -> None:
+        key = f"{field_name}:{reason}"
+        if key in self._invalid_payload_fields_logged:
+            return
+        self._invalid_payload_fields_logged.add(key)
+        self._log_warning(f"ignoring deploy field {field_name!r}: {reason}")
+
     @staticmethod
     def _yaw_from_quat(quat_wxyz: torch.Tensor) -> torch.Tensor:
         w, x, y, z = quat_wxyz.unbind(dim=-1)
@@ -414,33 +422,40 @@ class SonicDeployTargetAction(ActionTerm):
     def _extract_joint_target_from_fields(
         self, payload: dict, field_names: list[str], *, log_missing: bool
     ) -> tuple[torch.Tensor | None, str | None]:
-        target_values = None
-        target_field = None
+        found_field = False
         for field_name in field_names:
-            if field_name in payload:
-                target_values = payload[field_name]
-                target_field = field_name
-                break
-        if target_values is None:
+            if field_name not in payload:
+                continue
+            found_field = True
+            target_values = payload[field_name]
+            target = torch.tensor(target_values, device=self.device, dtype=torch.float32).flatten()
+            if target.numel() != len(SONIC_G1_29DOF_JOINT_ORDER):
+                self._log_invalid_payload_field_once(
+                    field_name, f"has {target.numel()} values, expected 29"
+                )
+                continue
+            finite_mask = torch.isfinite(target)
+            if not bool(finite_mask.all()):
+                bad_count = int((~finite_mask).sum().item())
+                self._log_invalid_payload_field_once(
+                    field_name, f"contains {bad_count} non-finite value(s)"
+                )
+                continue
+            packet_target_order = str(payload.get("target_order", self._target_order)).lower()
+            if packet_target_order not in ("mujoco", "isaaclab"):
+                self._log_warning(
+                    f"payload target_order={packet_target_order!r} is invalid; using cfg order {self._target_order!r}"
+                )
+                packet_target_order = self._target_order
+            if packet_target_order == "mujoco":
+                target = target[self._isaac_to_mujoco_index]
+            return target.unsqueeze(0).repeat(self.num_envs, 1), str(field_name)
+        if not found_field:
             if log_missing and self._packet_count <= 3:
                 self._log_warning(
                     f"none of target fields {field_names} found; payload keys={list(payload.keys())}"
                 )
-            return None, None
-
-        target = torch.tensor(target_values, device=self.device, dtype=torch.float32).flatten()
-        if target.numel() != len(SONIC_G1_29DOF_JOINT_ORDER):
-            self._log_warning(f"field {target_field!r} has {target.numel()} values, expected 29")
-            return None, None
-        packet_target_order = str(payload.get("target_order", self._target_order)).lower()
-        if packet_target_order not in ("mujoco", "isaaclab"):
-            self._log_warning(
-                f"payload target_order={packet_target_order!r} is invalid; using cfg order {self._target_order!r}"
-            )
-            packet_target_order = self._target_order
-        if packet_target_order == "mujoco":
-            target = target[self._isaac_to_mujoco_index]
-        return target.unsqueeze(0).repeat(self.num_envs, 1), str(target_field)
+        return None, None
 
     def _extract_base_quat_target(self, payload: dict) -> torch.Tensor | None:
         field_name = str(self.cfg.base_quat_target_field).strip()
@@ -451,7 +466,13 @@ class SonicDeployTargetAction(ActionTerm):
             if self._packet_count <= 3:
                 self._log_warning(f"field {field_name!r} has {quat.numel()} values, expected quaternion size 4")
             return None
+        if not bool(torch.isfinite(quat).all()):
+            self._log_invalid_payload_field_once(field_name, "contains non-finite quaternion value(s)")
+            return None
         quat = quat / torch.linalg.norm(quat).clamp_min(1.0e-6)
+        if not bool(torch.isfinite(quat).all()):
+            self._log_invalid_payload_field_once(field_name, "normalizes to non-finite quaternion value(s)")
+            return None
         return quat.unsqueeze(0).repeat(self.num_envs, 1)
 
     def _extract_base_trans_target(self, payload: dict) -> torch.Tensor | None:
@@ -462,6 +483,9 @@ class SonicDeployTargetAction(ActionTerm):
         if pos.numel() != 3:
             if self._packet_count <= 3:
                 self._log_warning(f"field {field_name!r} has {pos.numel()} values, expected translation size 3")
+            return None
+        if not bool(torch.isfinite(pos).all()):
+            self._log_invalid_payload_field_once(field_name, "contains non-finite translation value(s)")
             return None
         if torch.max(torch.abs(pos)).item() <= 1.0e-4:
             return None
