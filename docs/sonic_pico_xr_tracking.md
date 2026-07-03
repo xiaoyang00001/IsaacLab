@@ -195,10 +195,19 @@ profile 里自动激活 base）。
    --extra-index-url https://pypi.nvidia.com`，再 `isaaclab.bat -i none`，
    在激活该 env 的窗口启动；或按新机器实际路径改 `_conda_python.bat`。
 
-验证：`isaaclab.bat -p -c "from isaacsim import SimulationApp; print('ok')"`。
+验证：写个只含 `from isaacsim import SimulationApp` 的 .py 文件用
+`isaaclab.bat -p 文件名.py` 跑——**不要用 `-p -c "…; …"` 内联**，带引号+分号
+的参数会把 bat 链里的 `if "%*"==""` 判断炸出「此时不应有 ""」解析错误。
 
-长期整改（待办）：`isaaclab.bat`/`_conda_python.bat` 里的机器专属路径改为读
-环境变量，本地差异不入库——这类硬编码随分支传播到每台新机器都会以不同方式炸。
+**已整改（2026-07-03）**：`_conda_python.bat` 重写为"仓库本地优先、原值兜底"——
+`ISAAC_SIM_PATH` 优先取 `%~dp0_isaac_sim`（各机器自建的 symlink/junction，
+不入库），不存在才回退 `D:\reboot\isaac-sim`；`omni.usd.libs-*` 改通配定位
+（不再钉死版本 hash）；nolovr conda 激活加了存在性检查。本机（`_isaac_sim`
+为 pip 布局 junction）实测行为不变且 USD 注入与运行 python 同源。注意：晓阳
+机器若 `_isaac_sim` 是指向别处的 symlink，优先级会从 `D:\reboot` 换成该
+symlink 目标——理论等价，需他下次启动时留意。`isaaclab.bat` 顶部的
+`DEFAULT_CONDA_PREFIX`/`DEFAULT_USD_EXT` 硬编码仍在（有存在性守卫，其它机器
+上是无害 no-op），暂不动。
 
 ## 本机环境（2026-07-02 实测）
 
@@ -331,8 +340,10 @@ self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg
   真正遥操需要给 `OpenXRDeviceCfg` 配 retargeters（deploy_target_mode 目前从不调用
   `teleop_interface.advance()`，接输入需要额外改造主循环）
 - [ ] **P3** 收敛双份脚本拷贝（GR00T 为唯一源或反之），消除手动双写成本
-- [ ] **P3** `isaaclab.bat`/`_conda_python.bat` 去除机器专属硬编码路径（改读环境变量），
-  见"问题 5"——已在另一台机器炸过一次
+- [x] ~~**P3** `_conda_python.bat` 去除机器专属硬编码路径~~ 2026-07-03 已重写为
+  "仓库本地 `_isaac_sim` 优先、原值兜底"（见"问题 5"末尾"已整改"段）
+- [ ] **P3** `isaaclab.bat` 顶部 `DEFAULT_CONDA_PREFIX`/`DEFAULT_USD_EXT` 硬编码
+  同样整改（有存在性守卫、其它机器上是 no-op，优先级低）
 
 知识库跟踪页（更详细，含踩坑记录）：机器人知识库
 `NVIDIA/IsaacLab/SONIC-Windows-IsaacLab-XR模式与AR按钮集成跟踪.md`
