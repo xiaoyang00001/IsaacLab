@@ -127,6 +127,15 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     controller_gripper_action_alpha: float = 0.65
     """Low-pass smoothing factor applied to incoming controller gripper commands."""
 
+    controller_gripper_use_soft_limits: bool = True
+    """Whether controller gripper targets are clamped to soft limits instead of hard joint limits."""
+
+    controller_gripper_write_joint_state: bool = False
+    """Whether controller gripper targets should also be written directly to the hand joint state."""
+
+    controller_gripper_debug_interval_s: float = 0.0
+    """Seconds between controller gripper debug prints. Non-positive disables periodic prints."""
+
     foot_body_names: list[str] = ["left_ankle_roll_link", "right_ankle_roll_link"]
     """Foot bodies used for stance-root estimation and ground locking."""
 

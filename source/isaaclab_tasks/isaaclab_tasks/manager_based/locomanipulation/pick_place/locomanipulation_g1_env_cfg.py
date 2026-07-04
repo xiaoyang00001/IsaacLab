@@ -336,6 +336,12 @@ class ActionsCfg:
         root_motion_mode="source",
         root_zmq_required=True,
         root_position_mode="relative",
+        controller_gripper_finger_close_angle=1.8,
+        controller_gripper_thumb_1_angle=1.1,
+        controller_gripper_thumb_2_angle=1.8,
+        controller_gripper_action_alpha=1.0,
+        controller_gripper_use_soft_limits=False,
+        controller_gripper_write_joint_state=True,
     )
 
 

@@ -244,6 +244,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._warned_gripper_unavailable = False
         self._printed_first_sample = False
         self._last_root_debug_time = 0.0
+        self._last_gripper_debug_time = 0.0
+        self._last_mirror_hands_from_mujoco = False
 
         if self._enabled:
             try:
@@ -327,6 +329,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
 
         mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
+        self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
         if mirror_hands_from_mujoco:
             if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
                 joint_pos[:, self._left_hand_ids] = torch.tensor(
@@ -482,9 +485,17 @@ class MuJoCoG1MirrorAction(ActionTerm):
             is_left=False,
         )
         target = torch.cat((left_target, right_target), dim=-1)
-        limits = self._asset.data.soft_joint_pos_limits[:, self._all_hand_ids, :]
+        if self.cfg.controller_gripper_use_soft_limits:
+            limits = self._asset.data.soft_joint_pos_limits[:, self._all_hand_ids, :]
+        else:
+            limits = self._asset.data.joint_pos_limits[:, self._all_hand_ids, :]
+        unclamped_target = target.clone()
         target = torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
+        if self.cfg.controller_gripper_write_joint_state:
+            joint_vel = torch.zeros_like(target)
+            self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
         self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
+        self._print_gripper_debug(unclamped_target, target, limits)
 
     def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
         target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
@@ -512,6 +523,39 @@ class MuJoCoG1MirrorAction(ActionTerm):
             target[:, 5] = middle
             target[:, 6] = middle
         return target
+
+    def _print_gripper_debug(
+        self,
+        unclamped_target: torch.Tensor,
+        clamped_target: torch.Tensor,
+        limits: torch.Tensor,
+    ) -> None:
+        interval = float(self.cfg.controller_gripper_debug_interval_s)
+        if interval <= 0.0:
+            return
+
+        now = time.monotonic()
+        if now - self._last_gripper_debug_time < interval:
+            return
+        self._last_gripper_debug_time = now
+
+        close = self._processed_actions[0].detach().cpu().numpy()
+        current = self._asset.data.joint_pos[:, self._all_hand_ids][0].detach().cpu().numpy()
+        target = clamped_target[0].detach().cpu().numpy()
+        raw_target = unclamped_target[0].detach().cpu().numpy()
+        limit_np = limits[0].detach().cpu().numpy()
+        limit_kind = "soft" if self.cfg.controller_gripper_use_soft_limits else "hard"
+        print(
+            "[INFO] Controller gripper debug: "
+            f"close=[L_idx={close[0]:.3f}, L_mid={close[1]:.3f}, "
+            f"R_idx={close[2]:.3f}, R_mid={close[3]:.3f}], "
+            f"limit={limit_kind}, mujoco_hand_mirror={self._last_mirror_hands_from_mujoco}, "
+            f"write_joint_state={self.cfg.controller_gripper_write_joint_state}, "
+            f"raw_target={np.round(raw_target, 3).tolist()}, "
+            f"target={np.round(target, 3).tolist()}, "
+            f"current={np.round(current, 3).tolist()}, "
+            f"limits={np.round(limit_np, 3).tolist()}"
+        )
 
     def _sample(self) -> _MirrorSample | None:
         debug_msg = self._subscriber.poll_latest() if self._subscriber is not None else None

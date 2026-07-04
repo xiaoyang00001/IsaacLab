@@ -67,8 +67,8 @@ class G1GripperMotionControllerRetargeter(RetargeterBase):
         if len(inputs) <= DeviceBase.MotionControllerInputIndex.BUTTON_1.value:
             return 0.0, 0.0
 
-        trigger = float(inputs[DeviceBase.MotionControllerInputIndex.TRIGGER.value])
-        grip = float(inputs[DeviceBase.MotionControllerInputIndex.SQUEEZE.value])
+        trigger = self._normalize_analog_close(float(inputs[DeviceBase.MotionControllerInputIndex.TRIGGER.value]))
+        grip = self._normalize_analog_close(float(inputs[DeviceBase.MotionControllerInputIndex.SQUEEZE.value]))
         button_0 = float(inputs[DeviceBase.MotionControllerInputIndex.BUTTON_0.value])
         button_1 = float(inputs[DeviceBase.MotionControllerInputIndex.BUTTON_1.value])
 
@@ -81,6 +81,18 @@ class G1GripperMotionControllerRetargeter(RetargeterBase):
 
         return min(max(index_close, 0.0), 1.0), min(max(middle_close, 0.0), 1.0)
 
+    def _normalize_analog_close(self, value: float) -> float:
+        value = min(max(value, 0.0), 1.0)
+        if value < self.cfg.deadzone:
+            return 0.0
+
+        full_press_threshold = min(
+            max(self.cfg.full_press_threshold, self.cfg.deadzone + 1.0e-6),
+            1.0,
+        )
+        normalized = (value - self.cfg.deadzone) / (full_press_threshold - self.cfg.deadzone)
+        return min(normalized, 1.0)
+
 
 @dataclass
 class G1GripperMotionControllerRetargeterCfg(RetargeterCfg):
@@ -88,6 +100,9 @@ class G1GripperMotionControllerRetargeterCfg(RetargeterCfg):
 
     deadzone: float = 0.04
     """Ignore small analog trigger/grip noise below this threshold."""
+
+    full_press_threshold: float = 0.85
+    """Analog trigger/grip value treated as a full close command after deadzone normalization."""
 
     use_right_a_button: bool = True
     """Whether right controller A contributes to the right index finger close command."""
