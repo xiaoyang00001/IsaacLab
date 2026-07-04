@@ -21,6 +21,7 @@ import contextlib
 import math
 import os
 import socket
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,65 @@ from typing import Any
 
 import numpy as np
 from isaaclab.app import AppLauncher
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _arg_value(argv: list[str], name: str) -> str | None:
+    prefix = f"{name}="
+    for index, arg in enumerate(argv):
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+        if arg == name and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def _load_default_network_config() -> None:
+    candidates = []
+    cli_config = _arg_value(sys.argv[1:], "--network-config")
+    if cli_config:
+        candidates.append(Path(cli_config).expanduser())
+    for env_name in ("ISAACLAB_G1_NETWORK_CONFIG", "G1_NETWORK_CONFIG"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser())
+    candidates.append(Path(__file__).resolve().with_name("g1_udp_network.env"))
+    for path in candidates:
+        _load_env_file(path)
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, str(default)))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+_load_default_network_config()
 
 
 def _find_gr00t_repo_root() -> Path:
@@ -186,9 +246,15 @@ DEFAULT_MUJOCO_29DOF_Q = np.array(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--network-config",
+        type=Path,
+        default=Path(os.environ.get("ISAACLAB_G1_NETWORK_CONFIG", Path(__file__).resolve().with_name("g1_udp_network.env"))),
+        help="UDP network config file. It is loaded before argument parsing.",
+    )
+    parser.add_argument(
         "--source",
         choices=("csv", "zmq", "udp", "sine", "idle"),
-        default="csv",
+        default=os.environ.get("ISAACLAB_G1_VIEWER_SOURCE", "csv"),
         help="State source. csv replays reference/example by default; zmq/udp subscribe real-time targets.",
     )
     parser.add_argument("--robot-usd", type=Path, default=DEFAULT_USD, help="G1 USD file to load.")
@@ -272,48 +338,48 @@ def parse_args() -> argparse.Namespace:
         help="Continuously move the camera to follow the robot root.",
     )
     parser.add_argument("--camera-update-interval", type=int, default=20, help="Update follow camera every N steps.")
-    parser.add_argument("--zmq-host", default="127.0.0.1", help="ZMQ publisher host.")
-    parser.add_argument("--zmq-port", type=int, default=5557, help="ZMQ publisher port.")
-    parser.add_argument("--zmq-topic", default="g1_debug", help="ZMQ topic prefix.")
-    parser.add_argument("--zmq-timeout", type=float, default=0.5, help="Seconds before warning about stale ZMQ data.")
+    parser.add_argument("--zmq-host", default=os.environ.get("ISAACLAB_G1_ZMQ_HOST", "127.0.0.1"), help="ZMQ publisher host.")
+    parser.add_argument("--zmq-port", type=int, default=_env_int("ISAACLAB_G1_ZMQ_PORT", 5557), help="ZMQ publisher port.")
+    parser.add_argument("--zmq-topic", default=os.environ.get("ISAACLAB_G1_ZMQ_TOPIC", "g1_debug"), help="ZMQ topic prefix.")
+    parser.add_argument("--zmq-timeout", type=float, default=_env_float("ISAACLAB_G1_TIMEOUT", 0.5), help="Seconds before warning about stale ZMQ data.")
     parser.add_argument(
         "--zmq-warmup-sec",
         type=float,
         default=1.0,
         help="Wait up to this many seconds at startup for the first ZMQ/UDP packets.",
     )
-    parser.add_argument("--udp-bind-host", default="0.0.0.0", help="UDP local address to bind for state packets.")
-    parser.add_argument("--udp-port", type=int, default=5557, help="UDP local port for state packets.")
-    parser.add_argument("--udp-topic", default="g1_debug", help="UDP topic prefix.")
-    parser.add_argument("--udp-timeout", type=float, default=0.5, help="Seconds before warning about stale UDP data.")
+    parser.add_argument("--udp-bind-host", default=os.environ.get("ISAACLAB_G1_UDP_BIND_HOST", "0.0.0.0"), help="UDP local address to bind for state packets.")
+    parser.add_argument("--udp-port", type=int, default=_env_int("ISAACLAB_G1_UDP_PORT", 5557), help="UDP local port for state packets.")
+    parser.add_argument("--udp-topic", default=os.environ.get("ISAACLAB_G1_UDP_TOPIC", "g1_debug"), help="UDP topic prefix.")
+    parser.add_argument("--udp-timeout", type=float, default=_env_float("ISAACLAB_G1_TIMEOUT", 0.5), help="Seconds before warning about stale UDP data.")
     parser.add_argument(
         "--udp-rcvbuf",
         type=int,
-        default=262144,
+        default=_env_int("ISAACLAB_G1_UDP_RCVBUF", 262144),
         help="UDP receive socket SO_RCVBUF in bytes. The kernel may round or double this value.",
     )
     parser.add_argument(
         "--root-zmq",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=_env_bool("ISAACLAB_G1_ROOT_ZMQ", True),
         help="In ZMQ mode, also subscribe to the MuJoCo root-state stream for exact walking translation.",
     )
-    parser.add_argument("--root-zmq-host", default="127.0.0.1", help="MuJoCo root-state ZMQ publisher host.")
-    parser.add_argument("--root-zmq-port", type=int, default=5558, help="MuJoCo root-state ZMQ publisher port.")
-    parser.add_argument("--root-zmq-topic", default="g1_root", help="MuJoCo root-state ZMQ topic prefix.")
+    parser.add_argument("--root-zmq-host", default=os.environ.get("ISAACLAB_G1_ROOT_ZMQ_HOST", os.environ.get("ISAACLAB_G1_ZMQ_HOST", "127.0.0.1")), help="MuJoCo root-state ZMQ publisher host.")
+    parser.add_argument("--root-zmq-port", type=int, default=_env_int("ISAACLAB_G1_ROOT_ZMQ_PORT", 5558), help="MuJoCo root-state ZMQ publisher port.")
+    parser.add_argument("--root-zmq-topic", default=os.environ.get("ISAACLAB_G1_ROOT_ZMQ_TOPIC", "g1_root"), help="MuJoCo root-state ZMQ topic prefix.")
     parser.add_argument(
         "--root-udp",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=_env_bool("ISAACLAB_G1_ROOT_UDP", True),
         help="In UDP mode, also receive the MuJoCo root-state UDP stream for exact walking translation.",
     )
-    parser.add_argument("--root-udp-bind-host", default="0.0.0.0", help="MuJoCo root-state UDP local bind host.")
-    parser.add_argument("--root-udp-port", type=int, default=5558, help="MuJoCo root-state UDP local port.")
-    parser.add_argument("--root-udp-topic", default="g1_root", help="MuJoCo root-state UDP topic prefix.")
+    parser.add_argument("--root-udp-bind-host", default=os.environ.get("ISAACLAB_G1_ROOT_UDP_BIND_HOST", "0.0.0.0"), help="MuJoCo root-state UDP local bind host.")
+    parser.add_argument("--root-udp-port", type=int, default=_env_int("ISAACLAB_G1_ROOT_UDP_PORT", 5558), help="MuJoCo root-state UDP local port.")
+    parser.add_argument("--root-udp-topic", default=os.environ.get("ISAACLAB_G1_ROOT_UDP_TOPIC", "g1_root"), help="MuJoCo root-state UDP topic prefix.")
     parser.add_argument(
         "--root-udp-rcvbuf",
         type=int,
-        default=262144,
+        default=_env_int("ISAACLAB_G1_ROOT_UDP_RCVBUF", 262144),
         help="Root-state UDP receive socket SO_RCVBUF in bytes.",
     )
     parser.add_argument(

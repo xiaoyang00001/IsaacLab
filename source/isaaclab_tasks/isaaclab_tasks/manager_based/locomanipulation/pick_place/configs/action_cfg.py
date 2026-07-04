@@ -41,7 +41,10 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     class_type: type[ActionTerm] = MuJoCoG1MirrorAction
 
     enabled: bool = True
-    """Whether to enable the ZMQ mirror. If no packets arrive, the action stays idle."""
+    """Whether to enable the network mirror. If no packets arrive, the action stays idle."""
+
+    transport: str = "zmq"
+    """Network transport for mirror packets: ``zmq`` or ``udp``."""
 
     zmq_host: str = "192.168.10.230"
     """MuJoCo debug publisher host."""
@@ -53,13 +56,25 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     """MuJoCo debug publisher topic."""
 
     zmq_timeout: float = 0.5
-    """Seconds before the last received ZMQ packet is considered stale."""
+    """Seconds before the last received network packet is considered stale."""
 
     zmq_joint_order: str = "mujoco"
     """Fallback joint order for incoming 29-DoF body joint vectors: ``mujoco`` or ``isaaclab``."""
 
     zmq_pose_source: str = "measured"
     """Which pose fields to mirror: ``measured``, ``target``, or ``auto``."""
+
+    udp_bind_host: str = "0.0.0.0"
+    """Local UDP address to bind for debug packets."""
+
+    udp_port: int = 5557
+    """Local UDP port for debug packets."""
+
+    udp_topic: str = "g1_debug"
+    """UDP debug packet topic prefix."""
+
+    udp_rcvbuf: int = 262144
+    """UDP receive socket ``SO_RCVBUF`` in bytes."""
 
     root_zmq: bool = True
     """Whether to also subscribe to a dedicated root-state stream."""
@@ -73,6 +88,21 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     root_zmq_topic: str = "g1_root"
     """Dedicated root-state publisher topic."""
 
+    root_udp: bool = True
+    """Whether to also receive a dedicated root-state UDP stream when ``transport='udp'``."""
+
+    root_udp_bind_host: str = "0.0.0.0"
+    """Local UDP address to bind for dedicated root-state packets."""
+
+    root_udp_port: int = 5558
+    """Local UDP port for dedicated root-state packets."""
+
+    root_udp_topic: str = "g1_root"
+    """Dedicated root-state UDP topic prefix."""
+
+    root_udp_rcvbuf: int = 262144
+    """Root-state UDP receive socket ``SO_RCVBUF`` in bytes."""
+
     root_z_offset: float = 0.0
     """Additive offset applied to mirrored root height."""
 
@@ -80,7 +110,10 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     """Root translation mode: ``source`` uses the dedicated root stream; ``auto``/``stance`` use foot fallback."""
 
     root_zmq_required: bool = True
-    """Whether root motion must come from the dedicated root-state stream instead of falling back to debug packets."""
+    """Whether root motion must come from the dedicated root-state stream instead of falling back to debug packets.
+
+    This legacy field name applies to both ZMQ and UDP transports.
+    """
 
     root_position_mode: str = "relative"
     """Root position mapping: ``relative`` applies MuJoCo displacement to the Isaac start pose; ``absolute`` copies it."""

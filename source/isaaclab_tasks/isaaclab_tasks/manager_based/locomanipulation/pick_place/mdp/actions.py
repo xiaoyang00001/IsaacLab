@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import re
+import socket
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -164,10 +165,11 @@ class _ZmqLatestSubscriber:
         self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, topic)
         self.endpoint = f"tcp://{host}:{port}"
+        self.description = f"{self.endpoint}/{topic}"
         self.socket.connect(self.endpoint)
         self.last_msg: dict[str, Any] | None = None
         self.last_rx_time = 0.0
-        print(f"[INFO] MuJoCo G1 mirror ZMQ connected: {self.endpoint}/{topic}")
+        print(f"[INFO] MuJoCo G1 mirror ZMQ connected: {self.description}")
 
     def close(self) -> None:
         self.socket.close(0)
@@ -201,11 +203,61 @@ class _ZmqLatestSubscriber:
         return latest if latest is not None else self.last_msg
 
 
+class _UdpLatestSubscriber:
+    def __init__(self, bind_host: str, port: int, topic: str, timeout: float, rcvbuf: int):
+        import msgpack
+
+        self.msgpack = msgpack
+        self.topic = topic.encode("utf-8")
+        self.timeout = timeout
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf))
+        self.socket.bind((bind_host, int(port)))
+        self.socket.setblocking(False)
+        actual_rcvbuf = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        self.endpoint = f"udp://{bind_host}:{int(port)}"
+        self.description = f"{self.endpoint}/{topic}"
+        self.last_msg: dict[str, Any] | None = None
+        self.last_rx_time = 0.0
+        print(f"[INFO] MuJoCo G1 mirror UDP listening: {self.description} SO_RCVBUF={actual_rcvbuf}")
+
+    def close(self) -> None:
+        self.socket.close()
+
+    @property
+    def fresh(self) -> bool:
+        return self.last_msg is not None and (time.monotonic() - self.last_rx_time) <= self.timeout
+
+    def _decode(self, packet: bytes) -> dict[str, Any] | None:
+        if not packet.startswith(self.topic):
+            return None
+        payload = packet[len(self.topic) :]
+        if not payload:
+            return None
+        return self.msgpack.unpackb(payload, raw=False)
+
+    def poll_latest(self) -> dict[str, Any] | None:
+        latest = None
+        while True:
+            try:
+                packet, _ = self.socket.recvfrom(65535)
+            except BlockingIOError:
+                break
+            decoded = self._decode(packet)
+            if decoded is not None:
+                latest = decoded
+        if latest is not None:
+            self.last_msg = latest
+            self.last_rx_time = time.monotonic()
+        return latest if latest is not None else self.last_msg
+
+
 class MuJoCoG1MirrorAction(ActionTerm):
     """Mirror MuJoCo/SONIC G1 root and joint state into the Isaac Lab robot.
 
-    The term has zero action dimensions. It listens to the same ZMQ debug streams used by
-    ``isaaclab_g1_sim2sim_viewer.py`` and writes state directly only after data is received.
+    The term listens to the same debug streams used by ``isaaclab_g1_sim2sim_viewer.py``
+    and writes state directly only after data is received.
     Without a live publisher it stays idle, allowing the normal motion-controller locomotion
     action to continue working.
     """
@@ -225,8 +277,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
 
-        self._subscriber: _ZmqLatestSubscriber | None = None
-        self._root_subscriber: _ZmqLatestSubscriber | None = None
+        self._transport = str(cfg.transport).lower()
+        self._body_topic = cfg.udp_topic if self._transport == "udp" else cfg.zmq_topic
+        self._root_topic = cfg.root_udp_topic if self._transport == "udp" else cfg.root_zmq_topic
+        self._subscriber: _ZmqLatestSubscriber | _UdpLatestSubscriber | None = None
+        self._root_subscriber: _ZmqLatestSubscriber | _UdpLatestSubscriber | None = None
         self._last_sample: _MirrorSample | None = None
         self._root_pose = self._asset.data.default_root_state[:, :7].clone()
         self._root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
@@ -249,17 +304,36 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
         if self._enabled:
             try:
-                self._subscriber = _ZmqLatestSubscriber(cfg.zmq_host, cfg.zmq_port, cfg.zmq_topic, cfg.zmq_timeout)
-                if cfg.root_zmq:
-                    self._root_subscriber = _ZmqLatestSubscriber(
-                        cfg.root_zmq_host,
-                        cfg.root_zmq_port,
-                        cfg.root_zmq_topic,
+                if self._transport == "udp":
+                    self._subscriber = _UdpLatestSubscriber(
+                        cfg.udp_bind_host,
+                        cfg.udp_port,
+                        cfg.udp_topic,
                         cfg.zmq_timeout,
+                        cfg.udp_rcvbuf,
                     )
+                    if cfg.root_udp:
+                        self._root_subscriber = _UdpLatestSubscriber(
+                            cfg.root_udp_bind_host,
+                            cfg.root_udp_port,
+                            cfg.root_udp_topic,
+                            cfg.zmq_timeout,
+                            cfg.root_udp_rcvbuf,
+                        )
+                elif self._transport == "zmq":
+                    self._subscriber = _ZmqLatestSubscriber(cfg.zmq_host, cfg.zmq_port, cfg.zmq_topic, cfg.zmq_timeout)
+                    if cfg.root_zmq:
+                        self._root_subscriber = _ZmqLatestSubscriber(
+                            cfg.root_zmq_host,
+                            cfg.root_zmq_port,
+                            cfg.root_zmq_topic,
+                            cfg.zmq_timeout,
+                        )
+                else:
+                    raise ValueError(f"Unsupported MuJoCo G1 mirror transport: {cfg.transport!r}")
             except Exception as exc:
                 self._enabled = False
-                print(f"[WARN] MuJoCo G1 mirror disabled; failed to create ZMQ subscriber: {exc}")
+                print(f"[WARN] MuJoCo G1 mirror disabled; failed to create {self._transport.upper()} subscriber: {exc}")
         elif cfg.enabled and self.num_envs != 1:
             print("[WARN] MuJoCo G1 mirror is disabled because it only supports num_envs=1 for XR first-person use.")
 
@@ -420,9 +494,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if self._warned_root_missing:
             return
         if self._root_subscriber is not None and self.cfg.root_zmq_required:
+            root_stream = getattr(self._root_subscriber, "description", "dedicated root-state stream")
             print(
                 "[WARN] MuJoCo G1 mirror has body joint packets but no dedicated root packets yet. "
-                f"Expected tcp://{self.cfg.root_zmq_host}:{self.cfg.root_zmq_port}/{self.cfg.root_zmq_topic}; "
+                f"Expected {root_stream}; "
                 "the robot will walk in place until root_pos_w/root_quat_w arrive."
             )
         self._warned_root_missing = True
@@ -574,7 +649,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             else False
         )
         if not fresh and not self._warned_stale:
-            print("[WARN] MuJoCo G1 mirror ZMQ stream is stale; holding last mirrored pose.")
+            print(f"[WARN] MuJoCo G1 mirror {self._transport.upper()} stream is stale; holding last mirrored pose.")
             self._warned_stale = True
 
         q = self._select_body_q(body_msg)
@@ -585,7 +660,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
         sample = _MirrorSample(
             fresh=fresh,
-            body_source=self.cfg.root_zmq_topic if using_root_full_state else self.cfg.zmq_topic,
+            body_source=self._root_topic if using_root_full_state else self._body_topic,
         )
         if q is not None:
             sample.joint_pos_mujoco = _body_q_to_mujoco_order(q, msg_order)
@@ -610,10 +685,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if sample.right_hand_vel is None:
                 sample.right_hand_vel = self._select_hand_dq(debug_msg, "right")
 
-        root_source_name = self.cfg.zmq_topic
+        root_source_name = self._body_topic
         root_fresh = fresh
         if root_msg is not None:
-            root_source_name = self.cfg.root_zmq_topic
+            root_source_name = self._root_topic
             root_fresh = self._root_subscriber.fresh if self._root_subscriber is not None else fresh
         elif self.cfg.root_zmq_required:
             root_source_name = "none"

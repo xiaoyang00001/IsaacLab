@@ -29,6 +29,38 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _load_default_network_config() -> None:
+    candidates = []
+    for env_name in ("ISAACLAB_G1_NETWORK_CONFIG", "G1_NETWORK_CONFIG"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser())
+    candidates.append(Path(__file__).resolve().parents[6] / "scripts/gr00t_wbc/g1_udp_network.env")
+    for path in candidates:
+        _load_env_file(path)
+
+
+_load_default_network_config()
+
 ##
 # Scene definition
 ##
@@ -328,11 +360,20 @@ class ActionsCfg:
     # action terms here, otherwise they will overwrite the mirrored robot state.
     mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(
         asset_name="robot",
+        transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "udp"),
         zmq_host=os.environ.get("ISAACLAB_G1_ZMQ_HOST", "192.168.10.230"),
         root_zmq_host=os.environ.get(
             "ISAACLAB_G1_ROOT_ZMQ_HOST",
             os.environ.get("ISAACLAB_G1_ZMQ_HOST", "192.168.10.230"),
         ),
+        udp_bind_host=os.environ.get("ISAACLAB_G1_UDP_BIND_HOST", "0.0.0.0"),
+        udp_port=int(os.environ.get("ISAACLAB_G1_UDP_PORT", "5557")),
+        udp_topic=os.environ.get("ISAACLAB_G1_UDP_TOPIC", "g1_debug"),
+        udp_rcvbuf=int(os.environ.get("ISAACLAB_G1_UDP_RCVBUF", "262144")),
+        root_udp_bind_host=os.environ.get("ISAACLAB_G1_ROOT_UDP_BIND_HOST", "0.0.0.0"),
+        root_udp_port=int(os.environ.get("ISAACLAB_G1_ROOT_UDP_PORT", "5558")),
+        root_udp_topic=os.environ.get("ISAACLAB_G1_ROOT_UDP_TOPIC", "g1_root"),
+        root_udp_rcvbuf=int(os.environ.get("ISAACLAB_G1_ROOT_UDP_RCVBUF", "262144")),
         root_motion_mode="source",
         root_zmq_required=True,
         root_position_mode="relative",
