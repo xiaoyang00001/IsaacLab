@@ -61,6 +61,14 @@ class XrCfg:
     If None, the anchor will use the static :attr:`anchor_pos` and :attr:`anchor_rot` values.
     """
 
+    anchor_rotation_prim_path: str | None = None
+    """Optional prim path used as the XR anchor rotation/yaw reference.
+
+    If set, :attr:`anchor_prim_path` is still used for anchor position, while this prim is used
+    for yaw/rotation following and yaw recentering. If None, :attr:`anchor_prim_path` is used for
+    both position and rotation.
+    """
+
     anchor_rotation_mode: XrAnchorRotationMode = XrAnchorRotationMode.FIXED
     """Specifies how the XR anchor rotation should behave when attached to a prim.
 
@@ -104,6 +112,30 @@ class XrCfg:
 
     If True, the anchor height will be fixed to the initial height of the anchor prim.
     """
+
+    recenter_yaw_button: tuple[str, str] | None = None
+    """Optional XR controller button binding used to recenter yaw.
+
+    The tuple is ``(device_path, button_name)``, for example ``("/user/hand/right", "b")``.
+    When configured, pressing/releasing the button according to :attr:`recenter_yaw_button_event`
+    rotates the XR anchor yaw so the current headset yaw aligns with the anchor prim yaw.
+    """
+
+    recenter_yaw_button_event: str = "release"
+    """Button event phase used for yaw recentering.
+
+    Common values are ``"press"`` and ``"release"``. The default triggers recentering after the
+    user presses and releases the button.
+    """
+
+    recenter_anchor_forward_axis: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    """Local-space anchor prim axis treated as robot/view forward when recentering yaw."""
+
+    recenter_headset_forward_axis: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    """Local-space headset axis treated as visual forward when recentering yaw."""
+
+    recenter_headset_fallback_axis: tuple[float, float, float] | None = None
+    """Optional local-space headset axis used to recover yaw when the forward axis is near vertical."""
 
 from typing import Any
 

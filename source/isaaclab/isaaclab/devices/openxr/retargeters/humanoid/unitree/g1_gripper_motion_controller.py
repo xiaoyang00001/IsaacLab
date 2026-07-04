@@ -22,8 +22,10 @@ class G1GripperMotionControllerRetargeter(RetargeterBase):
 
     Each value is in ``[0, 1]``. Right A closes the right index finger, right B closes the
     right middle finger, and trigger or grip/squeeze on either controller closes both
-    fingers on that side. The action term closes the thumb when both finger commands are active.
-    Left X is intentionally not consumed here because it is bound to environment reset.
+    fingers on that side. The right A/B bindings can be disabled from the config when those
+    buttons are reserved for task-level controls. The action term closes the thumb when both
+    finger commands are active. Left X is intentionally not consumed here because it is bound
+    to environment reset.
     """
 
     def __init__(self, cfg: G1GripperMotionControllerRetargeterCfg):
@@ -35,7 +37,12 @@ class G1GripperMotionControllerRetargeter(RetargeterBase):
         right_controller_data = data.get(DeviceBase.TrackingTarget.CONTROLLER_RIGHT, np.array([]))
 
         left_index, left_middle = self._extract_inputs(left_controller_data, use_ab_buttons=False)
-        right_index, right_middle = self._extract_inputs(right_controller_data, use_ab_buttons=True)
+        right_index, right_middle = self._extract_inputs(
+            right_controller_data,
+            use_ab_buttons=True,
+            use_button_0=self.cfg.use_right_a_button,
+            use_button_1=self.cfg.use_right_b_button,
+        )
 
         return torch.tensor(
             [left_index, left_middle, right_index, right_middle],
@@ -46,7 +53,13 @@ class G1GripperMotionControllerRetargeter(RetargeterBase):
     def get_requirements(self) -> list[RetargeterBase.Requirement]:
         return [RetargeterBase.Requirement.MOTION_CONTROLLER]
 
-    def _extract_inputs(self, controller_data: np.ndarray, use_ab_buttons: bool) -> tuple[float, float]:
+    def _extract_inputs(
+        self,
+        controller_data: np.ndarray,
+        use_ab_buttons: bool,
+        use_button_0: bool = True,
+        use_button_1: bool = True,
+    ) -> tuple[float, float]:
         if len(controller_data) <= DeviceBase.MotionControllerDataRowIndex.INPUTS.value:
             return 0.0, 0.0
 
@@ -60,8 +73,8 @@ class G1GripperMotionControllerRetargeter(RetargeterBase):
         button_1 = float(inputs[DeviceBase.MotionControllerInputIndex.BUTTON_1.value])
 
         full_grip = max(trigger, grip)
-        index_close = max(full_grip, button_0 if use_ab_buttons else 0.0)
-        middle_close = max(full_grip, button_1 if use_ab_buttons else 0.0)
+        index_close = max(full_grip, button_0 if use_ab_buttons and use_button_0 else 0.0)
+        middle_close = max(full_grip, button_1 if use_ab_buttons and use_button_1 else 0.0)
 
         index_close = 0.0 if index_close < self.cfg.deadzone else index_close
         middle_close = 0.0 if middle_close < self.cfg.deadzone else middle_close
@@ -75,5 +88,11 @@ class G1GripperMotionControllerRetargeterCfg(RetargeterCfg):
 
     deadzone: float = 0.04
     """Ignore small analog trigger/grip noise below this threshold."""
+
+    use_right_a_button: bool = True
+    """Whether right controller A contributes to the right index finger close command."""
+
+    use_right_b_button: bool = True
+    """Whether right controller B contributes to the right middle finger close command."""
 
     retargeter_type: type[RetargeterBase] = G1GripperMotionControllerRetargeter

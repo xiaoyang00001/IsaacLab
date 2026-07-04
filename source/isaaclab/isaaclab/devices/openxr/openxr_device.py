@@ -147,6 +147,19 @@ class OpenXRDevice(DeviceBase):
                 logger.warning(f"XR: Failed to initialize anchor synchronizer: {e}")
 
         # Controller A/B/X/Y buttons are reserved for task-level controls.
+        recenter_yaw_button = getattr(self._xr_cfg, "recenter_yaw_button", None)
+        if recenter_yaw_button is not None:
+            try:
+                device_path, button_name = recenter_yaw_button
+                self._bind_button_event(
+                    device_path,
+                    button_name,
+                    "isaaclab_recenter_xr_yaw",
+                    getattr(self._xr_cfg, "recenter_yaw_button_event", "release"),
+                    lambda _ev: self._recenter_xr_yaw(),
+                )
+            except Exception as e:
+                logger.warning(f"XR: Failed to bind yaw recenter button {recenter_yaw_button}: {e}")
 
     def __del__(self):
         """Clean up resources when the object is destroyed.
@@ -378,12 +391,23 @@ class OpenXRDevice(DeviceBase):
         event_name: str,
         on_button_press: Callable[[carb.events.IEvent], None],
     ) -> None:
+        self._bind_button_event(device_path, button_name, event_name, "press", on_button_press)
+
+    def _bind_button_event(
+        self,
+        device_path: str,
+        button_name: str,
+        event_name: str,
+        event_phase: str,
+        on_button_event: Callable[[carb.events.IEvent], None],
+    ) -> None:
         if self._xr_core is None:
             logger.warning("XR core not available; skipping button binding")
             return
 
-        sub_key = f"{device_path}/{button_name}"
+        sub_key = f"{device_path}/{button_name}/{event_name}/{event_phase}"
         self.__button_subscriptions[sub_key] = {}
+        event_phase = event_phase.lower()
 
         def try_emit_button_events():
             if self.__button_subscriptions[sub_key].get("generator"):
@@ -394,9 +418,9 @@ class OpenXRDevice(DeviceBase):
             names = {str(n) for n in (device.get_input_names() or ())}
             if button_name not in names:
                 return
-            gen = device.bind_event_generator(button_name, event_name, ("press",))
+            gen = device.bind_event_generator(button_name, event_name, (event_phase,))
             if gen is not None:
-                logger.info(f"XR: Bound event generator for {sub_key}, {event_name}")
+                logger.info(f"XR: Bound event generator for {sub_key}")
                 self.__button_subscriptions[sub_key]["generator"] = gen
 
         def on_inputs_change(_ev: carb.events.IEvent) -> None:
@@ -407,8 +431,8 @@ class OpenXRDevice(DeviceBase):
 
         message_bus = self._xr_core.get_message_bus()
         event_suffix = device_path.strip("/").replace("/", "_")
-        self.__button_subscriptions[sub_key]["press_sub"] = message_bus.create_subscription_to_pop_by_type(
-            carb.events.type_from_string(f"{event_name}.press"), on_button_press
+        self.__button_subscriptions[sub_key]["event_sub"] = message_bus.create_subscription_to_pop_by_type(
+            carb.events.type_from_string(f"{event_name}.{event_phase}"), on_button_event
         )
         self.__button_subscriptions[sub_key]["inputs_change_sub"] = message_bus.create_subscription_to_pop_by_type(
             carb.events.type_from_string(f"xr_input.{event_suffix}.inputs_change"), on_inputs_change
@@ -422,7 +446,7 @@ class OpenXRDevice(DeviceBase):
         for sub_key, subs in self.__button_subscriptions.items():
             if "generator" in subs:
                 subs["generator"] = None
-            for key in ["press_sub", "inputs_change_sub", "disable_sub"]:
+            for key in [key for key in subs if key.endswith("_sub")]:
                 if key in subs:
                     subs[key] = None
         self.__button_subscriptions.clear()
@@ -431,6 +455,12 @@ class OpenXRDevice(DeviceBase):
     def _toggle_anchor_rotation(self):
         if self._anchor_sync is not None:
             self._anchor_sync.toggle_anchor_rotation()
+
+    def _recenter_xr_yaw(self):
+        if self._anchor_sync is None:
+            logger.warning("XR: Cannot recenter yaw because anchor synchronization is not active")
+            return
+        self._anchor_sync.recenter_yaw_to_anchor_prim()
 
     def _invoke_callback(self, key: str, reset_device: bool = False):
         callback = self._additional_callbacks.get(key)

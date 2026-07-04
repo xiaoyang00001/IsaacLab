@@ -268,13 +268,13 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     # 本地仓库背景
-    background = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/Background",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[-3.60667,-0.64341, 0], rot=[0.7071, 0.0, 0.0, 0.7071]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
-        ),
-    )
+    # background = AssetBaseCfg(
+    #     prim_path="/World/envs/env_.*/Background",
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[-3.60667,-0.64341, 0], rot=[0.7071, 0.0, 0.0, 0.7071]),
+    #     spawn=UsdFileCfg(
+    #         usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
+    #     ),
+    # )
     # Humanoid robot from the GR00T sim2sim viewer asset.
     robot: ArticulationCfg = G1_43DOF_GR00T_CFG
 
@@ -307,16 +307,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Ground plane
-    # ground = AssetBaseCfg(
-    #     prim_path="/World/GroundPlane",
-    #     spawn=GroundPlaneCfg(),
-    # )
+    ground = AssetBaseCfg(
+        prim_path="/World/GroundPlane",
+        spawn=GroundPlaneCfg(),
+    )
 
-    # # Lights
-    # light = AssetBaseCfg(
-    #     prim_path="/World/light",
-    #     spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
-    # )
+    # Lights
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+    )
 
 
 @configclass
@@ -445,16 +445,25 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_temp_buffer_capacity = 2**22
 
         self.xr.anchor_prim_path = "/World/envs/env_0/Robot/head_link"
+        self.xr.anchor_rotation_prim_path = "/World/envs/env_0/Robot/pelvis"
         self.xr.fixed_anchor_height = False
-        # Anchor XR to the robot head position; HMD translation filtering is handled by the SteamVR driver.
+        # Anchor XR to the robot head position, but use the pelvis as the stable robot yaw reference.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
+        self.xr.recenter_yaw_button = ("/user/hand/right", "b")
+        self.xr.recenter_yaw_button_event = "release"
+        self.xr.recenter_anchor_forward_axis = (-1.0, 0.0, 0.0)
+        self.xr.recenter_headset_forward_axis = (0.0, -1.0, 0.0)
+        self.xr.recenter_headset_fallback_axis = (1.0, 0.0, 0.0)
 
         teleop_device = "cpu"
         self.teleop_devices = DevicesCfg(
             devices={
                 "motion_controllers": OpenXRDeviceCfg(
                     retargeters=[
-                        G1GripperMotionControllerRetargeterCfg(sim_device=teleop_device),
+                        G1GripperMotionControllerRetargeterCfg(
+                            sim_device=teleop_device,
+                            use_right_b_button=False,
+                        ),
                     ],
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
