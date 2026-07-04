@@ -20,6 +20,7 @@ import csv
 import contextlib
 import math
 import os
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -186,9 +187,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source",
-        choices=("csv", "zmq", "sine", "idle"),
+        choices=("csv", "zmq", "udp", "sine", "idle"),
         default="csv",
-        help="State source. csv replays reference/example by default; zmq subscribes real-time targets.",
+        help="State source. csv replays reference/example by default; zmq/udp subscribe real-time targets.",
     )
     parser.add_argument("--robot-usd", type=Path, default=DEFAULT_USD, help="G1 USD file to load.")
     parser.add_argument(
@@ -205,14 +206,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--csv-fps", type=float, default=50.0, help="Frame rate of CSV trajectory data.")
     parser.add_argument("--no-loop", action="store_true", help="Stop CSV replay at the final frame instead of looping.")
-    parser.add_argument("--no-follow-root", action="store_true", help="Do not apply root pose from CSV/ZMQ.")
+    parser.add_argument("--no-follow-root", action="store_true", help="Do not apply root pose from CSV/ZMQ/UDP.")
     parser.add_argument("--root-z-offset", type=float, default=0.0, help="Additive offset applied to replayed root height.")
     parser.add_argument(
         "--root-motion-mode",
         choices=("auto", "source", "stance"),
         default="auto",
         help=(
-            "Root translation source. source only uses CSV/ZMQ root pose; stance dead-reckons from the support foot; "
+            "Root translation source. source only uses CSV/ZMQ/UDP root pose; stance dead-reckons from the support foot; "
             "auto uses source root when it moves and otherwise falls back to stance."
         ),
     )
@@ -279,7 +280,17 @@ def parse_args() -> argparse.Namespace:
         "--zmq-warmup-sec",
         type=float,
         default=1.0,
-        help="Wait up to this many seconds at startup for the first ZMQ packets.",
+        help="Wait up to this many seconds at startup for the first ZMQ/UDP packets.",
+    )
+    parser.add_argument("--udp-bind-host", default="0.0.0.0", help="UDP local address to bind for state packets.")
+    parser.add_argument("--udp-port", type=int, default=5557, help="UDP local port for state packets.")
+    parser.add_argument("--udp-topic", default="g1_debug", help="UDP topic prefix.")
+    parser.add_argument("--udp-timeout", type=float, default=0.5, help="Seconds before warning about stale UDP data.")
+    parser.add_argument(
+        "--udp-rcvbuf",
+        type=int,
+        default=262144,
+        help="UDP receive socket SO_RCVBUF in bytes. The kernel may round or double this value.",
     )
     parser.add_argument(
         "--root-zmq",
@@ -290,6 +301,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root-zmq-host", default="127.0.0.1", help="MuJoCo root-state ZMQ publisher host.")
     parser.add_argument("--root-zmq-port", type=int, default=5558, help="MuJoCo root-state ZMQ publisher port.")
     parser.add_argument("--root-zmq-topic", default="g1_root", help="MuJoCo root-state ZMQ topic prefix.")
+    parser.add_argument(
+        "--root-udp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="In UDP mode, also receive the MuJoCo root-state UDP stream for exact walking translation.",
+    )
+    parser.add_argument("--root-udp-bind-host", default="0.0.0.0", help="MuJoCo root-state UDP local bind host.")
+    parser.add_argument("--root-udp-port", type=int, default=5558, help="MuJoCo root-state UDP local port.")
+    parser.add_argument("--root-udp-topic", default="g1_root", help="MuJoCo root-state UDP topic prefix.")
+    parser.add_argument(
+        "--root-udp-rcvbuf",
+        type=int,
+        default=262144,
+        help="Root-state UDP receive socket SO_RCVBUF in bytes.",
+    )
     parser.add_argument(
         "--zmq-joint-order",
         choices=("mujoco", "isaaclab"),
@@ -486,6 +512,7 @@ class ZmqStateSource:
         self.root_z_offset = root_z_offset
         self.joint_order = joint_order
         self.pose_source = pose_source
+        self.transport_name = "ZMQ"
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.SUB)
         self.socket.setsockopt(zmq.RCVHWM, 1)
@@ -638,7 +665,7 @@ class ZmqStateSource:
                     and float(np.linalg.norm(root_pos[:2] - self.first_root_pos[:2])) < 1.0e-4
                 ):
                     print(
-                        "[WARN] ZMQ root xy is static. Isaac Lab cannot show walking translation "
+                        f"[WARN] {self.transport_name} root xy is static. Isaac Lab cannot show walking translation "
                         "unless the publisher sends moving root_pos_w/base_trans_target/base_trans_measured."
                     )
                     self.root_static_warning_printed = True
@@ -662,6 +689,72 @@ class ZmqStateSource:
             fresh=True,
         )
         return self.last_sample
+
+
+class UdpStateSource(ZmqStateSource):
+    def __init__(
+        self,
+        bind_host: str,
+        port: int,
+        topic: str,
+        timeout: float,
+        rcvbuf: int,
+        follow_root: bool,
+        root_z_offset: float,
+        joint_order: str,
+        pose_source: str,
+    ):
+        import msgpack
+
+        self.msgpack = msgpack
+        self.topic = topic.encode("utf-8")
+        self.timeout = timeout
+        self.follow_root = follow_root
+        self.root_z_offset = root_z_offset
+        self.joint_order = joint_order
+        self.pose_source = pose_source
+        self.transport_name = "UDP"
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf))
+        self.socket.bind((bind_host, port))
+        self.socket.setblocking(False)
+        actual_rcvbuf = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        self.last_sample = StateSample(
+            joint_pos_mujoco=DEFAULT_MUJOCO_29DOF_Q.copy(),
+            joint_vel_mujoco=np.zeros(29, dtype=np.float32),
+            fresh=False,
+        )
+        self.last_rx_time = 0.0
+        self.first_root_pos: np.ndarray | None = None
+        self.root_sample_count = 0
+        self.root_static_warning_printed = False
+        print(
+            f"[INFO] UDP listening: udp://{bind_host}:{port}/{topic} "
+            f"SO_RCVBUF={actual_rcvbuf}"
+        )
+
+    def close(self) -> None:
+        self.socket.close()
+
+    def _decode_packet(self, packet: bytes) -> dict[str, Any] | None:
+        if not packet:
+            return None
+        if not packet.startswith(self.topic):
+            return None
+        payload = packet[len(self.topic) :]
+        return self.msgpack.unpackb(payload, raw=False)
+
+    def _poll_latest(self) -> dict[str, Any] | None:
+        latest = None
+        while True:
+            try:
+                packet, _ = self.socket.recvfrom(65535)
+            except BlockingIOError:
+                return latest
+            decoded = self._decode_packet(packet)
+            if decoded is not None:
+                latest = decoded
 
 
 class RootZmqSource:
@@ -708,6 +801,68 @@ class RootZmqSource:
             except self.zmq.Again:
                 break
             latest = self._decode(parts)
+        if latest is None:
+            self.fresh = self.last_sample is not None and (time.monotonic() - self.last_rx_time) <= self.timeout
+            return self.last_sample
+
+        root_pos = ZmqStateSource._first_array(latest, ("root_pos_w", "base_pos", "root_pos"))
+        root_quat = ZmqStateSource._first_array(latest, ("root_quat_w", "base_quat", "root_quat"))
+        if root_pos is None or root_pos.size < 3 or root_quat is None or root_quat.size < 4:
+            self.fresh = self.last_sample is not None and (time.monotonic() - self.last_rx_time) <= self.timeout
+            return self.last_sample
+
+        root_pos = root_pos[:3].copy()
+        root_pos[2] += self.root_z_offset
+        root_quat = _normalize_quat_wxyz(root_quat[:4])
+        self.last_sample = (root_pos, root_quat)
+        self.last_rx_time = time.monotonic()
+        self.fresh = True
+        return self.last_sample
+
+
+class RootUdpSource(RootZmqSource):
+    def __init__(self, bind_host: str, port: int, topic: str, root_z_offset: float, timeout: float, rcvbuf: int):
+        import msgpack
+
+        self.msgpack = msgpack
+        self.topic = topic.encode("utf-8")
+        self.root_z_offset = root_z_offset
+        self.timeout = timeout
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf))
+        self.socket.bind((bind_host, port))
+        self.socket.setblocking(False)
+        actual_rcvbuf = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        self.last_sample: tuple[np.ndarray, np.ndarray] | None = None
+        self.last_rx_time = 0.0
+        self.fresh = False
+        print(
+            f"[INFO] Root UDP listening: udp://{bind_host}:{port}/{topic} "
+            f"SO_RCVBUF={actual_rcvbuf}"
+        )
+
+    def close(self) -> None:
+        self.socket.close()
+
+    def _decode_packet(self, packet: bytes) -> dict[str, Any] | None:
+        if not packet:
+            return None
+        if not packet.startswith(self.topic):
+            return None
+        payload = packet[len(self.topic) :]
+        return self.msgpack.unpackb(payload, raw=False)
+
+    def sample(self) -> tuple[np.ndarray, np.ndarray] | None:
+        latest = None
+        while True:
+            try:
+                packet, _ = self.socket.recvfrom(65535)
+            except BlockingIOError:
+                break
+            decoded = self._decode_packet(packet)
+            if decoded is not None:
+                latest = decoded
         if latest is None:
             self.fresh = self.last_sample is not None and (time.monotonic() - self.last_rx_time) <= self.timeout
             return self.last_sample
@@ -782,6 +937,18 @@ def build_source() -> Any:
             port=args_cli.zmq_port,
             topic=args_cli.zmq_topic,
             timeout=args_cli.zmq_timeout,
+            follow_root=follow_root,
+            root_z_offset=args_cli.root_z_offset,
+            joint_order=args_cli.zmq_joint_order,
+            pose_source=args_cli.zmq_pose_source,
+        )
+    if args_cli.source == "udp":
+        return UdpStateSource(
+            bind_host=args_cli.udp_bind_host,
+            port=args_cli.udp_port,
+            topic=args_cli.udp_topic,
+            timeout=args_cli.udp_timeout,
+            rcvbuf=args_cli.udp_rcvbuf,
             follow_root=follow_root,
             root_z_offset=args_cli.root_z_offset,
             joint_order=args_cli.zmq_joint_order,
@@ -1166,6 +1333,7 @@ def run() -> None:
         foot_min_z = infer_default_foot_clearance(robot, foot_body_ids, args_cli.ground_height)
     source = build_source()
     root_source = None
+    root_stream_label = "root_stream"
     if args_cli.source == "zmq" and args_cli.root_zmq:
         root_source = RootZmqSource(
             host=args_cli.root_zmq_host,
@@ -1174,6 +1342,17 @@ def run() -> None:
             root_z_offset=args_cli.root_z_offset,
             timeout=args_cli.zmq_timeout,
         )
+        root_stream_label = "root_zmq"
+    elif args_cli.source == "udp" and args_cli.root_udp:
+        root_source = RootUdpSource(
+            bind_host=args_cli.root_udp_bind_host,
+            port=args_cli.root_udp_port,
+            topic=args_cli.root_udp_topic,
+            root_z_offset=args_cli.root_z_offset,
+            timeout=args_cli.udp_timeout,
+            rcvbuf=args_cli.root_udp_rcvbuf,
+        )
+        root_stream_label = "root_udp"
     root_motion = RootMotionEstimator(
         mode=args_cli.root_motion_mode,
         ground_height=args_cli.ground_height,
@@ -1197,14 +1376,20 @@ def run() -> None:
     if args_cli.source == "csv":
         print(f"[INFO] trajectory={args_cli.trajectory_dir}")
         print(f"[INFO] csv_joint_order={args_cli.csv_joint_order}")
-    if args_cli.source == "zmq":
-        print(f"[INFO] zmq_joint_order={args_cli.zmq_joint_order}")
-        print(f"[INFO] zmq_pose_source={args_cli.zmq_pose_source}")
+    if args_cli.source in {"zmq", "udp"}:
+        print(f"[INFO] network_joint_order={args_cli.zmq_joint_order}")
+        print(f"[INFO] network_pose_source={args_cli.zmq_pose_source}")
         if root_source is not None:
-            print(
-                f"[INFO] root_zmq={args_cli.root_zmq_host}:{args_cli.root_zmq_port}/"
-                f"{args_cli.root_zmq_topic}"
-            )
+            if args_cli.source == "zmq":
+                print(
+                    f"[INFO] root_zmq={args_cli.root_zmq_host}:{args_cli.root_zmq_port}/"
+                    f"{args_cli.root_zmq_topic}"
+                )
+            else:
+                print(
+                    f"[INFO] root_udp={args_cli.root_udp_bind_host}:{args_cli.root_udp_port}/"
+                    f"{args_cli.root_udp_topic}"
+                )
         if args_cli.zmq_warmup_sec > 0.0:
             deadline = time.monotonic() + args_cli.zmq_warmup_sec
             warmed_debug = False
@@ -1216,7 +1401,7 @@ def run() -> None:
                     root_source.sample()
                     warmed_root = warmed_root or root_source.fresh
                 time.sleep(0.01)
-            print(f"[INFO] zmq_warmup debug={warmed_debug} root={warmed_root}")
+            print(f"[INFO] network_warmup debug={warmed_debug} root={warmed_root}")
 
     try:
         while simulation_app.is_running():
@@ -1262,7 +1447,7 @@ def run() -> None:
                     f"[INFO] step={step} sim_t={sim_time:.3f} frame={frame} "
                     f"state={fresh} q_absmax={q_absmax:.3f} "
                     f"lh_absmax={lh_absmax:.3f} rh_absmax={rh_absmax:.3f} "
-                    f"root_motion={root_motion.active_mode} root_zmq={'fresh' if root_authoritative else 'none'} "
+                    f"root_motion={root_motion.active_mode} {root_stream_label}={'fresh' if root_authoritative else 'none'} "
                     f"root=({float(root_pos[0]):.3f},{float(root_pos[1]):.3f},{float(root_pos[2]):.3f}) "
                     f"foot_z={foot_z:.4f}"
                 )
