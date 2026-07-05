@@ -35,6 +35,12 @@ param(
 
     [string]$StateTopic = "sonic_state",
 
+    # Publish sonic_robot state over ZMQ (SONIC_PUBLISH_STATE_ZMQ) for the C++
+    # lowstate proxy. Set 0 to keep deploy open-loop: the proxy never sees
+    # IsaacLab state and stays on its synthetic fallback.
+    [ValidateSet(0, 1)]
+    [int]$StatePublish = 1,
+
     [ValidateSet(0, 1)]
     [int]$PhysicsMode = 1,
 
@@ -117,7 +123,7 @@ $env:SONIC_DEPLOY_TOPIC = $DeployTopic
 $env:SONIC_DEPLOY_TARGET_FIELD = "last_action"
 $env:SONIC_DEPLOY_REFERENCE_TARGET_FIELD = "body_q_target"
 
-$env:SONIC_PUBLISH_STATE_ZMQ = "1"
+$env:SONIC_PUBLISH_STATE_ZMQ = "$StatePublish"
 $env:SONIC_STATE_ZMQ_BIND = "tcp://*:${StatePort}"
 $env:SONIC_STATE_ZMQ_TOPIC = $StateTopic
 
@@ -170,7 +176,11 @@ Write-Host "[sonic-windows-isaaclab] IsaacLabRoot: $IsaacLabRoot"
 Write-Host "[sonic-windows-isaaclab] UbuntuIp: $UbuntuIp"
 Write-Host "[sonic-windows-isaaclab] WindowsIp: $WindowsIp"
 Write-Host "[sonic-windows-isaaclab] Deploy endpoint: $($env:SONIC_DEPLOY_ENDPOINT)"
-Write-Host "[sonic-windows-isaaclab] State bind: $($env:SONIC_STATE_ZMQ_BIND), topic: $StateTopic"
+if ($StatePublish -eq 1) {
+    Write-Host "[sonic-windows-isaaclab] State bind: $($env:SONIC_STATE_ZMQ_BIND), topic: $StateTopic"
+} else {
+    Write-Host "[sonic-windows-isaaclab] State publish: disabled (SONIC_PUBLISH_STATE_ZMQ=0, deploy stays open-loop)"
+}
 Write-Host "[sonic-windows-isaaclab] Task: $Task, device: $Device, xr: $($Xr.IsPresent), xr view: $XrView"
 Write-Host "[sonic-windows-isaaclab] Starting isaaclab.bat"
 

@@ -42,6 +42,10 @@ Options:
   --device DEVICE            IsaacLab device. Default: cpu.
   --debug-port PORT          SONIC deploy debug ZMQ port. Default: 5557.
   --state-port PORT          IsaacLab state publisher ZMQ port. Default: 5560.
+  --state-publish 0|1        Publish sonic_robot state over ZMQ (SONIC_PUBLISH_STATE_ZMQ)
+                             for the C++ lowstate proxy. Set 0 to keep deploy open-loop:
+                             the proxy never sees IsaacLab state and stays on its
+                             synthetic fallback. Default: 1.
   --deploy-topic TOPIC       SONIC deploy topic. Default: g1_debug.
   --state-topic TOPIC        IsaacLab state topic. Default: sonic_state.
   --physics-mode 0|1         SONIC_G1_PHYSICS_MODE. Default: 1.
@@ -288,6 +292,7 @@ debug_port="5557"
 state_port="5560"
 deploy_topic="g1_debug"
 state_topic="sonic_state"
+state_publish="1"
 physics_mode="1"
 visual_servo_mode="0"
 self_collisions="0"
@@ -373,6 +378,11 @@ while [[ $# -gt 0 ]]; do
         --state-topic)
             need_value "$1" "${2-}"
             state_topic="$2"
+            shift 2
+            ;;
+        --state-publish)
+            need_value "$1" "${2-}"
+            state_publish="$2"
             shift 2
             ;;
         --physics-mode)
@@ -471,6 +481,7 @@ done
 
 validate_port "--debug-port" "${debug_port}"
 validate_port "--state-port" "${state_port}"
+validate_01 "--state-publish" "${state_publish}"
 validate_01 "--physics-mode" "${physics_mode}"
 validate_01 "--visual-servo-mode" "${visual_servo_mode}"
 validate_01 "--self-collisions" "${self_collisions}"
@@ -517,7 +528,7 @@ export SONIC_DEPLOY_TOPIC="${deploy_topic}"
 export SONIC_DEPLOY_TARGET_FIELD="last_action"
 export SONIC_DEPLOY_REFERENCE_TARGET_FIELD="body_q_target"
 
-export SONIC_PUBLISH_STATE_ZMQ="1"
+export SONIC_PUBLISH_STATE_ZMQ="${state_publish}"
 export SONIC_STATE_ZMQ_BIND="tcp://*:${state_port}"
 export SONIC_STATE_ZMQ_TOPIC="${state_topic}"
 
@@ -562,7 +573,11 @@ log "DeployIp: ${deploy_ip}"
 log "LocalIp: ${local_ip}"
 log "MachineA: ${ISAACLAB_MACHINE_A_IP}, MachineB: ${ISAACLAB_MACHINE_B_IP}, TrackingHub: ${ISAACLAB_TRACKING_HUB_IP}"
 log "Deploy endpoint: ${SONIC_DEPLOY_ENDPOINT}, topic: ${SONIC_DEPLOY_TOPIC}"
-log "State bind: ${SONIC_STATE_ZMQ_BIND}, topic: ${SONIC_STATE_ZMQ_TOPIC}"
+if [[ "${state_publish}" == "1" ]]; then
+    log "State bind: ${SONIC_STATE_ZMQ_BIND}, topic: ${SONIC_STATE_ZMQ_TOPIC}"
+else
+    log "State publish: disabled (SONIC_PUBLISH_STATE_ZMQ=0, deploy stays open-loop)"
+fi
 log "Task: ${task}, device: ${device}, xr: ${xr}, xr view: ${xr_view}"
 print_command "./isaaclab.sh" "${isaac_args[@]}"
 
