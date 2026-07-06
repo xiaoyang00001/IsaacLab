@@ -796,6 +796,34 @@ class SonicDeployTargetAction(ActionTerm):
             self._post_unlock_steps = 0
             self._log_info("root pose unlocked by operator (instant)")
 
+    def recover_standing(self) -> None:
+        """摔倒后原地恢复站立：机器人本体回直立默认姿态，重走锁根启动序列。
+
+        SonicSolo/SonicFullscene 场景没有恢复机器人本体的 reset 事件，
+        env.reset()（R 键）若不带 reset_scene_to_default 只会复位本 term 的
+        状态机——摔倒的机器人会在原地被重新锁根，站不起来。本方法直接写机器人
+        状态：保留当前 XY 与 yaw（XR 第一视角视点连续、不丢行走进度），root 回
+        默认高度、roll/pitch 归零，关节回默认站姿、速度清零；随后 reset() 重走
+        启动状态机（重新锁根 → settle → 等操作者 U/START 再次解锁）。deploy 侧
+        无需重启：状态发布持续，settle 期间 deploy 目标被 drain，物理模式解锁前
+        policy 已重新看到约 1s 的站立状态流（与冷启动序列一致）。
+        """
+        default_root_state = self._asset.data.default_root_state.clone()
+        root_pos = default_root_state[:, 0:3] + self._env.scene.env_origins
+        root_pos[:, 0:2] = self._asset.data.root_pos_w[:, 0:2]
+        root_quat = self._quat_from_yaw(self._yaw_from_quat(self._asset.data.root_quat_w))
+        self._asset.write_root_pose_to_sim(torch.cat([root_pos, root_quat], dim=-1))
+        self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
+        self._asset.write_joint_state_to_sim(
+            self._asset.data.default_joint_pos.clone(),
+            torch.zeros_like(self._asset.data.default_joint_vel),
+        )
+        self.reset()
+        self._log_info(
+            "recover standing: root uprighted in place (kept XY+yaw), joints reset to default; "
+            "root re-locked and settle restarted — press U/START to unlock again"
+        )
+
     def process_actions(self, actions: torch.Tensor):
         settle_steps = int(self.cfg.startup_settle_steps)
         if settle_steps > 0 and self._settle_step_counter < settle_steps:

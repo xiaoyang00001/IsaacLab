@@ -32,6 +32,7 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.envs import mdp as isaaclab_mdp
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
@@ -103,6 +104,10 @@ class SonicFullsceneEventsCfg:
     摘取——主配置 SONIC init_state.pos 即对齐结果的硬拷贝（见 _main 行 113 注释），
     少一个 startup 依赖。
     """
+
+    # R 键 env.reset() 依赖 reset 事件恢复实体状态：Articulation.reset() 只清
+    # actuator/内部 buffer，不写姿态（与 SonicSolo 同注释）。原地扶正用 H 键。
+    reset_scene_to_default = EventTerm(func=isaaclab_mdp.reset_scene_to_default, mode="reset")
 
     # 非物理模式下钉死 SONIC 根（物理模式时主配置类体不会生成此字段）
     if hasattr(_MAIN_EVENTS, "fix_sonic_articulation_root"):

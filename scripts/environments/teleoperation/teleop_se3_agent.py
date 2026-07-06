@@ -169,8 +169,10 @@ def main() -> None:
 
     # 运行时状态：
     # - should_reset_recording_instance：设备回调只置位，不直接 reset，避免在输入回调里改仿真状态。
+    # - should_recover_standing：H 键置位，主循环里调 SONIC action term 的原地恢复站立。
     # - teleoperation_active：XR/设备可以临时暂停 action，但仍保持渲染。
     should_reset_recording_instance = False
+    should_recover_standing = False
     teleoperation_active = True
     # SONIC deploy target 模式：
     # Locomanipulation G1 环境内部有 SonicDeployTargetAction / UnitreeDdsLowCmdAction 这类 action term，
@@ -211,6 +213,24 @@ def main() -> None:
         except Exception as exc:
             logger.warning(f"Failed to unlock sonic root pose: {exc}")
 
+    def request_recover_standing() -> None:
+        """H 键回调：只置位，实际恢复延迟到主循环执行（与 R 键同模式）。"""
+        nonlocal should_recover_standing
+        should_recover_standing = True
+        print("Recover standing triggered - robot will stand up on next step")
+
+    def recover_sonic_standing() -> None:
+        """摔倒恢复：调 SONIC action term 的原地恢复站立（保留 XY+yaw，重新锁根等再次解锁）。"""
+        try:
+            term = env.action_manager.get_term("sonic_wholebody")
+            recover = getattr(term, "recover_standing", None)
+            if callable(recover):
+                recover()
+            else:
+                logger.warning("sonic_wholebody term has no recover_standing(); use R to reset the environment")
+        except Exception as exc:
+            logger.warning(f"Failed to recover sonic standing: {exc}")
+
     def start_teleoperation() -> None:
         """
         Activate teleoperation control of the robot.
@@ -247,6 +267,7 @@ def main() -> None:
         "STOP": stop_teleoperation,
         "RESET": reset_recording_instance,
         "U": unlock_sonic_root_pose,
+        "H": request_recover_standing,
     }
 
     # 手部追踪通常启动时先让用户摆好姿态/校准，所以默认不立即发送 teleop action；
@@ -271,7 +292,11 @@ def main() -> None:
             )
             deploy_keyboard_interface.add_callback("U", unlock_sonic_root_pose)
             deploy_keyboard_interface.add_callback("R", reset_recording_instance)
-            print("[teleop_se3_agent] deploy keyboard callback: U unlocks sonic root pose")
+            deploy_keyboard_interface.add_callback("H", request_recover_standing)
+            print(
+                "[teleop_se3_agent] deploy keyboard callbacks: U unlocks sonic root pose, "
+                "H recovers standing in place, R resets the environment"
+            )
         except Exception as exc:
             logger.warning(f"Failed to create deploy keyboard callback device: {exc}")
 
@@ -355,6 +380,8 @@ def main() -> None:
         deploy_zero_actions = torch.zeros(env.action_space.shape, device=env.device)
 
     print("Teleoperation started. Press 'R' to reset the environment.")
+    if deploy_target_mode:
+        print("SONIC deploy keys: 'U' unlock root, 'H' recover standing in place after a fall.")
 
     # SONIC 闭环实时节拍器：deploy 按墙钟 50Hz 推进步态相位，sim 必须钉在 1.0× 实时。
     # CPU 物理 + 空场景可自由跑到 ~85Hz（1.7× 超实时），policy 等效控制率掉到 ~29Hz
@@ -404,7 +431,14 @@ def main() -> None:
                     if teleop_interface is not None:
                         teleop_interface.reset()
                     should_reset_recording_instance = False
+                    should_recover_standing = False
                     print("Environment reset complete")
+                elif should_recover_standing:
+                    # H 键摔倒恢复：只扶正 sonic_robot 本体并重走锁根启动序列，
+                    # 不动场景其余实体（R 键才是全场景 reset）。
+                    recover_sonic_standing()
+                    should_recover_standing = False
+                    print("Recover standing complete - press U/START to unlock again")
         except Exception as e:
             # 这里捕获错误是为了能优雅关闭 Isaac Sim；具体异常会打印在日志里。
             logger.error(f"Error during simulation step: {e}")
