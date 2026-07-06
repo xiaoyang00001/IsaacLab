@@ -48,6 +48,11 @@ Options:
   --visual-servo-mode 0|1    SONIC_G1_VISUAL_SERVO_MODE. Default: 0.
   --self-collisions 0|1      SONIC_G1_SELF_COLLISIONS. Default: 0.
   --stabilize-root 0|1       SONIC_DEPLOY_STABILIZE_ROOT. Default: 1.
+  --auto-recover 0|1         SONIC_DEPLOY_AUTO_RECOVER. Auto fall recovery,
+                             matching the MuJoCo reference sim: root height
+                             below 0.2 m stands the robot back up in place and
+                             re-unlocks after settle. Set 0 for manual-only
+                             (J key stands up, U/START unlocks). Default: 1.
   --target-rate-limit VALUE  SONIC_DEPLOY_TARGET_RATE_LIMIT. Default: 0.04.
   --headless                 Pass --headless to IsaacLab.
   --xr                       Source CloudXR env, ensure OpenXR runtime, then pass
@@ -292,6 +297,7 @@ physics_mode="1"
 visual_servo_mode="0"
 self_collisions="0"
 stabilize_root="1"
+auto_recover="1"
 target_rate_limit="0.04"
 xr_view="first"
 cloudxr_install_dir="${HOME}/.cloudxr"
@@ -395,6 +401,11 @@ while [[ $# -gt 0 ]]; do
             stabilize_root="$2"
             shift 2
             ;;
+        --auto-recover)
+            need_value "$1" "${2-}"
+            auto_recover="$2"
+            shift 2
+            ;;
         --target-rate-limit)
             need_value "$1" "${2-}"
             target_rate_limit="$2"
@@ -475,6 +486,7 @@ validate_01 "--physics-mode" "${physics_mode}"
 validate_01 "--visual-servo-mode" "${visual_servo_mode}"
 validate_01 "--self-collisions" "${self_collisions}"
 validate_01 "--stabilize-root" "${stabilize_root}"
+validate_01 "--auto-recover" "${auto_recover}"
 validate_positive_int "--cloudxr-timeout" "${cloudxr_timeout}"
 
 case "${xr_view}" in
@@ -527,6 +539,7 @@ export SONIC_G1_PHYSICS_MODE="${physics_mode}"
 export SONIC_G1_VISUAL_SERVO_MODE="${visual_servo_mode}"
 export SONIC_G1_SELF_COLLISIONS="${self_collisions}"
 export SONIC_DEPLOY_STABILIZE_ROOT="${stabilize_root}"
+export SONIC_DEPLOY_AUTO_RECOVER="${auto_recover}"
 export SONIC_DEPLOY_TARGET_RATE_LIMIT="${target_rate_limit}"
 
 isaac_args=(
