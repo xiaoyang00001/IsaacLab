@@ -48,6 +48,9 @@ powershell -ExecutionPolicy Bypass -File "<GR00T_ROOT>\scripts\start_windows_isa
 
 ## 运行按键与摔倒恢复（2026-07-06）
 
+> 详版（含 MuJoCo check_fall 机制解读、Kit 无修饰热键占用清单）见机器人知识库
+> `NVIDIA/IsaacLab/SONIC-摔倒恢复-R键修复与MuJoCo自动恢复移植.md`。
+
 deploy 模式下 `teleop_se3_agent.py` 挂了一个零灵敏度 `Se3Keyboard` 专收回调，
 XR 会话中键盘同样生效：
 
