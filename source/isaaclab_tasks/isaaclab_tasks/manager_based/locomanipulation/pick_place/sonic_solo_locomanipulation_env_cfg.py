@@ -122,8 +122,10 @@ def build_sonic_xr_cfg() -> XrCfg:
       GR00T 43dof USD 是根下 /Robot/head_link，路径不同，抄错会静默失效）。
       fixed_anchor_height=False 让高度也跟随头部；FOLLOW_PRIM_SMOOTHED 让房间
       朝向平滑跟随机器人转身（yaw-only，见 xr_anchor_utils.py）。
-      位置锚点用 head_link，yaw 参考用 pelvis；右手 B 键 release 时按
-      晓阳全身001 的轴配置 recenter，修正头显视觉前向与机器人前向的 90 度差。
+      位置锚点用 head_link，yaw 参考用 pelvis；启动拿到第一帧头显姿态后按
+      晓阳全身001 的轴配置自动 recenter，修正头显视觉前向与机器人前向的 90 度差。
+      若需要保留右手 B 键 release 手动 recenter，可设置 SONIC_XR_ENABLE_B_RECENTER=1；
+      默认不绑定 B，避免 PICO/上游控制流同时消费该按键导致动作跳变。
       前提：SteamVR 驱动侧滤掉 HMD 平移（NOLO 驱动特性）。若 PICO 走标准串流
       不滤平移，佩戴者真实身高会叠加在 head_link 之上导致视点偏高，届时给
       anchor_pos 加负 Z 补偿（真机标定）。
@@ -145,6 +147,7 @@ def build_sonic_xr_cfg() -> XrCfg:
         raise ValueError(
             f"SONIC_XR_VIEW={view!r} 无效，只支持 'first'（头部第一视角）或 'third'（pelvis 第三视角）。"
         )
+    enable_b_recenter = _main._env_flag("SONIC_XR_ENABLE_B_RECENTER", False)
     return XrCfg(
         anchor_pos=(0.0, 0.0, 0.0),
         anchor_rot=(1.0, 0.0, 0.0, 0.0),
@@ -152,7 +155,8 @@ def build_sonic_xr_cfg() -> XrCfg:
         anchor_rotation_prim_path="/World/envs/env_0/SONICRobot/pelvis",
         anchor_rotation_mode=XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED,
         fixed_anchor_height=False,
-        recenter_yaw_button=("/user/hand/right", "b"),
+        recenter_yaw_on_start=True,
+        recenter_yaw_button=("/user/hand/right", "b") if enable_b_recenter else None,
         recenter_yaw_button_event="release",
         recenter_anchor_forward_axis=(-1.0, 0.0, 0.0),
         recenter_headset_forward_axis=(0.0, -1.0, 0.0),

@@ -152,13 +152,12 @@ if ($Headless) {
 if ($Xr) {
     # --xr is an AppLauncher argparse flag; it must be a script arg, not --kit_args.
     $isaacArgs += "--xr"
-    # The XrCfg anchor and XRCore button events only take effect once an
-    # OpenXRDevice is actually constructed (see openxr_device.py __init__).
+    # The XrCfg anchor sync and optional XRCore button events only take effect
+    # once an OpenXRDevice is actually constructed (see openxr_device.py __init__).
     # teleop_se3_agent.py's deploy_target_mode only builds that device when
     # --teleop_device resolves to a key present in env_cfg.teleop_devices
-    # (here "handtracking"). The B-button yaw recenter is an XR event binding,
-    # not a motion-controller retargeter path; the deploy zero-action loop never
-    # calls .advance() on it, so this is safe to pass unconditionally with -Xr.
+    # (here "handtracking"). Startup yaw recenter and optional B-button recenter
+    # are XR anchor paths, not motion-controller retargeter paths.
     $isaacArgs += "--teleop_device"
     $isaacArgs += "handtracking"
 }
