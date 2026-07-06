@@ -545,6 +545,9 @@ if (( headless )); then
 fi
 
 if (( xr )); then
+    # Construct OpenXRDevice so dynamic anchors and XRCore button events are active.
+    # "handtracking" is the env_cfg.teleop_devices key; B-button yaw recenter does
+    # not require the motion-controller retargeter path.
     isaac_args+=("--xr")
     isaac_args+=("--teleop_device" "handtracking")
 fi
