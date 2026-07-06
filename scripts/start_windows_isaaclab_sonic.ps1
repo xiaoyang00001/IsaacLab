@@ -47,6 +47,13 @@ param(
     [ValidateSet(0, 1)]
     [int]$StabilizeRoot = 1,
 
+    # Auto fall recovery, matching the MuJoCo reference sim (base_sim.check_fall):
+    # when the root height drops below 0.2 m the robot is stood back up in place
+    # (keeps XY+yaw) and the root re-unlocks after the settle phase. Set 0 for
+    # manual-only recovery (H key stands up, then U/START unlocks again).
+    [ValidateSet(0, 1)]
+    [int]$AutoRecover = 1,
+
     [double]$TargetRateLimit = 0.04,
 
     [switch]$Headless,
@@ -127,6 +134,7 @@ $env:SONIC_G1_PHYSICS_MODE = "$PhysicsMode"
 $env:SONIC_G1_VISUAL_SERVO_MODE = "$VisualServoMode"
 $env:SONIC_G1_SELF_COLLISIONS = "$SelfCollisions"
 $env:SONIC_DEPLOY_STABILIZE_ROOT = "$StabilizeRoot"
+$env:SONIC_DEPLOY_AUTO_RECOVER = "$AutoRecover"
 $env:SONIC_DEPLOY_TARGET_RATE_LIMIT = "$TargetRateLimit"
 
 $kitArgs = @(

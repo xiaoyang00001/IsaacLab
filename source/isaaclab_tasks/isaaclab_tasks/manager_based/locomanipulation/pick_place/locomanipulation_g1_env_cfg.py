@@ -562,6 +562,12 @@ class ActionsCfg:
                 os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "50")
             ),
             hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
+            # 摔倒自动恢复（对齐 MuJoCo base_sim.check_fall：root 高度 <0.2m 即自动
+            # 扶正）。SONIC_DEPLOY_AUTO_RECOVER=0 恢复纯手动（H 键）；settle 后是否
+            # 自动重新解锁由 SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER 控制
+            auto_recover_on_fall=_env_flag("SONIC_DEPLOY_AUTO_RECOVER", True),
+            fall_root_height_m=float(os.environ.get("SONIC_DEPLOY_FALL_HEIGHT", "0.2")),
+            auto_unlock_after_recover=_env_flag("SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER", True),
             stale_timeout_s=0.5,
             fallback_to_last_action=True,
             fallback_to_body_q_target=True,

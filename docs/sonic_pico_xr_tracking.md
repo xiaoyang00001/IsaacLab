@@ -46,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File "<GR00T_ROOT>\scripts\start_windows_isa
 
 仅验证 AR 按钮时 `-UbuntuIp` 可用 `127.0.0.1` 占位（ZMQ SUB 静默重连，不影响启动）。
 
-## 运行按键（2026-07-06）
+## 运行按键与摔倒恢复（2026-07-06）
 
 deploy 模式下 `teleop_se3_agent.py` 挂了一个零灵敏度 `Se3Keyboard` 专收回调，
 XR 会话中键盘同样生效：
@@ -54,20 +54,39 @@ XR 会话中键盘同样生效：
 | 键 | 行为 | 实现 |
 |----|------|------|
 | `U`（或 XR START） | 解锁 root，policy 接管平衡（物理模式 50 物理步渐变释放） | `SonicDeployTargetAction.unlock_root_pose` |
-| `H` | **摔倒恢复**：原地扶正——保留当前 XY+yaw，root 回默认高度、roll/pitch 归零，关节回默认站姿、速度清零，然后重新锁根 + 重走 settle，等再按 `U` 解锁 | `SonicDeployTargetAction.recover_standing`（回调延迟到主循环执行，与 R 同模式） |
-| `R` | 全场景 reset：机器人回出生点，场景实体（HugBox 等）回初始位，重新锁根 + settle | `env.reset()` + `reset_scene_to_default` reset 事件 |
+| `H` | **手动摔倒恢复**：原地扶正——保留当前 XY+yaw，root 回默认高度、roll/pitch 归零，关节回默认站姿、速度清零，然后重新锁根 + 重走 settle | `SonicDeployTargetAction.recover_standing`（回调延迟到主循环执行，与 R 同模式） |
+| `R` | 全场景 reset：机器人回出生点，场景实体（HugBox 等）回初始位，重新锁根 + settle，解锁门控回冷启动状态（需手动 U） | `env.reset()` + `reset_scene_to_default` reset 事件 |
 
-`H` 与 `R` 的区别：`H` 只动 `sonic_robot` 本体、不回出生点、不动道具，适合 XR
-行走中摔倒后就地重来（第一视角视点连续）；摔进道具里卡住时用 `R` 整场重摆。
-两者之后都需再次 `U`/START 解锁。deploy 侧进程无需重启：settle 期间 deploy
-目标被 drain，状态发布持续，解锁前 policy 已重新看到约 1s 的站立状态流
-（与冷启动序列一致）。
+**摔倒自动恢复**（默认开，移植自 MuJoCo 参考环境
+`gear_sonic/utils/mujoco_sim/base_sim.py` 的 `check_fall()`——每步检测
+`qpos[2] < 0.2`，命中即 `mj_resetData` 自动回初始状态、policy 继续跑）：
+
+- `SonicDeployTargetAction._maybe_auto_recover_fall()` 每个 env step（50Hz）
+  检测 root 高度（相对 env origin）`< fall_root_height_m`（默认 0.2，与
+  MuJoCo 同阈值；站立 ~0.76，正常深蹲不会低于 0.3），命中自动调
+  `recover_standing()`。
+- 与 MuJoCo 的差异：MuJoCo 回出生点，这里**原地扶正**（保 XY+yaw，XR 第一
+  视角视点连续）。
+- **解锁交接**：摔倒前 root 已解锁（含解锁 blend 中）→ settle 完成后
+  **自动重新解锁**，全程无需按键（对齐 MuJoCo reset 后吊带不再挂、policy
+  直接接管的语义）；冷启动（从未解锁）→ 保持锁根等手动 `U`/START。
+  `H` 手动恢复遵循同一规则。
+- 开关：启动脚本 `-AutoRecover 0`（= `SONIC_DEPLOY_AUTO_RECOVER=0`）关闭
+  自动检测（调试观察摔倒姿态时用）；`SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER=0`
+  保留自动扶正但恢复后等手动解锁；`SONIC_DEPLOY_FALL_HEIGHT` 调阈值。
+- 注意：闭环未收敛时（解锁后大概率摔），自动恢复会形成"摔倒→扶正→settle
+  1s→自动解锁→再摔"的循环——这正是 MuJoCo 侧的行为，属预期；观察摔倒过程
+  请 `-AutoRecover 0`。
+
+deploy 侧进程无需重启：settle 期间 deploy 目标被 drain，状态发布持续，
+解锁前 policy 已重新看到约 1s 的站立状态流（与冷启动序列一致）。
+摔进道具里卡住时用 `R` 整场重摆。
 
 > 历史坑（2026-07-06 修复）：SonicSolo/SonicFullscene 此前**没有任何 reset 事件**，
 > 而 `Articulation.reset()` 只清 actuator/buffer 不写姿态——按 `R` 只会复位
 > `SonicDeployTargetAction` 状态机（root 在摔倒处重新锁定、关节目标回默认），
 > 摔倒的机器人永远站不起来，只在地上抽动。现已给两个场景补
-> `reset_scene_to_default`（mode="reset"），并新增 `H` 原地恢复。
+> `reset_scene_to_default`（mode="reset"），并新增 `H` 原地恢复 + 自动摔倒恢复。
 
 **视角切换**（2026-07-03 新增）：`-XrView first|third`（默认 `first`）。脚本据此设
 `SONIC_XR_VIEW` 环境变量，两个 SONIC env cfg 的 `build_sonic_xr_cfg()`

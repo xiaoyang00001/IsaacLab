@@ -208,6 +208,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
         self._root_pose_unlocked = False
+        self._auto_unlock_after_settle = False
         self._base_trans_target: torch.Tensor | None = None
         self._initial_base_target_pos: torch.Tensor | None = None
         self._previous_base_trans_target: torch.Tensor | None = None
@@ -804,10 +805,16 @@ class SonicDeployTargetAction(ActionTerm):
         状态机——摔倒的机器人会在原地被重新锁根，站不起来。本方法直接写机器人
         状态：保留当前 XY 与 yaw（XR 第一视角视点连续、不丢行走进度），root 回
         默认高度、roll/pitch 归零，关节回默认站姿、速度清零；随后 reset() 重走
-        启动状态机（重新锁根 → settle → 等操作者 U/START 再次解锁）。deploy 侧
-        无需重启：状态发布持续，settle 期间 deploy 目标被 drain，物理模式解锁前
-        policy 已重新看到约 1s 的站立状态流（与冷启动序列一致）。
+        启动状态机（重新锁根 → settle）。deploy 侧无需重启：状态发布持续，
+        settle 期间 deploy 目标被 drain，物理模式解锁前 policy 已重新看到约 1s
+        的站立状态流（与冷启动序列一致）。
+
+        解锁交接（对齐 MuJoCo 参考 mj_resetData 后 policy 直接接管的语义）：
+        若摔倒前 root 已解锁（或在解锁 blend 中）且 ``auto_unlock_after_recover``
+        为 True，settle 完成后自动重新解锁；否则保持锁根等 U/START。冷启动
+        （从未解锁过）永远走手动门控。
         """
+        was_unlocked = self._root_pose_unlocked or self._unlock_blend_total > 0
         default_root_state = self._asset.data.default_root_state.clone()
         root_pos = default_root_state[:, 0:3] + self._env.scene.env_origins
         root_pos[:, 0:2] = self._asset.data.root_pos_w[:, 0:2]
@@ -819,12 +826,47 @@ class SonicDeployTargetAction(ActionTerm):
             torch.zeros_like(self._asset.data.default_joint_vel),
         )
         self.reset()
+        pending_auto_unlock = bool(self.cfg.auto_unlock_after_recover) and was_unlocked
+        if pending_auto_unlock and int(self.cfg.startup_settle_steps) <= 0:
+            # 没有 settle 阶段（fixed-root 配置）：立即交还控制权。
+            self.unlock_root_pose()
+            pending_auto_unlock = False
+        self._auto_unlock_after_settle = pending_auto_unlock
+        unlock_text = (
+            "will auto re-unlock after settle"
+            if pending_auto_unlock
+            else "press U/START to unlock"
+        )
         self._log_info(
             "recover standing: root uprighted in place (kept XY+yaw), joints reset to default; "
-            "root re-locked and settle restarted — press U/START to unlock again"
+            f"root re-locked and settle restarted — {unlock_text}"
         )
 
+    def _maybe_auto_recover_fall(self) -> None:
+        """摔倒自动恢复：对齐 MuJoCo 参考环境 base_sim.check_fall()。
+
+        MuJoCo 侧每个 sim step 检测 ``qpos[2] < 0.2``，命中即 mj_resetData 自动
+        回初始状态、policy 继续跑，无需人工干预。这里在每个 env step（50Hz）做
+        同阈值检测，命中调 recover_standing()（原地扶正而非回出生点）。
+        """
+        if not bool(self.cfg.auto_recover_on_fall):
+            return
+        threshold = float(self.cfg.fall_root_height_m)
+        if threshold <= 0.0:
+            return
+        root_height = self._asset.data.root_pos_w[:, 2] - self._env.scene.env_origins[:, 2]
+        min_height = torch.min(root_height).item()
+        if min_height >= threshold:
+            return
+        self._log_warning(
+            f"robot has fallen (root height {min_height:.3f} m < {threshold:.2f} m); auto recovering standing"
+        )
+        self.recover_standing()
+
     def process_actions(self, actions: torch.Tensor):
+        # 摔倒自动恢复检测（MuJoCo check_fall 等价物）。命中后本步直接进入下面的
+        # settle 分支驱动默认站姿。
+        self._maybe_auto_recover_fall()
         settle_steps = int(self.cfg.startup_settle_steps)
         if settle_steps > 0 and self._settle_step_counter < settle_steps:
             # Startup/post-unlock settle: gradually transition joints to default
@@ -836,6 +878,12 @@ class SonicDeployTargetAction(ActionTerm):
             self._settle_step_counter += 1
             if self._settle_step_counter == settle_steps:
                 self._log_info(f"startup settle complete ({settle_steps} steps); begin consuming deploy targets")
+                if self._auto_unlock_after_settle:
+                    # 摔倒恢复的自动交接：settle 完成即重新解锁（带 blend），
+                    # 对齐 MuJoCo reset 后 policy 直接接管的行为。
+                    self._auto_unlock_after_settle = False
+                    self._log_info("auto re-unlocking root after recovery settle")
+                    self.unlock_root_pose()
             return
         # hold_after_unlock: after root is freed, ignore deploy targets and drive joints
         # toward the default standing pose (rate-limited). This isolates physics-only
@@ -914,6 +962,7 @@ class SonicDeployTargetAction(ActionTerm):
             self._last_root_xy_step_norm.zero_()
             self._root_pose_anchor = None
             self._root_pose_unlocked = False
+            self._auto_unlock_after_settle = False
             self._unlock_blend_counter = 0
             self._unlock_blend_total = 0
             self._settle_step_counter = 0
@@ -938,6 +987,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._last_root_xy_step_norm[env_ids] = 0.0
         self._root_pose_anchor = None
         self._root_pose_unlocked = False
+        self._auto_unlock_after_settle = False
         self._unlock_blend_counter = 0
         self._unlock_blend_total = 0
         self._settle_step_counter = 0

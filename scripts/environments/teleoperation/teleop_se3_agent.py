@@ -381,7 +381,10 @@ def main() -> None:
 
     print("Teleoperation started. Press 'R' to reset the environment.")
     if deploy_target_mode:
-        print("SONIC deploy keys: 'U' unlock root, 'H' recover standing in place after a fall.")
+        print(
+            "SONIC deploy keys: 'U' unlock root, 'H' recover standing in place after a fall "
+            "(auto fall recovery is on by default; SONIC_DEPLOY_AUTO_RECOVER=0 disables it)."
+        )
 
     # SONIC 闭环实时节拍器：deploy 按墙钟 50Hz 推进步态相位，sim 必须钉在 1.0× 实时。
     # CPU 物理 + 空场景可自由跑到 ~85Hz（1.7× 超实时），policy 等效控制率掉到 ~29Hz
@@ -435,10 +438,12 @@ def main() -> None:
                     print("Environment reset complete")
                 elif should_recover_standing:
                     # H 键摔倒恢复：只扶正 sonic_robot 本体并重走锁根启动序列，
-                    # 不动场景其余实体（R 键才是全场景 reset）。
+                    # 不动场景其余实体（R 键才是全场景 reset）。解锁交接行为
+                    # （自动/手动）由 action term 的 auto_unlock_after_recover 决定，
+                    # 具体见其日志输出。
                     recover_sonic_standing()
                     should_recover_standing = False
-                    print("Recover standing complete - press U/START to unlock again")
+                    print("Recover standing complete")
         except Exception as e:
             # 这里捕获错误是为了能优雅关闭 Isaac Sim；具体异常会打印在日志里。
             logger.error(f"Error during simulation step: {e}")

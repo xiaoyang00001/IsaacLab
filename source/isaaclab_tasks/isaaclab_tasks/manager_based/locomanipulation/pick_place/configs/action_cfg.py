@@ -161,6 +161,24 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     ~250 ms. Set True in physics mode: the limiter still smooths the locked-phase
     convergence from default pose to the first deploy targets, then gets out of the way."""
 
+    auto_recover_on_fall: bool = True
+    """摔倒自动恢复，对齐 MuJoCo 参考环境 gear_sonic/utils/mujoco_sim/base_sim.py
+    的 check_fall()：每步检测 root 高度，低于 ``fall_root_height_m`` 即自动调
+    recover_standing()。MuJoCo 侧是 mj_resetData 全量回出生位；这里保留 XY+yaw
+    原地扶正（XR 第一视角视点连续），并按 ``auto_unlock_after_recover`` 决定
+    settle 后是否自动重新解锁。设 False 恢复纯手动（H 键）。"""
+
+    fall_root_height_m: float = 0.2
+    """摔倒判定阈值：root（pelvis）相对 env origin 的高度低于该值视为摔倒。
+    与 MuJoCo 参考环境同阈值（qpos[2] < 0.2；站立 ~0.76，正常深蹲不会低于 0.3）。
+    0 或负值禁用检测。"""
+
+    auto_unlock_after_recover: bool = True
+    """恢复站立的 settle 完成后是否自动重新解锁（仅当摔倒前 root 已解锁/在解锁
+    blend 中）。对齐 MuJoCo 参考行为：reset 后吊带不再挂上，policy 直接接管。
+    False 则恢复后保持锁根，等操作者再按 U/START。冷启动门控不受影响：首次
+    解锁永远需要 U/START。"""
+
     stale_timeout_s: float = 0.5
     """Warn and hold the last target if no fresh deploy packet arrives for this long. 0 disables warning."""
 
