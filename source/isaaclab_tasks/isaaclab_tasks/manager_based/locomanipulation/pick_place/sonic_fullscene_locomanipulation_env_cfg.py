@@ -106,7 +106,7 @@ class SonicFullsceneEventsCfg:
     """
 
     # R 键 env.reset() 依赖 reset 事件恢复实体状态：Articulation.reset() 只清
-    # actuator/内部 buffer，不写姿态（与 SonicSolo 同注释）。原地扶正用 H 键。
+    # actuator/内部 buffer，不写姿态（与 SonicSolo 同注释）。原地扶正用 J 键。
     reset_scene_to_default = EventTerm(func=isaaclab_mdp.reset_scene_to_default, mode="reset")
 
     # 非物理模式下钉死 SONIC 根（物理模式时主配置类体不会生成此字段）

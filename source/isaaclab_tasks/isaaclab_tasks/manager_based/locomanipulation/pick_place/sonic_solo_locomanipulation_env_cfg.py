@@ -237,7 +237,8 @@ class SonicSoloEventsCfg:
     # R 键 env.reset() 依赖 reset 事件恢复实体状态：Articulation.reset() 只清
     # actuator/内部 buffer，不写姿态。没有这条，摔倒后按 R 机器人仍躺在原地，
     # 只有 action term 状态机被复位（root 在摔倒处重新锁定）。
-    # 原地扶正不回出生点用 H 键（SonicDeployTargetAction.recover_standing）。
+    # 原地扶正不回出生点用 J 键（SonicDeployTargetAction.recover_standing；
+    # 不用 H：Isaac Sim Edit 菜单 H = Toggle Visibility，会把选中 prim 隐藏）。
     reset_scene_to_default = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
     if _ENABLE_DEMO_OBJECT:

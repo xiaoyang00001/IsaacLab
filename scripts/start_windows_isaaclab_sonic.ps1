@@ -50,7 +50,8 @@ param(
     # Auto fall recovery, matching the MuJoCo reference sim (base_sim.check_fall):
     # when the root height drops below 0.2 m the robot is stood back up in place
     # (keeps XY+yaw) and the root re-unlocks after the settle phase. Set 0 for
-    # manual-only recovery (H key stands up, then U/START unlocks again).
+    # manual-only recovery (J key stands up, then U/START unlocks again; H is
+    # taken by the Isaac Sim Edit menu "Toggle Visibility" hotkey).
     [ValidateSet(0, 1)]
     [int]$AutoRecover = 1,
 

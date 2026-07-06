@@ -166,7 +166,7 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     的 check_fall()：每步检测 root 高度，低于 ``fall_root_height_m`` 即自动调
     recover_standing()。MuJoCo 侧是 mj_resetData 全量回出生位；这里保留 XY+yaw
     原地扶正（XR 第一视角视点连续），并按 ``auto_unlock_after_recover`` 决定
-    settle 后是否自动重新解锁。设 False 恢复纯手动（H 键）。"""
+    settle 后是否自动重新解锁。设 False 恢复纯手动（J 键）。"""
 
     fall_root_height_m: float = 0.2
     """摔倒判定阈值：root（pelvis）相对 env origin 的高度低于该值视为摔倒。
