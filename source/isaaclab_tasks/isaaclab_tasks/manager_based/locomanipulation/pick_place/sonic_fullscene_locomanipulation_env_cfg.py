@@ -7,16 +7,16 @@
 
 移植原则：只要场景的 USD 资源，不移植源分支的机器人配置（SONIC/陪跑 G1）、
 地板摩擦补绑 / 传送带滚轮物理 / 流水箱驱动 / viewer 对齐等源分支事件。
-机器人/动作/观测/XR/teleop 以及 CartBox 物理初始化继承本分支主配置
+机器人/动作/观测/XR/teleop 以及 CartBox 配置继承本分支主配置
 ``LocomanipulationG1EnvCfg``。
 
 场景 = 主场景 + warehouse.usd 背景（含传送带视觉模型，静态）+ packing_table
 （USD 版替换主场景隐藏的方块占位）+ 转向盘可抓道具（替换主场景隐藏的方块）。
 
-主配置带有 ``replicate_physics=False`` + prestartup 事件
-``setup_usd_rigid_object_physics``，用于给 CartBox1/CartBox2 逐 env 写入
-RigidBodyAPI/MassAPI/凸包碰撞等 USD 物理属性，避免纯视觉 USD 在场景解析阶段
-触发 ``Failed to find a rigid body``。
+主配置的 CartBox1/CartBox2 使用本地 physics wrapper 引用源分支同款
+``SM_CardBoxD_05.usd`` 视觉资产，并在 wrapper 内提供 RigidBodyAPI/MassAPI/
+凸包碰撞等 USD 物理属性，避免纯视觉 USD 在场景解析阶段触发
+``Failed to find a rigid body``。
 
 坐标系沿用源分支：机器人出生 (-2.0, 11.008)，warehouse 背景 (-4.68, 14.39363)，
 所有道具坐标原样照搬，零重新校准。
@@ -79,7 +79,7 @@ class SonicFullsceneSceneCfg(_main.LocomanipulationG1SceneCfg):
 class SonicFullsceneLocomanipulationEnvCfg(_main.LocomanipulationG1EnvCfg):
     """完整仓库场景环境：主环境只换场景，其余（动作/观测/XR/teleop）不动。"""
 
-    scene: SonicFullsceneSceneCfg = SonicFullsceneSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
+    scene: SonicFullsceneSceneCfg = SonicFullsceneSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
 
     def __post_init__(self):
         """Post initialization."""

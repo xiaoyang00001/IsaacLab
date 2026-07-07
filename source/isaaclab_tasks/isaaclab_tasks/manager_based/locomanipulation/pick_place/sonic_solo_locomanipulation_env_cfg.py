@@ -91,7 +91,7 @@ class SonicSoloSceneCfg(_main.LocomanipulationG1SceneCfg):
 class SonicSoloLocomanipulationEnvCfg(_main.LocomanipulationG1EnvCfg):
     """极简场景环境：主环境只换场景，其余（动作/观测/XR/teleop）不动。"""
 
-    scene: SonicSoloSceneCfg = SonicSoloSceneCfg(num_envs=1, env_spacing=8.0, replicate_physics=False)
+    scene: SonicSoloSceneCfg = SonicSoloSceneCfg(num_envs=1, env_spacing=8.0, replicate_physics=True)
 
     def __post_init__(self):
         """Post initialization."""
