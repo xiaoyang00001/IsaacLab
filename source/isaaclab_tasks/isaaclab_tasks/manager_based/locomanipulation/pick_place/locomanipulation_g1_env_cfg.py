@@ -550,14 +550,14 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = 2
         # The default Isaac Lab GPU PhysX buffers target large batched training scenes.
         # This task is a single-env XR mirror, so smaller buffers avoid VRAM exhaustion on 8 GB GPUs.
-        self.sim.physx.gpu_max_rigid_contact_count = 2**20
-        self.sim.physx.gpu_max_rigid_patch_count = 2**14
-        self.sim.physx.gpu_found_lost_pairs_capacity = 2**16
-        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 2**18
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2**16
-        self.sim.physx.gpu_collision_stack_size = 2**24
-        self.sim.physx.gpu_heap_capacity = 2**24
-        self.sim.physx.gpu_temp_buffer_capacity = 2**22
+        self.sim.physx.gpu_max_rigid_contact_count = 2**22
+        self.sim.physx.gpu_max_rigid_patch_count = 2**16
+        self.sim.physx.gpu_found_lost_pairs_capacity = 2**18
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 2**20
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 2**18
+        self.sim.physx.gpu_collision_stack_size = 2**26
+        self.sim.physx.gpu_heap_capacity = 2**26
+        self.sim.physx.gpu_temp_buffer_capacity = 2**24
 
         self.xr.anchor_prim_path = "/World/envs/env_0/Robot/head_link"
         self.xr.anchor_rotation_prim_path = "/World/envs/env_0/Robot/pelvis"
