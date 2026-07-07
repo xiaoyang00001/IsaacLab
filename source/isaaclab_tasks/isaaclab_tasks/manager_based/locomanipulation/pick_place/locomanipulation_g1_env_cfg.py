@@ -321,7 +321,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # ------------------------------------------------------------------
     pushcart = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
+        # 对齐 ConveyorBelt（场景位置 y=14.39363，绕 Z 90°），再叠加 +90°Z = 180°Z 总旋转
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-3.0, 14.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=os.path.join(os.path.dirname(__file__), "props", "pushcart_physics.usda"),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -332,7 +333,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     cart_box1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.5], rot=[0.707107, 0.0, 0.0, 0.707107]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-3.0, 14.39363, 0.5], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
             scale=(0.01, 0.01, 0.01),
@@ -344,7 +345,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     cart_box2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.82], rot=[0.707107, 0.0, 0.0, 0.707107]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-3.0, 14.39363, 0.82], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
             scale=(0.01, 0.01, 0.01),
