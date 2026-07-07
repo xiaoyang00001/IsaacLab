@@ -275,6 +275,40 @@ def main() -> None:
 
     print(f"Using teleop device: {teleop_interface}")
 
+    # ------------------------------------------------------------------
+    # Keyboard 'R' -> reset object placement.
+    # The G1 XR tasks use 'motion_controllers' as the active teleop device, which has
+    # no physical keyboard listener, so the 'R' entry in `teleoperation_callbacks`
+    # never fires. We add a lightweight carb keyboard subscription that snaps every
+    # rigid object in the scene back to its configured initial pose, without
+    # disturbing the mirrored robot / XR anchor (unlike a full env.reset()).
+    # ------------------------------------------------------------------
+    should_reset_objects = False
+
+    def reset_object_placement() -> None:
+        nonlocal should_reset_objects
+        should_reset_objects = True
+        print("Object reset triggered - objects will return to their initial placement on next step")
+
+    keyboard_reset_sub = None
+    if args_cli.teleop_device.lower() in {"handtracking", "motion_controllers"}:
+        try:
+            import carb
+            import omni
+
+            _reset_input_iface = carb.input.acquire_input_interface()
+            _reset_keyboard = omni.appwindow.get_default_app_window().get_keyboard()
+
+            def _on_keyboard_reset(event, *args, **kwargs) -> bool:
+                if event.type == carb.input.KeyboardEventType.KEY_PRESS and event.input.name == "R":
+                    reset_object_placement()
+                return True
+
+            keyboard_reset_sub = _reset_input_iface.subscribe_to_keyboard_events(_reset_keyboard, _on_keyboard_reset)
+            print("Keyboard 'R' bound to object placement reset.")
+        except Exception as e:
+            logger.warning(f"Failed to set up keyboard reset listener: {e}")
+
     # reset environment
     env.reset()
     teleop_interface.reset()
@@ -303,6 +337,17 @@ def main() -> None:
                     teleop_interface.reset()
                     should_reset_recording_instance = False
                     print("Environment reset complete")
+
+                if should_reset_objects:
+                    # Snap every rigid object back to its configured initial pose (position +
+                    # orientation) with zero velocity, without resetting the robot / episode.
+                    for rigid_object in env.scene.rigid_objects.values():
+                        default_root_state = rigid_object.data.default_root_state.clone()
+                        default_root_state[:, 0:3] += env.scene.env_origins
+                        rigid_object.write_root_pose_to_sim(default_root_state[:, :7])
+                        rigid_object.write_root_velocity_to_sim(default_root_state[:, 7:])
+                    should_reset_objects = False
+                    print("Object placement reset complete")
         except Exception as e:
             logger.error(f"Error during simulation step: {e}")
             break
