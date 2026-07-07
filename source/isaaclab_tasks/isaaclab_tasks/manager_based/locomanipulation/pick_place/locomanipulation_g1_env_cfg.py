@@ -120,7 +120,7 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(-2.0, 11.008, 0.78),
+        pos=(-3.8, 19.008, 0.78),
         rot=(0.7071, 0.0, 0.0, 0.7071),
         joint_pos={
             ".*_hip_pitch_joint": -0.10,
