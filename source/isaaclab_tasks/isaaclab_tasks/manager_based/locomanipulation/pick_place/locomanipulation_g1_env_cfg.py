@@ -309,31 +309,21 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     # ------------------------------------------------------------------
     # 从 warehouse-simple6_v48.usd 搬出的可重置道具（按 R 键回到初始摆放）。
-    # 原 prim 已在背景 USD 中停用（SetActive(False)，备份 warehouse-simple6_v48.usd.bak）。
-    # 云端 SimReady 资产是纯视觉网格，而 UsdFileCfg 只会 modify 已有物理 API，
-    # 所以这里引用 props/ 下的 wrapper USDA：引用同一云端资产（保留材质贴图）
-    # 并在根 prim 附加 RigidBodyAPI/MassAPI、网格附加碰撞 API。
-    # 位姿 = USD 内位姿 × 背景放置变换，与原场景摆放逐位一致；
-    # scale=0.01 与背景内原 Xform 相同（资产为厘米制）。
+    # 原 prim 已在背景 USD 中停用（备份 .bak/.bak2/.bak3）。
+    # 云端 SimReady 资产是纯视觉网格，UsdFileCfg 不会补物理 API，所以这里
+    # 引用 props/ 下的 wrapper USDA：引用同款云端资产（保留材质贴图），
+    # 在根 prim 附加 RigidBodyAPI/MassAPI、网格附加碰撞 API。
+    # 位姿 = USD 内位姿 × 背景放置变换，与原场景摆放逐位一致。
+    #
+    # my_cart_with_boxes：MyCart 与 MyCart_Box1/Box2 打包成一个刚体。
+    # 三个焊接在一起，按 R 一起回到原位（不可被机器人单独抓取；推车整辆动，
+    # 两个箱子跟车走）。scale=1.0 与原 Xform 一致（推车/纸箱源为米制）。
     # ------------------------------------------------------------------
-    cart_box1 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/CartBox1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.3774], rot=[0.0, 0.0, 0.0, 1.0]),
+    my_cart_with_boxes = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/MyCartWithBoxes",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
         spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=8,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
-    )
-    cart_box2 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/CartBox2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.6974], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
-            scale=(0.01, 0.01, 0.01),
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "mycart_with_boxes_physics.usda"),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=8,
                 max_depenetration_velocity=5.0,
