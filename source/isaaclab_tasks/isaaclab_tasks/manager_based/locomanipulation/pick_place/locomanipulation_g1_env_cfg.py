@@ -259,7 +259,6 @@ def _make_graspable_cart_box_spawn_cfg() -> UsdFileCfg:
     return UsdFileCfg(
         usd_path=os.path.join(os.path.dirname(__file__), "props", "cart_box_d05_physics.usda"),
         mass_props=sim_utils.MassPropertiesCfg(mass=1.5),
-        collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True, contact_offset=0.005, rest_offset=0.0),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
             kinematic_enabled=False,
