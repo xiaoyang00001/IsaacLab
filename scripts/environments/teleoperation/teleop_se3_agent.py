@@ -47,6 +47,9 @@ G1_LOCOMANIP_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-Abs-v0"
 G1_LOCOMANIP_TASK_ALIASES = {
     "Isaac-PickPlace-Locomanipulation-G1-Abs": G1_LOCOMANIP_TASK_ID,
     G1_LOCOMANIP_TASK_ID: G1_LOCOMANIP_TASK_ID,
+    # 新场景别名：支持不带 -v0 的简写
+    "Isaac-SonicSolo-Locomanipulation-G1": "Isaac-SonicSolo-Locomanipulation-G1-v0",
+    "Isaac-SonicFullscene-Locomanipulation-G1": "Isaac-SonicFullscene-Locomanipulation-G1-v0",
 }
 
 
@@ -54,16 +57,26 @@ def _cli_flag_present(flag: str) -> bool:
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv)
 
 
+def _is_g1_locomanip_task(task_name: str | None) -> bool:
+    """G1 镜像遥操任务族：主任务 + SonicSolo/SonicFullscene 场景（id 均含该子串）。
+
+    这些任务共用同一套特殊处理：强制 enable_pinocchio（从而显式导入被
+    isaaclab_tasks 黑名单挡掉的 pick_place 包完成 gym 注册）、默认
+    motion_controllers、XR 下 teleop 始终激活。
+    """
+    return bool(task_name) and "Locomanipulation-G1" in task_name
+
+
 args_cli.task = G1_LOCOMANIP_TASK_ALIASES.get(args_cli.task, args_cli.task)
 
 if (
-    args_cli.task == G1_LOCOMANIP_TASK_ID
+    _is_g1_locomanip_task(args_cli.task)
     and not _cli_flag_present("--teleop_device")
     and args_cli.teleop_device == "keyboard"
 ):
     args_cli.teleop_device = "motion_controllers"
 
-if args_cli.task == G1_LOCOMANIP_TASK_ID:
+if _is_g1_locomanip_task(args_cli.task):
     args_cli.enable_pinocchio = True
 
 app_launcher_args = vars(args_cli)
@@ -203,11 +216,11 @@ def main() -> None:
     }
 
     # For hand tracking devices, add additional callbacks
-    if args_cli.xr and args_cli.task != G1_LOCOMANIP_TASK_ID:
+    if args_cli.xr and not _is_g1_locomanip_task(args_cli.task):
         # Default to inactive for hand tracking
         teleoperation_active = False
     else:
-        # Always active for other devices
+        # Always active for other devices (including all G1 locomanip XR tasks)
         teleoperation_active = True
 
     # Create teleop device from config if present, otherwise create manually
