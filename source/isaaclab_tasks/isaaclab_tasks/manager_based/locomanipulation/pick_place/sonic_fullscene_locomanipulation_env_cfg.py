@@ -6,19 +6,17 @@
 """完整仓库场景（移植自 sonic-windows-xr-ar-anchor 分支的 SonicFullscene，只移植 USD 场景资产）。
 
 移植原则：只要场景的 USD 资源，不移植源分支的机器人配置（SONIC/陪跑 G1）、
-events 事件系统（地板摩擦补绑 / 传送带滚轮物理 / 流水箱驱动 / viewer 对齐等）。
-机器人/动作/观测/XR/teleop 全部继承本分支主配置 ``LocomanipulationG1EnvCfg``。
+地板摩擦补绑 / 传送带滚轮物理 / 流水箱驱动 / viewer 对齐等源分支事件。
+机器人/动作/观测/XR/teleop 以及 CartBox 物理初始化继承本分支主配置
+``LocomanipulationG1EnvCfg``。
 
 场景 = 主场景 + warehouse.usd 背景（含传送带视觉模型，静态）+ packing_table
 （USD 版替换主场景隐藏的方块占位）+ 转向盘可抓道具（替换主场景隐藏的方块）。
 
-HugBox 不移植到这里：它在 Fullscene 用 UsdFileCfg + 默认 replicate_physics=True
-时，prim 路径被模板化成 ``/World/envs/env_.*/HugBox``，USD 内的 RigidBodyAPI
-不会被 replicate 到每个 env 实例，导致 ``Failed to find a rigid body when
-resolving '/World/envs/env_.*/HugBox'``。源分支靠 ``replicate_physics=False``
-+ prestartup 事件 ``setup_usd_rigid_object_physics`` 逐 env 写 USD 物理属性
-绕开，本移植不带 events。Solo 场景（无 warehouse，num_envs=1）暂时未
-暴露此问题，HugBox 仍可用。
+主配置带有 ``replicate_physics=False`` + prestartup 事件
+``setup_usd_rigid_object_physics``，用于给 CartBox1/CartBox2 逐 env 写入
+RigidBodyAPI/MassAPI/凸包碰撞等 USD 物理属性，避免纯视觉 USD 在场景解析阶段
+触发 ``Failed to find a rigid body``。
 
 坐标系沿用源分支：机器人出生 (-2.0, 11.008)，warehouse 背景 (-4.68, 14.39363)，
 所有道具坐标原样照搬，零重新校准。
@@ -81,7 +79,7 @@ class SonicFullsceneSceneCfg(_main.LocomanipulationG1SceneCfg):
 class SonicFullsceneLocomanipulationEnvCfg(_main.LocomanipulationG1EnvCfg):
     """完整仓库场景环境：主环境只换场景，其余（动作/观测/XR/teleop）不动。"""
 
-    scene: SonicFullsceneSceneCfg = SonicFullsceneSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
+    scene: SonicFullsceneSceneCfg = SonicFullsceneSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
 
     def __post_init__(self):
         """Post initialization."""

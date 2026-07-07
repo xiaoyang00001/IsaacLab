@@ -15,6 +15,7 @@ from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -22,6 +23,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
+from pxr import PhysxSchema, Sdf, UsdGeom
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
@@ -253,24 +255,83 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
 )
 
 
+def _cart_box_kinematic_from_env() -> bool:
+    role = os.environ.get("ISAACLAB_CART_BOX_ROLE", "").strip().lower()
+    kinematic = os.environ.get("ISAACLAB_CART_BOX_KINEMATIC", "").strip().lower()
+    return role == "subscriber" or kinematic in {"1", "true", "yes", "on"}
+
+
 def _make_graspable_cart_box_spawn_cfg() -> UsdFileCfg:
-    """Create the cart box USD with physics tuned for hand grasping/hugging."""
+    """Create the same warehouse cardboard box used by the source hug-box setup."""
 
     return UsdFileCfg(
-        usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
-        scale=(0.01, 0.01, 0.01),
-        mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
-        collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
-            enable_gyroscopic_forces=True,
-            solver_position_iteration_count=12,
-            solver_velocity_iteration_count=2,
-            max_depenetration_velocity=3.0,
-            linear_damping=0.05,
-            angular_damping=0.05,
-        ),
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
     )
+
+
+def setup_usd_rigid_object_physics(
+    env,
+    env_ids,
+    prim_path_exprs: list[str],
+    mass: float = 1.5,
+    linear_damping: float = 5.0,
+    angular_damping: float = 0.1,
+    kinematic: bool | None = None,
+) -> None:
+    """Apply rigid-body physics to visual-only USD objects before simulation starts."""
+
+    stage = env.sim.get_initial_stage()
+    if kinematic is None:
+        kinematic = _cart_box_kinematic_from_env()
+    root_paths: list[str] = []
+    for prim_path_expr in prim_path_exprs:
+        matches = sim_utils.find_matching_prim_paths(prim_path_expr, stage=stage)
+        if not matches:
+            raise RuntimeError(f"Could not find prims for cart-box physics setup: {prim_path_expr}")
+        root_paths.extend(matches)
+
+    rigid_props = sim_utils.RigidBodyPropertiesCfg(
+        rigid_body_enabled=True,
+        kinematic_enabled=kinematic,
+        disable_gravity=kinematic,
+        linear_damping=linear_damping,
+        angular_damping=angular_damping,
+        max_depenetration_velocity=3.0,
+        enable_gyroscopic_forces=True,
+        solver_position_iteration_count=12,
+        solver_velocity_iteration_count=2,
+    )
+    collision_props = sim_utils.CollisionPropertiesCfg(collision_enabled=True, contact_offset=0.005, rest_offset=0.0)
+    mesh_collision_props = sim_utils.ConvexHullPropertiesCfg()
+
+    for root_path in root_paths:
+        sim_utils.define_rigid_body_properties(root_path, rigid_props, stage=stage)
+        sim_utils.define_mass_properties(root_path, sim_utils.MassPropertiesCfg(mass=mass), stage=stage)
+        root_prim = stage.GetPrimAtPath(root_path)
+        physx_rigid_api = PhysxSchema.PhysxRigidBodyAPI(root_prim)
+        if not physx_rigid_api:
+            physx_rigid_api = PhysxSchema.PhysxRigidBodyAPI.Apply(root_prim)
+        _set_usd_attr(root_prim, "physxRigidBody:enableCCD", Sdf.ValueTypeNames.Bool, True)
+
+        mesh_prims = sim_utils.get_all_matching_child_prims(
+            root_path,
+            predicate=lambda prim: prim.IsA(UsdGeom.Mesh),
+            stage=stage,
+            traverse_instance_prims=True,
+        )
+        if not mesh_prims:
+            raise RuntimeError(f"No mesh prims found below cart-box root: {root_path}")
+        for mesh_prim in mesh_prims:
+            mesh_path = mesh_prim.GetPath().pathString
+            sim_utils.define_collision_properties(mesh_path, collision_props, stage=stage)
+            sim_utils.define_mesh_collision_properties(mesh_path, mesh_collision_props, stage=stage)
+
+
+def _set_usd_attr(prim, attr_name: str, value_type_name, value) -> None:
+    attr = prim.GetAttribute(attr_name)
+    if not attr:
+        attr = prim.CreateAttribute(attr_name, value_type_name)
+    attr.Set(value)
 
 
 @configclass
@@ -330,16 +391,15 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     # ------------------------------------------------------------------
-    # 从 warehouse-simple6_v48.usd 搬出的可重置道具（按 R 键回到初始摆放）。
+    # 从 warehouse-simple6_v48.usd 搬出的道具。
     # 原 prim 已在背景 USD 中停用（备份 .bak/.bak2/.bak3）。
-    # 云端 SimReady 资产是纯视觉网格，UsdFileCfg 不会补物理 API，所以这里
-    # 引用 props/ 下的 wrapper USDA：引用同款云端资产（保留材质贴图），
-    # 在根 prim 附加 RigidBodyAPI/MassAPI、网格附加碰撞 API。
+    # CartBox1/CartBox2 使用源分支同款 SM_CardBoxD_05.usd 视觉资产，
+    # 再由 prestartup 事件在根 prim 附加 RigidBodyAPI/MassAPI、网格附加凸包碰撞 API。
     # 位姿 = USD 内位姿 × 背景放置变换，与原场景摆放逐位一致。
     #
-    # MyCart 与两个箱子是 3 个独立 RigidObject（IsaacLab 不支持嵌套刚体）；
+    # Pushcart 是独立 RigidObject；两个箱子是 AssetBaseCfg 加 prestartup 刚体注入，
+    # 避免 RigidObjectCfg 在事件执行前解析不到 RigidBodyAPI。
     # 箱子 z 抬高到推车 bbox 顶面 (z_max=0.3774) 之上避免初始穿透。
-    # R 键遍历 env.scene.rigid_objects 时三者一并复位。
     # ------------------------------------------------------------------
     pushcart = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart",
@@ -353,14 +413,14 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             ),
         ),
     )
-    cart_box1 = RigidObjectCfg(
+    cart_box1 = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.5], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.5], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_graspable_cart_box_spawn_cfg(),
     )
-    cart_box2 = RigidObjectCfg(
+    cart_box2 = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/CartBox2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.82], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.82], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_graspable_cart_box_spawn_cfg(),
     )
     # worktable_tote = RigidObjectCfg(
@@ -540,6 +600,23 @@ class TerminationsCfg:
     success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
 
 
+@configclass
+class EventsCfg:
+    """USD-level setup that must run before PhysX starts."""
+
+    setup_cart_boxes = EventTerm(
+        func=setup_usd_rigid_object_physics,
+        mode="prestartup",
+        params={
+            "prim_path_exprs": ["/World/envs/env_.*/CartBox1", "/World/envs/env_.*/CartBox2"],
+            "mass": 1.5,
+            "linear_damping": 5.0,
+            "angular_damping": 0.1,
+            "kinematic": None,
+        },
+    )
+
+
 ##
 # MDP settings
 ##
@@ -556,12 +633,13 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
     """
 
     # Scene settings
-    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
+    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=False)
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands = None
     terminations: TerminationsCfg = TerminationsCfg()
+    events: EventsCfg = EventsCfg()
 
     # Unused managers
     rewards = None
