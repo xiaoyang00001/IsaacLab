@@ -251,6 +251,28 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
         ),
     },
 )
+
+
+def _make_graspable_cart_box_spawn_cfg() -> UsdFileCfg:
+    """Create the cart box USD with physics tuned for hand grasping/hugging."""
+
+    return UsdFileCfg(
+        usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
+        scale=(0.01, 0.01, 0.01),
+        mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
+        collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            enable_gyroscopic_forces=True,
+            solver_position_iteration_count=12,
+            solver_velocity_iteration_count=2,
+            max_depenetration_velocity=3.0,
+            linear_damping=0.05,
+            angular_damping=0.05,
+        ),
+    )
+
+
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """Scene configuration for locomanipulation environment with G1 robot.
@@ -334,26 +356,12 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     cart_box1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.5], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=8,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
+        spawn=_make_graspable_cart_box_spawn_cfg(),
     )
     cart_box2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox2",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.82], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=8,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
+        spawn=_make_graspable_cart_box_spawn_cfg(),
     )
     # worktable_tote = RigidObjectCfg(
     #     prim_path="{ENV_REGEX_NS}/WorkTableTote",
