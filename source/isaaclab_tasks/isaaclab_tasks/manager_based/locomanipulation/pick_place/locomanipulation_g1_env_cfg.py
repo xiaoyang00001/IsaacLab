@@ -315,15 +315,39 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # 在根 prim 附加 RigidBodyAPI/MassAPI、网格附加碰撞 API。
     # 位姿 = USD 内位姿 × 背景放置变换，与原场景摆放逐位一致。
     #
-    # my_cart_with_boxes：MyCart 与 MyCart_Box1/Box2 打包成一个刚体。
-    # 三个焊接在一起，按 R 一起回到原位（不可被机器人单独抓取；推车整辆动，
-    # 两个箱子跟车走）。scale=1.0 与原 Xform 一致（推车/纸箱源为米制）。
+    # MyCart 与两个箱子是 3 个独立 RigidObject（IsaacLab 不支持嵌套刚体）；
+    # 箱子 z 抬高到推车 bbox 顶面 (z_max=0.3774) 之上避免初始穿透。
+    # R 键遍历 env.scene.rigid_objects 时三者一并复位。
     # ------------------------------------------------------------------
-    my_cart_with_boxes = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/MyCartWithBoxes",
+    pushcart = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Pushcart",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
         spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "mycart_with_boxes_physics.usda"),
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "pushcart_physics.usda"),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=5.0,
+            ),
+        ),
+    )
+    cart_box1 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CartBox1",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.5], rot=[0.707107, 0.0, 0.0, 0.707107]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=5.0,
+            ),
+        ),
+    )
+    cart_box2 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CartBox2",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.82], rot=[0.707107, 0.0, 0.0, 0.707107]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
+            scale=(0.01, 0.01, 0.01),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=8,
                 max_depenetration_velocity=5.0,
