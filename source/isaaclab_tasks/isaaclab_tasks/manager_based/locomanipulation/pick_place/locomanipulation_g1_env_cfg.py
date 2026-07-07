@@ -260,6 +260,14 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     base and use its arms for manipulation tasks.
     """
 
+    background = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/Background",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[-4.68, 14.39363, 0], rot=[0.7071, 0.0, 0.0, 0.7071]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "warehouse-simple6_v48.usd"),
+        ),
+    )
+    
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
