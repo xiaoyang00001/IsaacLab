@@ -307,6 +307,76 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
         ),
     )
+    # ------------------------------------------------------------------
+    # 从 warehouse-simple6_v48.usd 搬出的可重置道具（按 R 键回到初始摆放）。
+    # 原 prim 已在背景 USD 中停用（SetActive(False)，备份 warehouse-simple6_v48.usd.bak）。
+    # 云端 SimReady 资产是纯视觉网格，而 UsdFileCfg 只会 modify 已有物理 API，
+    # 所以这里引用 props/ 下的 wrapper USDA：引用同一云端资产（保留材质贴图）
+    # 并在根 prim 附加 RigidBodyAPI/MassAPI、网格附加碰撞 API。
+    # 位姿 = USD 内位姿 × 背景放置变换，与原场景摆放逐位一致；
+    # scale=0.01 与背景内原 Xform 相同（资产为厘米制）。
+    # ------------------------------------------------------------------
+    cart_box1 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CartBox1",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.3774], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=5.0,
+            ),
+        ),
+    )
+    cart_box2 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CartBox2",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.68, 19.89363, 0.6974], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "box_a01_physics.usda"),
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=5.0,
+            ),
+        ),
+    )
+    worktable_tote = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/WorkTableTote",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.15, 18.19363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_a01_physics.usda"),
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=5.0,
+            ),
+        ),
+    )
+    cart2_tote1 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Cart2Tote1",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-8.94726, 20.14363, 0.3774], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=5.0,
+            ),
+        ),
+    )
+    cart2_tote2 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Cart2Tote2",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-8.94726, 20.14363, 0.6774], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=UsdFileCfg(
+            usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
+            scale=(0.01, 0.01, 0.01),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=5.0,
+            ),
+        ),
+    )
+
     # 本地仓库背景
     # background = AssetBaseCfg(
     #     prim_path="/World/envs/env_.*/Background",
