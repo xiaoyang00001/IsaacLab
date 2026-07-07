@@ -88,12 +88,12 @@ $env:ISAACLAB_G1_ROOT_ZMQ_HOST="192.168.10.230"
 | 任务 id | 场景内容 |
 |---|---|
 | `Isaac-SonicSolo-Locomanipulation-G1-v0` | 主场景 + 抱取演示物体（HugBox 台座 + 纸箱），适合轻量调试 |
-| `Isaac-SonicFullscene-Locomanipulation-G1-v0` | 主场景 + warehouse.usd 仓库背景 + USD 打包台 + 转向盘可抓道具 + HugBox |
+| `Isaac-SonicFullscene-Locomanipulation-G1-v0` | 主场景 + warehouse.usd 仓库背景 + USD 打包台 + 转向盘可抓道具 |
 
 移植原则是**只要 USD 场景资产**，源分支的 SONIC 机器人配置和 events 事件系统（HugBox 物理补齐 / 传送带滚轮驱动 / 地板摩擦补绑 / viewer 对齐）均未移植，因此：
 
-- 两个场景里机器人出生点被移到源分支的仓库通道坐标 `(-2.0, 11.008, 0.78)`（`ROBOT_SPAWN_POS`，[sonic_solo_locomanipulation_env_cfg.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/sonic_solo_locomanipulation_env_cfg.py)），warehouse/HugBox 等道具坐标与源分支原样共用；`root_position_mode="relative"` 只镜像位移增量，出生点任意可行；
-- HugBox 在出生点正前方 **+X** 1.05m（源分支布局假定机器人朝向 +X；根朝向由 UDP 源绝对拷贝，若实际朝向不同调整 `_DEMO_OBJECT_POS` / `_DEMO_STAND_POS`）；纸箱用 USD 默认质量（源分支靠 prestartup 事件调轻到 0.8kg，未移植）；
+- 两个场景里机器人出生点被移到源分支的仓库通道坐标 `(-2.0, 11.008, 0.78)`（`ROBOT_SPAWN_POS`，[sonic_solo_locomanipulation_env_cfg.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/sonic_solo_locomanipulation_env_cfg.py)），warehouse 等道具坐标与源分支原样共用；`root_position_mode="relative"` 只镜像位移增量，出生点任意可行；
+- HugBox 只在 solo 任务里，fullscene 未移植。原因：fullscene 用 `replicate_physics=True` 时 HugBox（`UsdFileCfg`）的 prim 路径被模板化为 `/World/envs/env_.*/HugBox`，USD 内的 RigidBodyAPI 不会 replicate 到每个 env 实例，触发 `Failed to find a rigid body` 错误；源分支靠 `replicate_physics=False` + prestartup 事件 `setup_usd_rigid_object_physics` 逐 env 写 USD 物理属性绕开，本移植不带 events。Solo 是单 env 且无 warehouse，目前未复现此问题；如要 Fullscene 也带 HugBox，需要把场景 `replicate_physics=False` 并移植该事件。
 - fullscene 的传送带只有视觉模型（warehouse.usd 自带），不会转动、无流水箱子；warehouse 地板碰撞体保持默认摩擦 μ=0.5（镜像路线根姿态直写，地面摩擦不影响效果）。
 
 ## 6. 控制权划分：身体镜像 vs. 手柄夹爪
