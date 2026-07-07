@@ -354,18 +354,18 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             ),
         ),
     )
-    worktable_tote = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/WorkTableTote",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.15, 18.19363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_a01_physics.usda"),
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=8,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
-    )
+    # worktable_tote = RigidObjectCfg(
+    #     prim_path="{ENV_REGEX_NS}/WorkTableTote",
+    #     init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.15, 18.19363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
+    #     spawn=UsdFileCfg(
+    #         usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_a01_physics.usda"),
+    #         scale=(0.01, 0.01, 0.01),
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+    #             solver_position_iteration_count=8,
+    #             max_depenetration_velocity=5.0,
+    #         ),
+    #     ),
+    # )
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-8.94726, 20.14363, 0.3774], rot=[0.0, 0.0, 0.0, 1.0]),
