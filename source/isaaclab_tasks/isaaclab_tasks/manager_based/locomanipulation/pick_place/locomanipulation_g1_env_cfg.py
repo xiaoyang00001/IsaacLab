@@ -369,6 +369,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.82], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_graspable_cart_box_spawn_cfg(),
     )
+    cart_box3 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CartBox3",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 1.14], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=_make_graspable_cart_box_spawn_cfg(),
+    )
+    cart_box4 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CartBox4",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 1.46], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=_make_graspable_cart_box_spawn_cfg(),
+    )
     # worktable_tote = RigidObjectCfg(
     #     prim_path="{ENV_REGEX_NS}/WorkTableTote",
     #     init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.15, 18.19363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
