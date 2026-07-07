@@ -139,11 +139,11 @@ def main() -> None:
         )
     # modify configuration
     env_cfg.terminations.time_out = None
-    if _is_g1_locomanip_task(args_cli.task):
-        # 主任务的 object 是埋在 z=-100.76 的隐藏占位方块，永远低于 minimum_height=0.5，
-        # 导致 object_dropping 终止每一步都触发 -> 每步整场重置（会把可重置道具冻在原位）。
-        # 遥操/宣传片场景用 R 键手动重置，不需要掉落自动重置。
-        env_cfg.terminations.object_dropping = None
+    # if _is_g1_locomanip_task(args_cli.task):
+    #     # 主任务的 object 是埋在 z=-100.76 的隐藏占位方块，永远低于 minimum_height=0.5，
+    #     # 导致 object_dropping 终止每一步都触发 -> 每步整场重置（会把可重置道具冻在原位）。
+    #     # 遥操/宣传片场景用 R 键手动重置，不需要掉落自动重置。
+    #     env_cfg.terminations.object_dropping = None
     if "Lift" in args_cli.task:
         # set the resampling time range to large number to avoid resampling
         env_cfg.commands.object_pose.resampling_time_range = (1.0e9, 1.0e9)
