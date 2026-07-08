@@ -372,11 +372,13 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def apply_actions(self):
         if not self._enabled or self._subscriber is None:
+            self._hold_default_body_pose()
             self._apply_controller_gripper_targets()
             return
 
         sample = self._sample()
         if sample is None:
+            self._hold_default_body_pose()
             self._apply_controller_gripper_targets()
             return
         self._last_sample = sample
@@ -533,6 +535,40 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"src_delta_xy=[{src_delta_xy[0]:.3f}, {src_delta_xy[1]:.3f}], "
             f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}]"
         )
+
+    def _hold_default_body_pose(self) -> None:
+        """Hold the robot's default body pose when no mirror data is available.
+
+        Without a live publisher, the DCMotor legs (0 stiffness / 0 damping)
+        generate zero torque and collapse under gravity. This method writes the
+        initial default joint state and root pose each physics step, keeping the
+        robot standing until the first mirror packet arrives.
+        """
+        # Root pose and velocity → back to default (don't let gravity pull the robot down)
+        self._root_pose = self._asset.data.default_root_state[:, :7].clone()
+        self._root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
+        self._target_root_pos0 = self._root_pose[:, :3].clone()
+        self._asset.write_root_link_pose_to_sim(self._root_pose)
+        self._asset.write_root_link_velocity_to_sim(self._root_velocity)
+
+        # Body joints (legs, arms, waist): revert to the init_state joint positions
+        joint_pos = self._asset.data.default_joint_pos.clone()
+        joint_vel = torch.zeros_like(joint_pos)
+        self._asset.write_joint_state_to_sim(
+            joint_pos[:, self._body_isaac_ids],
+            joint_vel[:, self._body_isaac_ids],
+            joint_ids=self._body_isaac_ids,
+        )
+        self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
+        self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
+
+        # Reset mirror-internal state so a later first-packet triggers a clean take-over
+        self._last_sample = None
+        self._source_root_pos0 = None
+        self._printed_first_sample = False
+        self._source_root_is_moving = False
+        self._stance_slot = None
+        self._anchor_xy = None
 
     def _apply_controller_gripper_targets(self) -> None:
         if not self.cfg.controller_gripper_enabled or self.action_dim == 0:
