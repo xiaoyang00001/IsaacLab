@@ -2,16 +2,28 @@
 # G1 Locomanipulation XR 遥操启动脚本（Ubuntu 版，对应 Windows 上的 isaaclab.bat 启动方式）
 #
 # 用法:
-#   ./start_teleop_g1.sh                  # 按默认配置启动
-#   ./start_teleop_g1.sh --headless ...   # 额外参数原样透传给 teleop_se3_agent.py
+#   ./start_teleop_g1.sh                         # 按默认配置启动
+#   ./start_teleop_g1.sh --headless ...           # 额外参数原样透传给 teleop_se3_agent.py
+#   ./start_teleop_g1.sh --collision-test         # 运行碰撞可视化测试（带 GUI 画面）
 #
 # 覆盖默认值（示例）:
 #   ISAACLAB_G1_ZMQ_HOST=192.168.50.100 ./start_teleop_g1.sh
 set -euo pipefail
 
 # ---------- 可按需修改的配置（均可用同名环境变量在外部覆盖） ----------
-# 默认取脚本所在目录（即 IsaacLab 仓库根）；脚本被移出仓库时可用 ISAACLAB_DIR 覆盖
-ISAACLAB_DIR="${ISAACLAB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+ISAACLAB_DIR="${ISAACLAB_DIR:-/home/nolo/xiaoyang_IssacLab/IsaacLab}"
+
+# 碰撞可视化测试模式
+_COLLISION_TEST=false
+_FILTERED_ARGS=()
+for _arg in "$@"; do
+  if [[ "$_arg" == "--collision-test" ]]; then
+    _COLLISION_TEST=true
+  else
+    _FILTERED_ARGS+=("$_arg")
+  fi
+done
+set -- "${_FILTERED_ARGS[@]}"
 
 # G1 43-DoF USD 所在的 GR00T-WholeBodyControl 仓库（import 阶段就要用，缺了直接报错）
 export GR00T_WBC_ROOT="${GR00T_WBC_ROOT:-/home/nolo/GR00T-WholeBodyControl}"
@@ -69,9 +81,17 @@ echo "[start_teleop_g1] TRANSPORT          = ${ISAACLAB_G1_TRANSPORT:-udp(默认
 echo "[start_teleop_g1] TASK / DEVICE      = $TASK / $DEVICE"
 echo "[start_teleop_g1] 本机 IP（PICO 串流填这个）: $(hostname -I | awk '{print $1}')"
 
-exec ./isaaclab.sh -p scripts/environments/teleoperation/teleop_se3_agent.py \
-  --device "$DEVICE" \
-  --task "$TASK" \
-  --teleop_device motion_controllers \
-  --enable_pinocchio \
-  "$@"
+if [[ "$_COLLISION_TEST" == true ]]; then
+  echo "[start_teleop_g1] 碰撞可视化测试模式"
+  exec ./isaaclab.sh -p scripts/environments/teleoperation/collision_g1_test.py \
+    --device "$DEVICE" \
+    --task "$TASK" \
+    "$@"
+else
+  exec ./isaaclab.sh -p scripts/environments/teleoperation/teleop_se3_agent.py \
+    --device "$DEVICE" \
+    --task "$TASK" \
+    --teleop_device motion_controllers \
+    --enable_pinocchio \
+    "$@"
+fi
