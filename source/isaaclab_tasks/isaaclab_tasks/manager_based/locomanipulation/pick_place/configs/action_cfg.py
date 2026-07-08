@@ -8,7 +8,7 @@ from dataclasses import MISSING
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions import AgileBasedLowerBodyAction, MuJoCoG1MirrorAction
+from ..mdp.actions import AgileBasedLowerBodyAction, G1GripperSyncAction, MuJoCoG1MirrorAction
 
 
 @configclass
@@ -189,3 +189,61 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
 
     stance_root_max_step: float = 0.035
     """Maximum xy correction per physics step for stance-root estimation. Non-positive disables clamping."""
+
+
+@configclass
+class G1GripperSyncActionCfg(ActionTermCfg):
+    """Configuration for local OpenXR gripper control plus peer gripper synchronization."""
+
+    class_type: type[ActionTerm] = G1GripperSyncAction
+
+    enabled: bool = True
+    """Whether this gripper action term is active."""
+
+    mode: str = "local_publish"
+    """Gripper sync mode: ``local_publish`` consumes actions and publishes, ``remote_subscribe`` receives peer state."""
+
+    robot_id: int = 1
+    """Robot ID represented by this action term."""
+
+    transport: str = "zmq"
+    """Transport for gripper synchronization. Currently only ``zmq`` is supported."""
+
+    zmq_host: str = "127.0.0.1"
+    """Publisher host for ``remote_subscribe`` mode. Ignored by ``local_publish`` mode."""
+
+    zmq_port: int = 5571
+    """ZMQ bind/connect port for the gripper stream."""
+
+    zmq_topic: str = "g1_1_gripper"
+    """ZMQ topic prefix for the gripper stream."""
+
+    timeout: float = 0.5
+    """Seconds before a remote gripper packet is considered stale. Stale packets hold the last pose."""
+
+    publish_interval_s: float = 0.0
+    """Minimum seconds between local gripper publishes. Non-positive publishes every apply step."""
+
+    controller_gripper_finger_close_angle: float = 1.0
+    """Maximum index/middle finger close angle in radians at full trigger/grip press."""
+
+    controller_gripper_thumb_yaw_angle: float = 0.5
+    """Maximum thumb base yaw offset in radians used to bias the thumb toward the active finger."""
+
+    controller_gripper_thumb_1_angle: float = 0.4
+    """Maximum thumb middle joint close angle in radians."""
+
+    controller_gripper_thumb_2_angle: float = 0.7
+    """Maximum thumb tip joint close angle in radians."""
+
+    controller_gripper_action_alpha: float = 0.65
+    """Low-pass smoothing factor applied to incoming local gripper commands."""
+
+    controller_gripper_use_soft_limits: bool = True
+    """Whether local gripper targets are clamped to soft limits instead of hard joint limits."""
+
+    write_joint_state: bool = True
+    """Whether gripper targets should also be written directly to joint state."""
+
+    debug_interval_s: float = 0.0
+    """Seconds between debug prints. Non-positive disables periodic prints."""

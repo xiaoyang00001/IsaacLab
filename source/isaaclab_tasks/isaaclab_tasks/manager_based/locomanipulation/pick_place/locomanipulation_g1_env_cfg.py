@@ -25,6 +25,7 @@ from isaaclab.utils import configclass
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+    G1GripperSyncActionCfg,
     MuJoCoG1MirrorActionCfg,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
@@ -60,6 +61,49 @@ def _load_default_network_config() -> None:
 
 
 _load_default_network_config()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _isaac_robot_env(robot_id: int, suffix: str, default: str) -> str:
+    return os.environ.get(f"ISAACLAB_G1_{robot_id}_{suffix}", os.environ.get(f"ISAACLAB_G1_{suffix}", default))
+
+
+def _isaac_robot_env_int(robot_id: int, suffix: str, default: int) -> int:
+    try:
+        return int(_isaac_robot_env(robot_id, suffix, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _robot_name(robot_id: int) -> str:
+    return f"robot_{robot_id}"
+
+
+def _robot_prim_name(robot_id: int) -> str:
+    return f"Robot_{robot_id}"
+
+
+def _peer_robot_id(robot_id: int) -> int:
+    return 2 if robot_id == 1 else 1
+
+
+ISAACLAB_LOCAL_ROBOT_ID = 2 if _env_int("ISAACLAB_LOCAL_ROBOT_ID", 1) == 2 else 1
+ISAACLAB_PEER_ROBOT_ID = _peer_robot_id(ISAACLAB_LOCAL_ROBOT_ID)
+ISAACLAB_LOCAL_ROBOT_NAME = _robot_name(ISAACLAB_LOCAL_ROBOT_ID)
+ISAACLAB_PEER_ROBOT_NAME = _robot_name(ISAACLAB_PEER_ROBOT_ID)
 
 ##
 # Scene definition
@@ -307,8 +351,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
     #     ),
     # )
-    # Humanoid robot from the GR00T sim2sim viewer asset.
-    robot: ArticulationCfg = G1_43DOF_GR00T_CFG
+    # Humanoid robots from the GR00T sim2sim viewer asset.
+    # ID 1 stays at the simulation origin; ID 2 is shifted on +Y to avoid overlap.
+    robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot_1",
+        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 0.0, 0.78)),
+    )
+    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot_2",
+        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 1.5, 0.78)),
+    )
 
     # test_box = RigidObjectCfg(
     #     prim_path="{ENV_REGEX_NS}/TestBox",
@@ -355,34 +407,104 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    # This task mirrors MuJoCo/GR00T state for root/body motion. The same action term
-    # also consumes motion-controller gripper inputs; do not add IK or locomotion
-    # action terms here, otherwise they will overwrite the mirrored robot state.
-    mujoco_g1_mirror = MuJoCoG1MirrorActionCfg(
-        asset_name="robot",
-        transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "udp"),
-        zmq_host=os.environ.get("ISAACLAB_G1_ZMQ_HOST", "192.168.10.230"),
-        root_zmq_host=os.environ.get(
-            "ISAACLAB_G1_ROOT_ZMQ_HOST",
-            os.environ.get("ISAACLAB_G1_ZMQ_HOST", "192.168.10.230"),
-        ),
-        udp_bind_host=os.environ.get("ISAACLAB_G1_UDP_BIND_HOST", "0.0.0.0"),
-        udp_port=int(os.environ.get("ISAACLAB_G1_UDP_PORT", "5557")),
-        udp_topic=os.environ.get("ISAACLAB_G1_UDP_TOPIC", "g1_debug"),
-        udp_rcvbuf=int(os.environ.get("ISAACLAB_G1_UDP_RCVBUF", "262144")),
-        root_udp_bind_host=os.environ.get("ISAACLAB_G1_ROOT_UDP_BIND_HOST", "0.0.0.0"),
-        root_udp_port=int(os.environ.get("ISAACLAB_G1_ROOT_UDP_PORT", "5558")),
-        root_udp_topic=os.environ.get("ISAACLAB_G1_ROOT_UDP_TOPIC", "g1_root"),
-        root_udp_rcvbuf=int(os.environ.get("ISAACLAB_G1_ROOT_UDP_RCVBUF", "262144")),
+    # Body/root streams are mirrored independently for both robot IDs.
+    mujoco_g1_mirror_1 = MuJoCoG1MirrorActionCfg(
+        asset_name="robot_1",
+        transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
+        zmq_host=_isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230"),
+        zmq_port=_isaac_robot_env_int(1, "ZMQ_PORT", 5557),
+        zmq_topic=_isaac_robot_env(1, "ZMQ_TOPIC", "g1_1_debug"),
+        root_zmq_host=_isaac_robot_env(1, "ROOT_ZMQ_HOST", _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
+        root_zmq_port=_isaac_robot_env_int(1, "ROOT_ZMQ_PORT", 5558),
+        root_zmq_topic=_isaac_robot_env(1, "ROOT_ZMQ_TOPIC", "g1_1_root"),
+        udp_bind_host=_isaac_robot_env(1, "UDP_BIND_HOST", "0.0.0.0"),
+        udp_port=_isaac_robot_env_int(1, "UDP_PORT", 5557),
+        udp_topic=_isaac_robot_env(1, "UDP_TOPIC", "g1_1_debug"),
+        udp_rcvbuf=_isaac_robot_env_int(1, "UDP_RCVBUF", 262144),
+        root_udp_bind_host=_isaac_robot_env(1, "ROOT_UDP_BIND_HOST", "0.0.0.0"),
+        root_udp_port=_isaac_robot_env_int(1, "ROOT_UDP_PORT", 5558),
+        root_udp_topic=_isaac_robot_env(1, "ROOT_UDP_TOPIC", "g1_1_root"),
+        root_udp_rcvbuf=_isaac_robot_env_int(1, "ROOT_UDP_RCVBUF", 262144),
         root_motion_mode="source",
         root_zmq_required=True,
         root_position_mode="relative",
+        mirror_hands=False,
+        controller_gripper_enabled=False,
+    )
+    mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
+        asset_name="robot_2",
+        transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
+        zmq_host=_isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231"),
+        zmq_port=_isaac_robot_env_int(2, "ZMQ_PORT", 5567),
+        zmq_topic=_isaac_robot_env(2, "ZMQ_TOPIC", "g1_2_debug"),
+        root_zmq_host=_isaac_robot_env(2, "ROOT_ZMQ_HOST", _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
+        root_zmq_port=_isaac_robot_env_int(2, "ROOT_ZMQ_PORT", 5568),
+        root_zmq_topic=_isaac_robot_env(2, "ROOT_ZMQ_TOPIC", "g1_2_root"),
+        udp_bind_host=_isaac_robot_env(2, "UDP_BIND_HOST", "0.0.0.0"),
+        udp_port=_isaac_robot_env_int(2, "UDP_PORT", 5567),
+        udp_topic=_isaac_robot_env(2, "UDP_TOPIC", "g1_2_debug"),
+        udp_rcvbuf=_isaac_robot_env_int(2, "UDP_RCVBUF", 262144),
+        root_udp_bind_host=_isaac_robot_env(2, "ROOT_UDP_BIND_HOST", "0.0.0.0"),
+        root_udp_port=_isaac_robot_env_int(2, "ROOT_UDP_PORT", 5568),
+        root_udp_topic=_isaac_robot_env(2, "ROOT_UDP_TOPIC", "g1_2_root"),
+        root_udp_rcvbuf=_isaac_robot_env_int(2, "ROOT_UDP_RCVBUF", 262144),
+        root_motion_mode="source",
+        root_zmq_required=True,
+        root_position_mode="relative",
+        mirror_hands=False,
+        controller_gripper_enabled=False,
+    )
+    local_gripper = G1GripperSyncActionCfg(
+        asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
+        mode="local_publish",
+        robot_id=ISAACLAB_LOCAL_ROBOT_ID,
+        transport="zmq",
+        zmq_host=_isaac_robot_env(
+            ISAACLAB_LOCAL_ROBOT_ID,
+            "GRIPPER_ZMQ_HOST",
+            _isaac_robot_env(ISAACLAB_LOCAL_ROBOT_ID, "ZMQ_HOST", "127.0.0.1"),
+        ),
+        zmq_port=_isaac_robot_env_int(
+            ISAACLAB_LOCAL_ROBOT_ID,
+            "GRIPPER_ZMQ_PORT",
+            5571 if ISAACLAB_LOCAL_ROBOT_ID == 1 else 5572,
+        ),
+        zmq_topic=_isaac_robot_env(
+            ISAACLAB_LOCAL_ROBOT_ID,
+            "GRIPPER_ZMQ_TOPIC",
+            f"g1_{ISAACLAB_LOCAL_ROBOT_ID}_gripper",
+        ),
+        timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
         controller_gripper_finger_close_angle=1.8,
         controller_gripper_thumb_1_angle=1.1,
         controller_gripper_thumb_2_angle=1.8,
         controller_gripper_action_alpha=1.0,
         controller_gripper_use_soft_limits=False,
-        controller_gripper_write_joint_state=True,
+        write_joint_state=True,
+    )
+    remote_gripper = G1GripperSyncActionCfg(
+        asset_name=ISAACLAB_PEER_ROBOT_NAME,
+        mode="remote_subscribe",
+        robot_id=ISAACLAB_PEER_ROBOT_ID,
+        transport="zmq",
+        zmq_host=_isaac_robot_env(
+            ISAACLAB_PEER_ROBOT_ID,
+            "GRIPPER_ZMQ_HOST",
+            _isaac_robot_env(ISAACLAB_PEER_ROBOT_ID, "ZMQ_HOST", "127.0.0.1"),
+        ),
+        zmq_port=_isaac_robot_env_int(
+            ISAACLAB_PEER_ROBOT_ID,
+            "GRIPPER_ZMQ_PORT",
+            5571 if ISAACLAB_PEER_ROBOT_ID == 1 else 5572,
+        ),
+        zmq_topic=_isaac_robot_env(
+            ISAACLAB_PEER_ROBOT_ID,
+            "GRIPPER_ZMQ_TOPIC",
+            f"g1_{ISAACLAB_PEER_ROBOT_ID}_gripper",
+        ),
+        timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
+        controller_gripper_use_soft_limits=False,
+        write_joint_state=True,
     )
 
 
@@ -399,24 +521,46 @@ class ObservationsCfg:
         actions = ObsTerm(func=manip_mdp.last_action)
         robot_joint_pos = ObsTerm(
             func=base_mdp.joint_pos,
-            params={"asset_cfg": SceneEntityCfg("robot")},
+            params={"asset_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
         )
-        robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("robot")})
-        robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("robot")})
+        robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)})
+        robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)})
         object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
         object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
-        robot_links_state = ObsTerm(func=manip_mdp.get_all_robot_link_state)
+        robot_links_state = ObsTerm(
+            func=manip_mdp.get_all_robot_link_state,
+            params={"robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
+        )
 
-        left_eef_pos = ObsTerm(func=manip_mdp.get_eef_pos, params={"link_name": "left_wrist_yaw_link"})
-        left_eef_quat = ObsTerm(func=manip_mdp.get_eef_quat, params={"link_name": "left_wrist_yaw_link"})
-        right_eef_pos = ObsTerm(func=manip_mdp.get_eef_pos, params={"link_name": "right_wrist_yaw_link"})
-        right_eef_quat = ObsTerm(func=manip_mdp.get_eef_quat, params={"link_name": "right_wrist_yaw_link"})
+        left_eef_pos = ObsTerm(
+            func=manip_mdp.get_eef_pos,
+            params={"link_name": "left_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
+        )
+        left_eef_quat = ObsTerm(
+            func=manip_mdp.get_eef_quat,
+            params={"link_name": "left_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
+        )
+        right_eef_pos = ObsTerm(
+            func=manip_mdp.get_eef_pos,
+            params={"link_name": "right_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
+        )
+        right_eef_quat = ObsTerm(
+            func=manip_mdp.get_eef_quat,
+            params={"link_name": "right_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
+        )
 
-        hand_joint_state = ObsTerm(func=manip_mdp.get_robot_joint_state, params={"joint_names": [".*_hand.*"]})
+        hand_joint_state = ObsTerm(
+            func=manip_mdp.get_robot_joint_state,
+            params={"joint_names": [".*_hand.*"], "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
+        )
 
         object = ObsTerm(
             func=manip_mdp.object_obs,
-            params={"left_eef_link_name": "left_wrist_yaw_link", "right_eef_link_name": "right_wrist_yaw_link"},
+            params={
+                "left_eef_link_name": "left_wrist_yaw_link",
+                "right_eef_link_name": "right_wrist_yaw_link",
+                "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME,
+            },
         )
 
         def __post_init__(self):
@@ -436,7 +580,10 @@ class TerminationsCfg:
         func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
     )
 
-    success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
+    success = DoneTerm(
+        func=manip_mdp.task_done_pick_place,
+        params={"task_link_name": "right_wrist_yaw_link", "robot_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
+    )
 
 
 ##
@@ -491,8 +638,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_heap_capacity = 2**24
         self.sim.physx.gpu_temp_buffer_capacity = 2**22
 
-        self.xr.anchor_prim_path = "/World/envs/env_0/Robot/head_link"
-        self.xr.anchor_rotation_prim_path = "/World/envs/env_0/Robot/pelvis"
+        local_robot_prim = _robot_prim_name(ISAACLAB_LOCAL_ROBOT_ID)
+        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
+        self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
         self.xr.fixed_anchor_height = False
         # Anchor XR to the robot head position, but use the pelvis as the stable robot yaw reference.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
