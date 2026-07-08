@@ -16,8 +16,6 @@ from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import ObservationGroupCfg as ObsGroup
-from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -543,65 +541,11 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Observation specifications for the MDP.
-    This class is required by the environment configuration but not used in this implementation
+    """Empty observation manager config.
+
+    The scene is used for live robot synchronization, not policy rollout or data recording,
+    so no ``policy`` observation group is registered.
     """
-
-    @configclass
-    class PolicyCfg(ObsGroup):
-        """Observations for policy group with state values."""
-
-        actions = ObsTerm(func=manip_mdp.last_action)
-        robot_joint_pos = ObsTerm(
-            func=base_mdp.joint_pos,
-            params={"asset_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
-        )
-        robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)})
-        robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)})
-        object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
-        object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
-        robot_links_state = ObsTerm(
-            func=manip_mdp.get_all_robot_link_state,
-            params={"robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
-        )
-
-        left_eef_pos = ObsTerm(
-            func=manip_mdp.get_eef_pos,
-            params={"link_name": "left_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
-        )
-        left_eef_quat = ObsTerm(
-            func=manip_mdp.get_eef_quat,
-            params={"link_name": "left_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
-        )
-        right_eef_pos = ObsTerm(
-            func=manip_mdp.get_eef_pos,
-            params={"link_name": "right_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
-        )
-        right_eef_quat = ObsTerm(
-            func=manip_mdp.get_eef_quat,
-            params={"link_name": "right_wrist_yaw_link", "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
-        )
-
-        hand_joint_state = ObsTerm(
-            func=manip_mdp.get_robot_joint_state,
-            params={"joint_names": [".*_hand.*"], "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME},
-        )
-
-        object = ObsTerm(
-            func=manip_mdp.object_obs,
-            params={
-                "left_eef_link_name": "left_wrist_yaw_link",
-                "right_eef_link_name": "right_wrist_yaw_link",
-                "robot_asset_name": ISAACLAB_LOCAL_ROBOT_NAME,
-            },
-        )
-
-        def __post_init__(self):
-            self.enable_corruption = False
-            self.concatenate_terms = False
-
-    # observation groups
-    policy: PolicyCfg = PolicyCfg()
 
 @configclass
 class TerminationsCfg:
