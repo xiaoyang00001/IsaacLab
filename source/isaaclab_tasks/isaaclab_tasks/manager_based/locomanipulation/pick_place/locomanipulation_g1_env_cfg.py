@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+import re
 from pathlib import Path
 
 import isaaclab.envs.mdp as base_mdp
@@ -32,6 +33,18 @@ from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_md
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 
 
+_ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def _expand_env_value(value: str) -> str:
+    for _ in range(10):
+        expanded = _ENV_REF_RE.sub(lambda match: os.environ.get(match.group(1) or match.group(2), ""), value)
+        if expanded == value:
+            return expanded
+        value = expanded
+    return value
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -47,7 +60,7 @@ def _load_env_file(path: Path) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         if key:
-            os.environ.setdefault(key, value)
+            os.environ.setdefault(key, _expand_env_value(value))
 
 
 def _load_default_network_config() -> None:
@@ -86,6 +99,20 @@ def _isaac_robot_env_int(robot_id: int, suffix: str, default: int) -> int:
         return int(_isaac_robot_env(robot_id, suffix, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _ubuntu_sender_ip(robot_id: int, default: str) -> str:
+    return os.environ.get(
+        f"UBUNTU_ROBOT_{robot_id}_SENDER_IP",
+        os.environ.get(f"G1_{robot_id}_SENDER_IP", default),
+    )
+
+
+def _windows_isaaclab_ip(robot_id: int, default: str) -> str:
+    return os.environ.get(
+        f"WINDOWS_ROBOT_{robot_id}_ISAACLAB_IP",
+        os.environ.get(f"ISAACLAB_G1_{robot_id}_HOST_IP", default),
+    )
 
 
 def _robot_name(robot_id: int) -> str:
@@ -411,10 +438,13 @@ class ActionsCfg:
     mujoco_g1_mirror_1 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_1",
         transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
-        zmq_host=_isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230"),
+        zmq_host=_ubuntu_sender_ip(1, _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
         zmq_port=_isaac_robot_env_int(1, "ZMQ_PORT", 5557),
         zmq_topic=_isaac_robot_env(1, "ZMQ_TOPIC", "g1_1_debug"),
-        root_zmq_host=_isaac_robot_env(1, "ROOT_ZMQ_HOST", _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
+        root_zmq_host=_ubuntu_sender_ip(
+            1,
+            _isaac_robot_env(1, "ROOT_ZMQ_HOST", _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
+        ),
         root_zmq_port=_isaac_robot_env_int(1, "ROOT_ZMQ_PORT", 5558),
         root_zmq_topic=_isaac_robot_env(1, "ROOT_ZMQ_TOPIC", "g1_1_root"),
         udp_bind_host=_isaac_robot_env(1, "UDP_BIND_HOST", "0.0.0.0"),
@@ -434,10 +464,13 @@ class ActionsCfg:
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_2",
         transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
-        zmq_host=_isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231"),
+        zmq_host=_ubuntu_sender_ip(2, _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
         zmq_port=_isaac_robot_env_int(2, "ZMQ_PORT", 5567),
         zmq_topic=_isaac_robot_env(2, "ZMQ_TOPIC", "g1_2_debug"),
-        root_zmq_host=_isaac_robot_env(2, "ROOT_ZMQ_HOST", _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
+        root_zmq_host=_ubuntu_sender_ip(
+            2,
+            _isaac_robot_env(2, "ROOT_ZMQ_HOST", _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
+        ),
         root_zmq_port=_isaac_robot_env_int(2, "ROOT_ZMQ_PORT", 5568),
         root_zmq_topic=_isaac_robot_env(2, "ROOT_ZMQ_TOPIC", "g1_2_root"),
         udp_bind_host=_isaac_robot_env(2, "UDP_BIND_HOST", "0.0.0.0"),
@@ -462,7 +495,7 @@ class ActionsCfg:
         zmq_host=_isaac_robot_env(
             ISAACLAB_LOCAL_ROBOT_ID,
             "GRIPPER_ZMQ_HOST",
-            _isaac_robot_env(ISAACLAB_LOCAL_ROBOT_ID, "ZMQ_HOST", "127.0.0.1"),
+            _windows_isaaclab_ip(ISAACLAB_LOCAL_ROBOT_ID, "127.0.0.1"),
         ),
         zmq_port=_isaac_robot_env_int(
             ISAACLAB_LOCAL_ROBOT_ID,
@@ -490,7 +523,7 @@ class ActionsCfg:
         zmq_host=_isaac_robot_env(
             ISAACLAB_PEER_ROBOT_ID,
             "GRIPPER_ZMQ_HOST",
-            _isaac_robot_env(ISAACLAB_PEER_ROBOT_ID, "ZMQ_HOST", "127.0.0.1"),
+            _windows_isaaclab_ip(ISAACLAB_PEER_ROBOT_ID, "127.0.0.1"),
         ),
         zmq_port=_isaac_robot_env_int(
             ISAACLAB_PEER_ROBOT_ID,
