@@ -20,6 +20,8 @@ from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
 
+from .grasp_attach import GraspAttachController
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -302,6 +304,16 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._last_gripper_debug_time = 0.0
         self._last_mirror_hands_from_mujoco = False
 
+        self._grasp_attach: GraspAttachController | None = None
+        if cfg.controller_gripper_enabled and cfg.grasp_attach_enabled:
+            if self.num_envs == 1:
+                try:
+                    self._grasp_attach = GraspAttachController(env, self._asset, cfg)
+                except Exception as exc:
+                    print(f"[WARN] Grasp attach disabled: {exc}")
+            else:
+                print("[WARN] Grasp attach only supports num_envs=1; disabled.")
+
         if self._enabled:
             try:
                 if self._transport == "udp":
@@ -570,6 +582,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             joint_vel = torch.zeros_like(target)
             self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
         self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
+        if self._grasp_attach is not None:
+            self._grasp_attach.update(self._processed_actions)
         self._print_gripper_debug(unclamped_target, target, limits)
 
     def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:

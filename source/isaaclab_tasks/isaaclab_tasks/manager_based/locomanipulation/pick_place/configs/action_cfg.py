@@ -189,3 +189,29 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
 
     stance_root_max_step: float = 0.035
     """Maximum xy correction per physics step for stance-root estimation. Non-positive disables clamping."""
+
+    grasp_attach_enabled: bool = False
+    """Whether closing a gripper attaches the nearest graspable rigid object to that palm.
+
+    Mirrored joint states bypass contact resolution, so physical grasps cannot hold. When
+    enabled, a closed gripper near a graspable object locks the object to the palm frame
+    (pose written every step, same approach as the body mirror) until the gripper reopens.
+    """
+
+    grasp_attach_asset_names: list[str] = []
+    """Scene rigid-object names that can be grasped via attachment (e.g. ``["cart_box1"]``)."""
+
+    grasp_attach_palm_body_names: list[str] = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+    """Robot body names used as the [left, right] palm frames for attachment."""
+
+    grasp_attach_close_threshold: float = 0.6
+    """Smoothed gripper close command (0-1) at or above which an attach is attempted."""
+
+    grasp_attach_release_threshold: float = 0.35
+    """Smoothed gripper close command (0-1) at or below which an attached object is released."""
+
+    grasp_attach_distance: float = 0.45
+    """Maximum palm-to-object-center distance in meters for an attach to trigger."""
+
+    grasp_attach_debug: bool = True
+    """Whether to print attach/release events."""

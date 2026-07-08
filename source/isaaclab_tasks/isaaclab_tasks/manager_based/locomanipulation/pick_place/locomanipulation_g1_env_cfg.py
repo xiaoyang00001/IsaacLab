@@ -263,7 +263,8 @@ def _make_graspable_cart_box_spawn_cfg() -> UsdFileCfg:
             rigid_body_enabled=True,
             kinematic_enabled=False,
             disable_gravity=False,
-            linear_damping=5.0,
+            # 阻尼过高（原 5.0）会让释放后的箱子像羽毛一样飘落；叠放稳定靠 12 次求解迭代保证。
+            linear_damping=0.5,
             angular_damping=0.1,
             max_depenetration_velocity=3.0,
             enable_gyroscopic_forces=True,
@@ -500,7 +501,12 @@ class ActionsCfg:
         controller_gripper_thumb_2_angle=1.8,
         controller_gripper_action_alpha=1.0,
         controller_gripper_use_soft_limits=False,
-        controller_gripper_write_joint_state=True,
+        # 手指保持 PD 目标控制（直写关节状态会绕过接触解算，导致手指穿模、箱子被挤出）。
+        controller_gripper_write_joint_state=False,
+        # 镜像路线下物理夹持无法成立，箱子搬运走附着路线：夹爪闭合且手腕贴近箱子时
+        # 将箱子锁定到手掌坐标系跟随，松开释放。
+        grasp_attach_enabled=True,
+        grasp_attach_asset_names=["cart_box1", "cart_box2", "cart_box3", "cart_box4"],
     )
 
 

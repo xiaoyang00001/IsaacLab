@@ -113,7 +113,16 @@ $env:ISAACLAB_G1_ROOT_ZMQ_HOST="192.168.10.230"
 | `controller_gripper_thumb_1_angle` / `_thumb_2_angle` | `1.1` / `1.8` | 拇指两个关节的全握角度上限 |
 | `controller_gripper_action_alpha` | `1.0` | 低通平滑系数，`1.0` 表示不做平滑，手柄输入直接生效 |
 | `controller_gripper_use_soft_limits` | `False` | 用硬关节限位而不是软限位夹紧目标角，避免限位过紧夹不拢 |
-| `controller_gripper_write_joint_state` | `True` | 除了下发位置目标外，还直接写关节状态，避免高刚度 PD 追不上目标导致「看起来没完全闭合」 |
+| `controller_gripper_write_joint_state` | `False` | 手指保持 PD 位置目标控制。曾为解决「夹爪不能完全闭合」改成 `True` 直写关节状态，但直写会绕过 PhysX 接触解算——手指直接插进箱子（穿模），箱子被去穿透修正挤出手掌（抓不住），已改回 `False`。「不能完全闭合」其实是手指顶住物体表面的正确物理行为 |
+
+### 6.1 抓取附着（grasp attach）：镜像路线下的箱子搬运
+
+镜像路线下机器人根节点与关节状态每步被直写，PhysX 无法通过接触力形成稳定夹持——即便手指改回 PD 控制，手臂仍是运动学镜像，双臂环抱 0.6×0.4×0.32 m 的大纸箱在物理上也不成立。因此 `cart_box1`–`cart_box4` 的搬运走**附着（attach）**路线（遥操作示教采集的常见做法），实现在 [grasp_attach.py](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/grasp_attach.py)：
+
+- **附着**：某只手的平滑夹爪指令 ≥ `grasp_attach_close_threshold`（默认 0.6）且手腕（`left/right_wrist_yaw_link`）到某个可抓箱子中心距离 < `grasp_attach_distance`（默认 0.45 m）时，记录箱子相对手掌的位姿，此后每个仿真步把箱子根位姿直写为 手掌位姿 × 相对位姿（与身体镜像同一套路），同时清零其速度。
+- **释放**：该手夹爪指令 ≤ `grasp_attach_release_threshold`（默认 0.35）时释放，箱子恢复自由动力学自然下落。
+- 每个箱子同时只能被一只手附着，双手可各拿一箱；附着/释放事件默认打印 `[INFO] Grasp attach: ...`（`grasp_attach_debug`）。
+- 可抓清单由 env cfg 的 `grasp_attach_asset_names=["cart_box1", ..., "cart_box4"]` 指定，仅支持 `num_envs=1`（与镜像前提一致）。
 
 ## 7. XR 第一人称视角与朝向校准
 
