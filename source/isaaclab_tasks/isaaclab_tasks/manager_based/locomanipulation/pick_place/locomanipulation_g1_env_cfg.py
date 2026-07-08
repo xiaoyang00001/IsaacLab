@@ -311,7 +311,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, -100.76], rot=[1, 0, 0, 0]),
+        # PackingTable (z=-1000.66, 高 0.08) 顶面 = -1000.62，物体半高 0.06 → 底面贴桌面的中心 z
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, -1000.56], rot=[1, 0, 0, 0]),
         spawn=sim_utils.CuboidCfg(
             size=(0.14, 0.08, 0.12),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -550,9 +551,12 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=locomanip_mdp.time_out, time_out=True)
 
-    object_dropping = DoneTerm(
-        func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
-    )
+    # XR teleop 场景使用下陷布局（PackingTable z=-1000.66），
+    # 绝对世界系 minimum_height=0.5 会导致 object(z=-100.76) 每步触发复位。
+    # teleop 不需要训练式 episode 终止，因此移除 object_dropping。
+    # object_dropping = DoneTerm(
+    #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
+    # )
 
     success = DoneTerm(func=manip_mdp.task_done_pick_place, params={"task_link_name": "right_wrist_yaw_link"})
 
