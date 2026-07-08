@@ -89,6 +89,7 @@ def _find_gr00t_g1_43dof_usd() -> str:
         ):
             usd_path = root / "gear_sonic/data/robots/g1" / usd_name
             if usd_path.exists():
+                print(f"[locomanipulation_g1_env_cfg] G1 43-DoF USD: {usd_path.resolve()}")
                 return str(usd_path.resolve())
     searched = "\n  ".join(str(path) for path in candidates)
     raise FileNotFoundError(
@@ -102,7 +103,6 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
     spawn=UsdFileCfg(
         usd_path=_find_gr00t_g1_43dof_usd(),
         activate_contact_sensors=False,
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             retain_accelerations=False,
@@ -459,6 +459,13 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+    )
+
+    # 方向光制造明暗面，避免 DomeLight 均匀照明导致的"塑料感"
+    sun = AssetBaseCfg(
+        prim_path="/World/sunLight",
+        init_state=AssetBaseCfg.InitialStateCfg(rot=(0.9238795, 0.3826834, 0.0, 0.0)),
+        spawn=sim_utils.DistantLightCfg(color=(1.0, 0.98, 0.95), intensity=3000.0, angle=0.53),
     )
 
 
