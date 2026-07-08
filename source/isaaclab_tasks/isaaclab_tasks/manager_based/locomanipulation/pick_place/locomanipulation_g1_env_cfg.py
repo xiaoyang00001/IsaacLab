@@ -356,22 +356,23 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     cart_box1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.5], rot=[0.0, 0.0, 0.0, 1.0]),
+        # 推车顶面 z≈0.377，箱子半高 0.0745 → 中心 z
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.45], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_graspable_cart_box_spawn_cfg(),
     )
     cart_box2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.82], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.60], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_graspable_cart_box_spawn_cfg(),
     )
     cart_box3 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox3",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 1.14], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.75], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_graspable_cart_box_spawn_cfg(),
     )
     cart_box4 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox4",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 1.46], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.90], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_graspable_cart_box_spawn_cfg(),
     )
     # worktable_tote = RigidObjectCfg(
