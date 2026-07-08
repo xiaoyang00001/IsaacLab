@@ -29,7 +29,8 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
-
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
+ZMQ_SYNC_ROLE = "publisher"
 
 _ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -386,35 +387,24 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         prim_path="/World/envs/env_.*/Robot_2",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 1.5, 0.78)),
     )
+    test_box = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/TestBox",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=[0.78886, 1.17033, 0.845],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                kinematic_enabled=False,
+                solver_position_iteration_count=8,
+                max_depenetration_velocity=10.0,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+        ),
+    )
 
-    # test_box = RigidObjectCfg(
-    #     prim_path="{ENV_REGEX_NS}/TestBox",
-    #     init_state=RigidObjectCfg.InitialStateCfg(
-    #         pos=[0.78886, 1.17033, 0.845],
-    #         rot=[1.0, 0.0, 0.0, 0.0],
-    #     ),
-    #     spawn=UsdFileCfg(
-    #         usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-    #             solver_position_iteration_count=8,
-    #             max_depenetration_velocity=10.0,
-    #         )
-    #     ),
-    # )
-    # test_box1 = RigidObjectCfg(
-    #     prim_path="{ENV_REGEX_NS}/TestBox1",
-    #     init_state=RigidObjectCfg.InitialStateCfg(
-    #         pos=[0.42787, 1.67696, 0.845],
-    #         rot=[1.0, 0.0, 0.0, 0.0],
-    #     ),
-    #     spawn=UsdFileCfg(
-    #         usd_path=f"{ISAAC_NUCLEUS_DIR}/Environments/Simple_Warehouse/Props/SM_CardBoxD_05.usd",
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-    #             solver_position_iteration_count=8,
-    #             max_depenetration_velocity=10.0,
-    #         )
-    #     ),
-    # )
     # Ground plane
     ground = AssetBaseCfg(
         prim_path="/World/GroundPlane",
@@ -537,6 +527,7 @@ class ActionsCfg:
         controller_gripper_use_soft_limits=False,
         write_joint_state=True,
     )
+    object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE,endpoint="tcp://192.168.10.46:15555")
 
 
 @configclass
