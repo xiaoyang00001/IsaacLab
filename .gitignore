@@ -13,6 +13,8 @@
 **/*.usda
 **/*.usdc
 **/*.usdz
+# 例外：pick_place 场景的手写物理 wrapper（小文本 usda，场景必需，需随源码入库）
+!source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/props/*.usda
 
 # Python
 .DS_Store
