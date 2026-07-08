@@ -253,6 +253,35 @@ class _UdpLatestSubscriber:
         return latest if latest is not None else self.last_msg
 
 
+class _ZmqLatestPublisher:
+    def __init__(self, port: int, topic: str):
+        import zmq
+
+        self.zmq = zmq
+        self.topic = topic.encode("utf-8")
+        self.ctx = zmq.Context()
+        self.socket = self.ctx.socket(zmq.PUB)
+        self.socket.setsockopt(zmq.SNDHWM, 5)
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.endpoint = f"tcp://*:{int(port)}"
+        self.description = f"{self.endpoint}/{topic}"
+        self.socket.bind(self.endpoint)
+        print(f"[INFO] G1 gripper sync ZMQ publishing: {self.description}")
+
+    def close(self) -> None:
+        self.socket.close(0)
+        self.ctx.term()
+
+    def publish(self, payload: dict[str, Any]) -> None:
+        import msgpack
+
+        packed = msgpack.packb(payload, use_bin_type=True)
+        try:
+            self.socket.send_multipart([self.topic, packed], flags=self.zmq.NOBLOCK)
+        except self.zmq.Again:
+            pass
+
+
 class MuJoCoG1MirrorAction(ActionTerm):
     """Mirror MuJoCo/SONIC G1 root and joint state into the Isaac Lab robot.
 
@@ -932,6 +961,245 @@ class MuJoCoG1MirrorAction(ActionTerm):
             else:
                 self._foot_min_z = 0.0
         return self._foot_min_z
+
+
+class G1GripperSyncAction(ActionTerm):
+    """Apply local OpenXR gripper commands or mirror a peer gripper stream."""
+
+    cfg: "G1GripperSyncActionCfg"
+
+    def __init__(self, cfg: "G1GripperSyncActionCfg", env: "ManagerBasedEnv"):
+        self._mode = str(cfg.mode).lower()
+        self._transport = str(cfg.transport).lower()
+        self._enabled = bool(cfg.enabled)
+        self._action_dim = 4 if self._mode == "local_publish" and self._enabled else 0
+        super().__init__(cfg, env)
+        self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._export_IO_descriptor = False
+
+        self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
+        self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
+        self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
+        self._publisher: _ZmqLatestPublisher | None = None
+        self._subscriber: _ZmqLatestSubscriber | None = None
+        self._sequence = 0
+        self._last_publish_time = 0.0
+        self._last_debug_time = 0.0
+        self._warned_unavailable = False
+        self._warned_stale = False
+        self._warned_bad_payload = False
+
+        if self.num_envs != 1:
+            self._enabled = False
+            print("[WARN] G1 gripper sync disabled because it only supports num_envs=1.")
+            return
+        if len(self._left_hand_ids) != len(LEFT_HAND_JOINT_NAMES) or len(self._right_hand_ids) != len(
+            RIGHT_HAND_JOINT_NAMES
+        ):
+            self._enabled = False
+            print(
+                "[WARN] G1 gripper sync disabled; "
+                f"left_hand_joints={len(self._left_hand_ids)}, right_hand_joints={len(self._right_hand_ids)}"
+            )
+            return
+        if self._transport != "zmq":
+            self._enabled = False
+            print(f"[WARN] G1 gripper sync disabled; unsupported transport={cfg.transport!r}.")
+            return
+
+        try:
+            if self._mode == "local_publish":
+                self._publisher = _ZmqLatestPublisher(cfg.zmq_port, cfg.zmq_topic)
+            elif self._mode == "remote_subscribe":
+                self._subscriber = _ZmqLatestSubscriber(cfg.zmq_host, cfg.zmq_port, cfg.zmq_topic, cfg.timeout)
+            else:
+                self._enabled = False
+                print(f"[WARN] G1 gripper sync disabled; unsupported mode={cfg.mode!r}.")
+        except Exception as exc:
+            self._enabled = False
+            print(f"[WARN] G1 gripper sync disabled; failed to create ZMQ endpoint: {exc}")
+
+    def __del__(self):
+        for endpoint in (getattr(self, "_publisher", None), getattr(self, "_subscriber", None)):
+            if endpoint is not None:
+                try:
+                    endpoint.close()
+                except Exception:
+                    pass
+        try:
+            super().__del__()
+        except Exception:
+            pass
+
+    @property
+    def action_dim(self) -> int:
+        return self._action_dim
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        if self.action_dim == 0:
+            self._raw_actions = actions
+            self._processed_actions = actions
+            return
+        self._raw_actions = actions
+        target_actions = torch.clamp(actions, 0.0, 1.0)
+        alpha = min(max(float(self.cfg.controller_gripper_action_alpha), 0.0), 1.0)
+        self._processed_actions = self._processed_actions + alpha * (target_actions - self._processed_actions)
+
+    def apply_actions(self):
+        if not self._enabled:
+            return
+        if self._mode == "local_publish":
+            self._apply_local_actions()
+        elif self._mode == "remote_subscribe":
+            self._apply_remote_state()
+
+    def _apply_local_actions(self) -> None:
+        target = self._compose_target_from_actions(self._processed_actions)
+        target = self._clamp_target(target)
+        self._write_hand_target(target)
+        self._publish_target(target)
+        self._print_debug("local", target)
+
+    def _apply_remote_state(self) -> None:
+        if self._subscriber is None:
+            return
+        msg = self._subscriber.poll_latest()
+        if msg is None:
+            return
+        if not self._subscriber.fresh and not self._warned_stale:
+            print("[WARN] G1 gripper sync stream is stale; holding last gripper pose.")
+            self._warned_stale = True
+        target = self._target_from_payload(msg)
+        if target is None:
+            return
+        target = self._clamp_target(target)
+        self._write_hand_target(target)
+        self._print_debug("remote", target)
+
+    def _compose_target_from_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        left_target = self._compose_hand_target(
+            index_close=actions[:, 0],
+            middle_close=actions[:, 1],
+            is_left=True,
+        )
+        right_target = self._compose_hand_target(
+            index_close=actions[:, 2],
+            middle_close=actions[:, 3],
+            is_left=False,
+        )
+        return torch.cat((left_target, right_target), dim=-1)
+
+    def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
+        target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
+        thumb_close = torch.minimum(index_close, middle_close)
+
+        thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
+        thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
+        thumb_2 = self.cfg.controller_gripper_thumb_2_angle * thumb_close
+        index = self.cfg.controller_gripper_finger_close_angle * index_close
+        middle = self.cfg.controller_gripper_finger_close_angle * middle_close
+
+        target[:, 0] = thumb_yaw
+        if is_left:
+            target[:, 1] = thumb_1
+            target[:, 2] = thumb_2
+            target[:, 3] = -index
+            target[:, 4] = -index
+            target[:, 5] = -middle
+            target[:, 6] = -middle
+        else:
+            target[:, 1] = -thumb_1
+            target[:, 2] = -thumb_2
+            target[:, 3] = index
+            target[:, 4] = index
+            target[:, 5] = middle
+            target[:, 6] = middle
+        return target
+
+    def _clamp_target(self, target: torch.Tensor) -> torch.Tensor:
+        if self.cfg.controller_gripper_use_soft_limits:
+            limits = self._asset.data.soft_joint_pos_limits[:, self._all_hand_ids, :]
+        else:
+            limits = self._asset.data.joint_pos_limits[:, self._all_hand_ids, :]
+        return torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
+
+    def _write_hand_target(self, target: torch.Tensor) -> None:
+        joint_vel = torch.zeros_like(target)
+        if self.cfg.write_joint_state:
+            self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
+        self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
+        self._asset.set_joint_velocity_target(joint_vel, joint_ids=self._all_hand_ids)
+
+    def _publish_target(self, target: torch.Tensor) -> None:
+        if self._publisher is None:
+            return
+        now = time.monotonic()
+        interval = float(self.cfg.publish_interval_s)
+        if interval > 0.0 and now - self._last_publish_time < interval:
+            return
+        self._last_publish_time = now
+        target_np = target[0].detach().cpu().numpy()
+        actions_np = (
+            self._processed_actions[0].detach().cpu().numpy()
+            if self._processed_actions.numel() == 4
+            else np.zeros(4, dtype=np.float32)
+        )
+        self._sequence += 1
+        self._publisher.publish(
+            {
+                "schema": "g1_gripper_state.v1",
+                "robot_id": int(self.cfg.robot_id),
+                "time": time.time(),
+                "sequence": int(self._sequence),
+                "joint_order": "g1_trihand_7dof_per_hand",
+                "left_hand_q": target_np[:7].astype(float).tolist(),
+                "right_hand_q": target_np[7:14].astype(float).tolist(),
+                "raw_openxr_action": actions_np.astype(float).tolist(),
+                "source": "isaaclab_openxr",
+            }
+        )
+
+    def _target_from_payload(self, msg: dict[str, Any]) -> torch.Tensor | None:
+        try:
+            left = np.asarray(msg["left_hand_q"], dtype=np.float32).reshape(-1)
+            right = np.asarray(msg["right_hand_q"], dtype=np.float32).reshape(-1)
+            if left.size < 7 or right.size < 7:
+                raise ValueError("left_hand_q/right_hand_q must each contain at least 7 values")
+            values = np.concatenate((left[:7], right[:7]), axis=0)
+        except Exception as exc:
+            if not self._warned_bad_payload:
+                print(f"[WARN] G1 gripper sync ignored malformed payload: {exc}")
+                self._warned_bad_payload = True
+            return None
+        return torch.tensor(values, dtype=torch.float32, device=self.device).view(1, 14)
+
+    def _print_debug(self, source: str, target: torch.Tensor) -> None:
+        interval = float(self.cfg.debug_interval_s)
+        if interval <= 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_debug_time < interval:
+            return
+        self._last_debug_time = now
+        target_np = target[0].detach().cpu().numpy()
+        print(
+            "[INFO] G1 gripper sync: "
+            f"robot_id={self.cfg.robot_id}, mode={self._mode}, source={source}, "
+            f"target={np.round(target_np, 3).tolist()}"
+        )
+
+    def _build_joint_ids(self, joint_names: list[str]) -> list[int]:
+        name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}
+        return [name_to_id[name] for name in joint_names if name in name_to_id]
 
 
 class AgileBasedLowerBodyAction(ActionTerm):
