@@ -128,6 +128,7 @@ class XrAnchorSynchronizer:
         self.__smoothed_anchor_quat = None
         self.__last_anchor_quat = None
         self.__anchor_rotation_enabled = True
+        self.__warned_invalid_prim_paths: set[str] = set()
 
         # Resolve USD layer identifier of the anchor for updates
         try:
@@ -352,8 +353,12 @@ class XrAnchorSynchronizer:
         if rt_stage is None:
             return None
 
+        # usdrt returns invalid-but-not-None objects on failure, so IsValid() checks are
+        # required; calling Get() on an invalid attribute spams the console with
+        # "Currently unsupported type (unknown) for UsdAttribute.Get()" every XR frame.
         rt_prim = rt_stage.GetPrimAtPath(prim_path)
-        if rt_prim is None:
+        if rt_prim is None or not rt_prim.IsValid():
+            self._warn_invalid_anchor_prim(prim_path, "prim not found in Fabric stage")
             return None
 
         rt_xformable = Rt.Xformable(rt_prim)
@@ -361,7 +366,14 @@ class XrAnchorSynchronizer:
             return None
 
         world_matrix_attr = rt_xformable.GetFabricHierarchyWorldMatrixAttr()
-        if world_matrix_attr is None:
+        if world_matrix_attr is None or not world_matrix_attr.IsValid():
+            self._warn_invalid_anchor_prim(prim_path, "fabric hierarchy world matrix attribute is unavailable")
             return None
 
         return world_matrix_attr.Get()
+
+    def _warn_invalid_anchor_prim(self, prim_path: str, reason: str) -> None:
+        if prim_path in self.__warned_invalid_prim_paths:
+            return
+        self.__warned_invalid_prim_paths.add(prim_path)
+        logger.warning(f"XR: Anchor prim '{prim_path}' world matrix unavailable ({reason}); anchor sync skipped.")

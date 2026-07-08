@@ -166,6 +166,7 @@ self.teleop_devices = DevicesCfg(
 - **改了 `ISAACLAB_G1_ZMQ_HOST` 但没有效果**：默认 `transport=udp` 下这两个变量不生效，见第 4 节说明；要么改用 `ISAACLAB_G1_UDP_BIND_HOST`（本机监听地址，一般不需要改），要么显式设 `ISAACLAB_G1_TRANSPORT=zmq` 并让远端用 ZMQ PUB。
 - **`--enable_pinocchio` 相关的导入顺序问题**：`teleop_se3_agent.py` 已经保证在 `AppLauncher` 启动前先 `import pinocchio`（避免用到 Isaac Sim 自带的 pinocchio 版本），不需要手动调整。
 - **传了 `--num_envs` 大于 1**：`MuJoCoG1MirrorAction` 会静默禁用镜像（只打印一次 WARN），本任务目前只支持单环境 XR 第一人称。
+- **刷屏 `Currently unsupported type (unknown) for UsdAttribute.Get() at <invalid UsdAttribute>`**：usdrt 对无效属性调用 `Get()` 时打印的日志，来源是 `xr_anchor_utils.py` 每个 XR 帧读取锚点 prim（`head_link`/`pelvis`）的 Fabric world matrix。usdrt 失败时返回「无效但非 None」的对象，2026-07-08 已在 `_get_prim_world_matrix` 加 `IsValid()` 检查修复；修复后如果出现一次性 WARN `XR: Anchor prim '...' world matrix unavailable`，说明该 prim 不在 Fabric 里（启动时序问题会自行恢复）或 prim 路径与所加载 USD 的连杆名不匹配（需核对 `anchor_prim_path`/`anchor_rotation_prim_path`）。
 
 ## 11. 相关文件索引
 
