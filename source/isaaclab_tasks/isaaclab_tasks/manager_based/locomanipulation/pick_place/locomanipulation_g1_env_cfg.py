@@ -501,19 +501,20 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # ID 1 stays at the simulation origin; ID 2 is shifted on +Y to avoid overlap.
+    # ID 1 keeps the base config pose (banyun 工位，推车旁，面向 +Y)；ID 2 在其右侧 1.5 m（避开 x=-5.4 的推车）。
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 0.0, 0.78)),
     )
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 1.5, 0.78)),
+        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
+        # 跟随机器人工位平移：保持原作者相对 robot_1 的偏移 (0.789, 1.170)，
+        # 工位旁无桌面，z 落地（箱高 0.24 → 中心 0.12）
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[0.78886, 1.17033, 0.845],
+            pos=[-3.011, 20.178, 0.12],
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=sim_utils.CuboidCfg(
