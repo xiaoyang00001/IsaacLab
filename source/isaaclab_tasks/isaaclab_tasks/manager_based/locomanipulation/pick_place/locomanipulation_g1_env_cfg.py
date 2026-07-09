@@ -25,6 +25,7 @@ from isaaclab.utils import configclass
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
     G1GripperSyncActionCfg,
+    HugBoxAttachActionCfg,
     MuJoCoG1MirrorActionCfg,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
@@ -704,6 +705,14 @@ class ActionsCfg:
     cart_box2_sync = ZmqObjectSyncActionCfg(asset_name="cart_box2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box3_sync = ZmqObjectSyncActionCfg(asset_name="cart_box3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    # 抱箱吸附：镜像的运动学硬写驱动没有夹持力（摩擦抱不住），双掌合抱到位即把最近的
+    # 搬运箱按相对两掌中点的位姿吸附跟随，张臂即释放。仅在箱子为动力学刚体的 publisher
+    # 端启用；ISAACLAB_HUG_ATTACH=0 可关闭。
+    hug_attach = HugBoxAttachActionCfg(
+        asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
+        object_names=["cart_box1", "cart_box2", "cart_box3", "cart_box4"],
+        enabled=(ZMQ_SYNC_ROLE != "subscriber") and os.environ.get("ISAACLAB_HUG_ATTACH", "1") != "0",
+    )
 
 
 @configclass

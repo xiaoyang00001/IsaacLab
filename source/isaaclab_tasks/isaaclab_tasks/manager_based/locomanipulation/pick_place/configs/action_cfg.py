@@ -8,7 +8,12 @@ from dataclasses import MISSING
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions import AgileBasedLowerBodyAction, G1GripperSyncAction, MuJoCoG1MirrorAction
+from ..mdp.actions import (
+    AgileBasedLowerBodyAction,
+    G1GripperSyncAction,
+    HugBoxAttachAction,
+    MuJoCoG1MirrorAction,
+)
 
 
 @configclass
@@ -264,3 +269,38 @@ class G1GripperSyncActionCfg(ActionTermCfg):
 
     debug_interval_s: float = 0.0
     """Seconds between debug prints. Non-positive disables periodic prints."""
+
+
+@configclass
+class HugBoxAttachActionCfg(ActionTermCfg):
+    """双臂合抱检测 + 箱子吸附跟随的配置（运动学硬写范式下的抱箱方案，支持多箱自动选最近）。"""
+
+    class_type: type[ActionTerm] = HugBoxAttachAction
+
+    enabled: bool = True
+    """Whether this attach action term is active."""
+
+    object_name: str = "test_box"
+    """Single fallback box entity name, used only when ``object_names`` is empty."""
+
+    object_names: list[str] = []
+    """候选箱的场景实体名列表。非空时，动作项在所有满足合抱条件的候选箱里自动选
+    离两掌中点最近的那个吸附；为空时回退到单个 ``object_name``。"""
+
+    left_palm_candidates: list[str] = ["left_hand_palm_link", "left_wrist_yaw_link"]
+    """Candidate link names for the left palm (first match wins)."""
+
+    right_palm_candidates: list[str] = ["right_hand_palm_link", "right_wrist_yaw_link"]
+    """Candidate link names for the right palm (first match wins)."""
+
+    attach_sep: float = 0.26
+    """Palm separation (m) below which a bracketed box gets attached."""
+
+    detach_sep: float = 0.32
+    """Palm separation (m) above which the attachment releases."""
+
+    palm_dist_max: float = 0.35
+    """Max distance (m) from each palm to the box center for attachment."""
+
+    detach_debounce_steps: int = 5
+    """Consecutive physics steps beyond detach_sep required to release."""

@@ -19,11 +19,12 @@ from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
+from isaaclab.utils.math import quat_apply, quat_inv, quat_mul
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from .configs.action_cfg import AgileBasedLowerBodyActionCfg
+    from .configs.action_cfg import AgileBasedLowerBodyActionCfg, HugBoxAttachActionCfg
 
 
 ISAACLAB_29DOF_JOINT_NAMES = [
@@ -1330,3 +1331,176 @@ class AgileBasedLowerBodyAction(ActionTerm):
         """Apply the actions to the environment."""
         # Store the raw actions
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+
+class HugBoxAttachAction(ActionTerm):
+    """双臂合抱检测 + 箱子吸附跟随（运动学"瞬移"范式，支持多箱自动选最近）。
+
+    镜像动作对身体关节每步 ``write_joint_state_to_sim``（运动学硬写，无限刚度、
+    无夹持力），箱子无法靠接触摩擦稳定抱持——侧夹被挤出、托抱横向蠕滑。
+    本动作项沿用同一"瞬移"范式解决抱箱：
+
+    - 吸附：双掌间距 < ``attach_sep`` 且某个候选箱心位于两掌之间（两掌都在
+      ``palm_dist_max`` 内）时，在所有满足条件的候选箱里选**离两掌中点最近**的
+      那个，锁定它相对"两掌中点坐标系"（掌中点位置 + 掌连线偏航）的位姿，
+      此后每步硬写该箱子跟随双手——手往哪儿移，箱子跟到哪儿；
+    - 跟手而非锁躯干是为了减轻穿模：吸附后继续收臂/平移手臂时，箱子始终居中
+      在两掌之间，穿透对称；
+    - 解除：双掌间距 > ``detach_sep`` 连续 ``detach_debounce_steps`` 步，
+      箱子恢复自由动力学（落下）。
+
+    候选箱由 ``object_names``（多箱自动选最近）给出；为空时回退到单个
+    ``object_name``。仅在箱子为动力学刚体的一端（object sync publisher）启用；
+    订阅端箱子是 kinematic 跟随体，由 ``zmq_object_sync`` 负责。
+    """
+
+    cfg: "HugBoxAttachActionCfg"
+
+    def __init__(self, cfg: "HugBoxAttachActionCfg", env: "ManagerBasedEnv"):
+        super().__init__(cfg, env)
+        self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._export_IO_descriptor = False
+        self._enabled = cfg.enabled and self.num_envs == 1
+
+        # 解析所有存在于场景中的候选箱：(name, RigidObject)。
+        self._objects: list[tuple[str, Any]] = []
+        self._palm_l: int | None = None
+        self._palm_r: int | None = None
+        if self._enabled:
+            candidate_names = list(cfg.object_names) if cfg.object_names else [cfg.object_name]
+            for name in candidate_names:
+                try:
+                    self._objects.append((name, env.scene[name]))
+                except KeyError:
+                    print(f"[WARN] HugBoxAttach: 候选箱 {name!r} 不在场景中，跳过。")
+            if not self._objects:
+                self._enabled = False
+                print("[WARN] HugBoxAttach disabled: 没有任何候选箱在场景中。")
+        if self._enabled:
+            body_names = self._asset.data.body_names
+
+            def _find(candidates: list[str]) -> int | None:
+                for name in candidates:
+                    if name in body_names:
+                        return body_names.index(name)
+                return None
+
+            self._palm_l = _find(cfg.left_palm_candidates)
+            self._palm_r = _find(cfg.right_palm_candidates)
+            if None in (self._palm_l, self._palm_r):
+                self._enabled = False
+                print(
+                    "[WARN] HugBoxAttach disabled: palm link not found "
+                    f"(palm_l={self._palm_l}, palm_r={self._palm_r})."
+                )
+            else:
+                names = ", ".join(n for n, _ in self._objects)
+                print(
+                    f"[INFO] HugBoxAttach enabled: robot={cfg.asset_name}, boxes=[{names}], "
+                    f"frame=palm-midpoint, attach_sep={cfg.attach_sep}, detach_sep={cfg.detach_sep}"
+                )
+
+        # 当前吸附的箱子句柄（None = 未吸附）及其相对两掌中点坐标系的位姿。
+        self._attached_obj = None
+        self._attached_name: str | None = None
+        self._rel_pos: torch.Tensor | None = None
+        self._rel_quat: torch.Tensor | None = None
+        self._detach_count = 0
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions = actions
+        self._processed_actions = actions
+
+    def reset(self, env_ids=None):
+        self._release("环境复位")
+
+    def _release(self, reason: str):
+        if self._attached_obj is not None:
+            print(f"[INFO] HugBoxAttach: 解除吸附 {self._attached_name}（{reason}）")
+        self._attached_obj = None
+        self._attached_name = None
+        self._detach_count = 0
+
+    def _palm_frame(self, pl: torch.Tensor, pr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """两掌中点坐标系：原点 = 掌中点，偏航 = 掌连线方向（俯仰/滚转保持水平）。"""
+        mid = ((pl + pr) / 2.0).unsqueeze(0)
+        lat = pr - pl
+        half = torch.atan2(lat[1], lat[0]) / 2.0
+        zero = torch.zeros((), device=self.device)
+        q_yaw = torch.stack([torch.cos(half), zero, zero, torch.sin(half)]).unsqueeze(0)
+        return mid, q_yaw
+
+    def apply_actions(self):
+        if not self._enabled:
+            return
+
+        data = self._asset.data
+        pl = data.body_link_pos_w[0, self._palm_l]
+        pr = data.body_link_pos_w[0, self._palm_r]
+        sep = torch.norm(pl - pr).item()
+        if sep < 1e-4:
+            return
+        mid, q_yaw = self._palm_frame(pl, pr)
+
+        if self._attached_obj is None:
+            # 未吸附：双掌需先合拢到 attach_sep 以内；再在所有"箱心夹在两掌之间且
+            # 两掌都够近"的候选箱里，选离两掌中点最近的那个吸附。
+            if sep >= self.cfg.attach_sep:
+                return
+            seg = pr - pl
+            seg_sq = torch.clamp(torch.dot(seg, seg), min=1e-9)
+            best = None  # (dist_to_mid, name, obj, box_pose)
+            for name, obj in self._objects:
+                box_pose = obj.data.root_state_w[:, :7]
+                c = box_pose[0, :3]
+                near = (
+                    torch.norm(pl - c).item() < self.cfg.palm_dist_max
+                    and torch.norm(pr - c).item() < self.cfg.palm_dist_max
+                )
+                if not near:
+                    continue
+                t_par = (torch.dot(c - pl, seg) / seg_sq).item()
+                if not (0.15 < t_par < 0.85):
+                    continue
+                d_mid = torch.norm(c - mid[0]).item()
+                if best is None or d_mid < best[0]:
+                    best = (d_mid, name, obj, box_pose)
+            if best is not None:
+                _, name, obj, box_pose = best
+                inv_q = quat_inv(q_yaw)
+                self._rel_pos = quat_apply(inv_q, box_pose[:, :3] - mid)
+                self._rel_quat = quat_mul(inv_q, box_pose[:, 3:7])
+                self._attached_obj = obj
+                self._attached_name = name
+                self._detach_count = 0
+                print(f"[INFO] HugBoxAttach: 吸附 {name}（掌距 {sep:.3f} m，跟随两掌中点）")
+            return
+
+        # 已吸附：张手超阈值去抖后释放，否则箱子每步硬写跟随两掌中点。
+        if sep > self.cfg.detach_sep:
+            self._detach_count += 1
+            if self._detach_count >= self.cfg.detach_debounce_steps:
+                self._release(f"双掌张开（掌距 {sep:.3f} m）")
+                return
+        else:
+            self._detach_count = 0
+
+        target_pos = mid + quat_apply(q_yaw, self._rel_pos)
+        target_quat = quat_mul(q_yaw, self._rel_quat)
+        self._attached_obj.write_root_pose_to_sim(torch.cat([target_pos, target_quat], dim=1))
+        self._attached_obj.write_root_velocity_to_sim(
+            torch.zeros((1, 6), dtype=torch.float32, device=self.device)
+        )
