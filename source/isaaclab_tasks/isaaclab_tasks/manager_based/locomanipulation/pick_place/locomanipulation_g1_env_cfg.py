@@ -25,6 +25,7 @@ from isaaclab.utils import configclass
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
     G1GripperSyncActionCfg,
+    HugBoxAttachActionCfg,
     MuJoCoG1MirrorActionCfg,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
@@ -665,6 +666,14 @@ class ActionsCfg:
         write_joint_state=True,
     )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    # 抱箱吸附：镜像的运动学硬写驱动没有夹持力（摩擦抱不住，实测见 hug_box_g1_udp_test.py），
+    # 双掌合抱到位即把箱子按相对位姿吸附到躯干，张臂即释放。仅在箱子为动力学刚体的
+    # publisher 端启用；ISAACLAB_HUG_ATTACH=0 可关闭。
+    hug_attach = HugBoxAttachActionCfg(
+        asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
+        object_name="test_box",
+        enabled=(ZMQ_SYNC_ROLE != "subscriber") and os.environ.get("ISAACLAB_HUG_ATTACH", "1") != "0",
+    )
 
 
 @configclass

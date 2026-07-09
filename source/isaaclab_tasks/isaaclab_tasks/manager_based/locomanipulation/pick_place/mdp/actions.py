@@ -19,6 +19,7 @@ from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
+from isaaclab.utils.math import quat_apply, quat_inv, quat_mul
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -1306,3 +1307,136 @@ class AgileBasedLowerBodyAction(ActionTerm):
         """Apply the actions to the environment."""
         # Store the raw actions
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+
+class HugBoxAttachAction(ActionTerm):
+    """双臂合抱检测 + 箱子吸附跟随（基于运动学"瞬移"范式）。
+
+    镜像动作对身体关节每步 ``write_joint_state_to_sim``（运动学硬写，无限刚度、
+    无夹持力），箱子无法靠接触摩擦稳定抱持——侧夹被挤出、托抱横向蠕滑，
+    实测见 ``hug_box_g1_udp_test.py``。本动作项沿用同一范式解决抱箱：
+
+    - 吸附：双掌间距 < ``attach_sep`` 且箱心位于两掌之间时，锁定箱子相对
+      锚点 link（躯干）的位姿，此后每步硬写箱子位姿跟随躯干（腰部动作
+      会带着箱子一起动，与 root 锚定 / 跨机箱子同步同一个"瞬移"哲学）；
+    - 解除：双掌间距 > ``detach_sep`` 连续 ``detach_debounce_steps`` 步，
+      箱子恢复自由动力学（落下）。
+
+    仅在箱子为动力学刚体的一端（object sync publisher）启用；订阅端箱子
+    是 kinematic 跟随体，由 ``zmq_object_sync`` 负责。
+    """
+
+    cfg: "HugBoxAttachActionCfg"
+
+    def __init__(self, cfg: "HugBoxAttachActionCfg", env: "ManagerBasedEnv"):
+        super().__init__(cfg, env)
+        self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._export_IO_descriptor = False
+        self._enabled = cfg.enabled and self.num_envs == 1
+
+        self._object = None
+        self._palm_l: int | None = None
+        self._palm_r: int | None = None
+        self._anchor: int | None = None
+        if self._enabled:
+            try:
+                self._object = env.scene[cfg.object_name]
+            except KeyError:
+                self._enabled = False
+                print(f"[WARN] HugBoxAttach disabled: object {cfg.object_name!r} not in scene.")
+        if self._enabled:
+            body_names = self._asset.data.body_names
+
+            def _find(candidates: list[str]) -> int | None:
+                for name in candidates:
+                    if name in body_names:
+                        return body_names.index(name)
+                return None
+
+            self._palm_l = _find(cfg.left_palm_candidates)
+            self._palm_r = _find(cfg.right_palm_candidates)
+            self._anchor = _find(cfg.anchor_link_candidates)
+            if None in (self._palm_l, self._palm_r, self._anchor):
+                self._enabled = False
+                print(
+                    "[WARN] HugBoxAttach disabled: palm/anchor link not found "
+                    f"(palm_l={self._palm_l}, palm_r={self._palm_r}, anchor={self._anchor})."
+                )
+            else:
+                print(
+                    f"[INFO] HugBoxAttach enabled: robot={cfg.asset_name}, object={cfg.object_name}, "
+                    f"anchor={body_names[self._anchor]}, attach_sep={cfg.attach_sep}, detach_sep={cfg.detach_sep}"
+                )
+
+        self._attached = False
+        self._rel_pos: torch.Tensor | None = None
+        self._rel_quat: torch.Tensor | None = None
+        self._detach_count = 0
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions = actions
+        self._processed_actions = actions
+
+    def reset(self, env_ids=None):
+        self._release("环境复位")
+
+    def _release(self, reason: str):
+        if self._attached:
+            print(f"[INFO] HugBoxAttach: 解除吸附 {self.cfg.object_name}（{reason}）")
+        self._attached = False
+        self._detach_count = 0
+
+    def apply_actions(self):
+        if not self._enabled:
+            return
+
+        data = self._asset.data
+        pl = data.body_link_pos_w[0, self._palm_l]
+        pr = data.body_link_pos_w[0, self._palm_r]
+        anchor_pos = data.body_link_pos_w[0, self._anchor].unsqueeze(0)
+        anchor_quat = data.body_link_quat_w[0, self._anchor].unsqueeze(0)
+        sep = torch.norm(pl - pr).item()
+
+        if not self._attached:
+            box_pose = self._object.data.root_state_w[:, :7]
+            c = box_pose[0, :3]
+            near = (
+                torch.norm(pl - c).item() < self.cfg.palm_dist_max
+                and torch.norm(pr - c).item() < self.cfg.palm_dist_max
+            )
+            seg = pr - pl
+            t_par = (torch.dot(c - pl, seg) / torch.clamp(torch.dot(seg, seg), min=1e-9)).item()
+            if sep < self.cfg.attach_sep and near and 0.15 < t_par < 0.85:
+                inv_q = quat_inv(anchor_quat)
+                self._rel_pos = quat_apply(inv_q, box_pose[:, :3] - anchor_pos)
+                self._rel_quat = quat_mul(inv_q, box_pose[:, 3:7])
+                self._attached = True
+                self._detach_count = 0
+                print(f"[INFO] HugBoxAttach: 吸附 {self.cfg.object_name}（掌距 {sep:.3f} m）")
+            return
+
+        if sep > self.cfg.detach_sep:
+            self._detach_count += 1
+            if self._detach_count >= self.cfg.detach_debounce_steps:
+                self._release(f"双掌张开（掌距 {sep:.3f} m）")
+                return
+        else:
+            self._detach_count = 0
+
+        target_pos = anchor_pos + quat_apply(anchor_quat, self._rel_pos)
+        target_quat = quat_mul(anchor_quat, self._rel_quat)
+        self._object.write_root_pose_to_sim(torch.cat([target_pos, target_quat], dim=1))
+        self._object.write_root_velocity_to_sim(torch.zeros((1, 6), dtype=torch.float32, device=self.device))
