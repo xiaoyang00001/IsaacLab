@@ -460,7 +460,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # 位姿 = USD 内位姿 × 背景放置变换，与原场景摆放逐位一致。
     #
     # Pushcart 与两个箱子都是独立 RigidObject（IsaacLab 不支持嵌套刚体）。
-    # 箱子 z 抬高到推车 bbox 顶面 (z_max=0.3774) 之上避免初始穿透。
+    # cart_box_d05_physics.usda 的根原点在箱子底面中心，碰撞体 z 范围为 0..0.149。
+    # 这里的 cart_box*.init_state.pos[2] 是底面高度，不是箱体中心高度。
     # ------------------------------------------------------------------
     pushcart = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart",
@@ -471,7 +472,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     cart_box1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
-        # 推车顶面 z≈0.377，箱子半高 0.0745 → 中心 z
+        # 箱体底面高度。碰撞体高度 0.149 m，root 原点位于底面中心。
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.45], rot=[0.0, 0.0, 0.0, 1.0]),
         # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
         spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
@@ -550,10 +551,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
-        # 叠放在 cart_box4 顶面：cart_box4 中心 z=0.90，箱子半高 0.075 → 顶面 z=0.975；
-        # test_box 半高 0.12 → 中心 z=1.095。x/y 对齐 cart_box4，rot 沿用推车朝向。
+        # 叠放在 cart_box4 顶面：cart_box4 底面 z=0.90，高 0.149 → 顶面 z=1.049；
+        # test_box 半高 0.12 → 中心 z=1.169。x/y 对齐 cart_box4，rot 沿用推车朝向。
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[-5.4, 19.39363, 1.095],
+            pos=[-5.4, 19.39363, 1.169],
             rot=[0.0, 0.0, 0.0, 1.0],
         ),
         spawn=sim_utils.CuboidCfg(
@@ -624,6 +625,7 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_2",
@@ -650,6 +652,7 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     local_gripper = G1GripperSyncActionCfg(
         asset_name=ISAACLAB_LOCAL_ROBOT_NAME,

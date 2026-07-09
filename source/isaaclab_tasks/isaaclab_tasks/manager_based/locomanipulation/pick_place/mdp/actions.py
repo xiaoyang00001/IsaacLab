@@ -332,7 +332,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._printed_first_sample = False
         self._last_root_debug_time = 0.0
         self._last_gripper_debug_time = 0.0
+        self._last_pd_debug_time = 0.0
         self._last_mirror_hands_from_mujoco = False
+        self._pd_q_target: torch.Tensor | None = None
+        self._pd_dq_target: torch.Tensor | None = None
 
         if self._enabled:
             try:
@@ -466,6 +469,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 joint_vel[:, self._kinematic_body_isaac_ids],
                 joint_ids=self._kinematic_body_isaac_ids,
             )
+        self._apply_pd_target_conditioning(joint_pos, joint_vel)
         self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
@@ -606,6 +610,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._source_root_is_moving = False
         self._stance_slot = None
         self._anchor_xy = None
+        self._pd_q_target = None
+        self._pd_dq_target = None
 
     def _apply_controller_gripper_targets(self) -> None:
         if not self.cfg.controller_gripper_enabled or self.action_dim == 0:
@@ -903,6 +909,58 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 f"{[joint_names[i] for i in pd_ids]}"
             )
         return pd_ids, kinematic_ids
+
+    def _apply_pd_target_conditioning(self, joint_pos: torch.Tensor, joint_vel: torch.Tensor) -> None:
+        """Smooth PD-drive joint targets in place; optionally zero their velocity targets.
+
+        Mirror packets carry SONIC's measured joint state which jitters at packet rate
+        even when the remote arm is visually still. Hard-written joints hide that jitter;
+        PD joints turn it into torque noise through both the stiffness and damping terms,
+        which can excite sustained arm oscillation.
+        """
+        pd_ids = self._pd_body_isaac_ids
+        if not pd_ids:
+            return
+        q_raw = joint_pos[:, pd_ids].clone()
+        dq_raw = joint_vel[:, pd_ids].clone()
+        alpha = min(max(float(self.cfg.pd_target_smoothing_alpha), 0.01), 1.0)
+        if alpha >= 1.0 or self._pd_q_target is None or self._pd_dq_target is None:
+            self._pd_q_target = q_raw.clone()
+            self._pd_dq_target = dq_raw.clone()
+        else:
+            self._pd_q_target += alpha * (q_raw - self._pd_q_target)
+            self._pd_dq_target += alpha * (dq_raw - self._pd_dq_target)
+        joint_pos[:, pd_ids] = self._pd_q_target
+        if self.cfg.pd_zero_velocity_target:
+            joint_vel[:, pd_ids] = 0.0
+        else:
+            joint_vel[:, pd_ids] = self._pd_dq_target
+        self._print_pd_debug(q_raw, dq_raw)
+
+    def _print_pd_debug(self, q_raw: torch.Tensor, dq_raw: torch.Tensor) -> None:
+        interval = float(self.cfg.pd_debug_interval_s)
+        if interval <= 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_pd_debug_time < interval:
+            return
+        self._last_pd_debug_time = now
+
+        pd_ids = self._pd_body_isaac_ids[:4]
+        n = len(pd_ids)
+        names = [self._asset.joint_names[i] for i in pd_ids]
+        q_meas = self._asset.data.joint_pos[0, pd_ids].detach().cpu().numpy()
+        dq_meas = self._asset.data.joint_vel[0, pd_ids].detach().cpu().numpy()
+        q_smooth = self._pd_q_target[0, :n].detach().cpu().numpy()
+        print(
+            "[INFO] MuJoCo G1 PD debug "
+            f"joints={names}: "
+            f"q_raw={np.round(q_raw[0, :n].detach().cpu().numpy(), 3).tolist()}, "
+            f"q_smooth={np.round(q_smooth, 3).tolist()}, "
+            f"q_meas={np.round(q_meas, 3).tolist()}, "
+            f"dq_raw={np.round(dq_raw[0, :n].detach().cpu().numpy(), 3).tolist()}, "
+            f"dq_meas={np.round(dq_meas, 3).tolist()}"
+        )
 
     def _build_body_ids(self, body_names: list[str]) -> list[int]:
         body_name_to_id = {name: idx for idx, name in enumerate(self._asset.body_names)}
