@@ -25,7 +25,12 @@ PickPlace G1 抱箱演示：证明 test_box 可以被双臂抱住。
 """
 
 import argparse
-import pinocchio  # noqa: F401
+
+# Linux 需在 AppLauncher 之前导入 pinocchio 避免符号冲突；Windows 环境无此包时跳过
+try:
+    import pinocchio  # noqa: F401
+except ImportError:
+    pass
 
 from isaaclab.app import AppLauncher
 
