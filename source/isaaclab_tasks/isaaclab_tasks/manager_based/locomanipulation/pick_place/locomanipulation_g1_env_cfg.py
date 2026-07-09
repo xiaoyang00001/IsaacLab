@@ -434,6 +434,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=os.path.join(os.path.dirname(__file__), "props", "pushcart_physics.usda"),
+            # x/y 各缩小一半，z（高度）不变
+            scale=(0.5, 0.5, 1.0),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=8,
                 max_depenetration_velocity=5.0,
