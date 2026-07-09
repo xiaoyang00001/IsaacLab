@@ -127,6 +127,9 @@ def _peer_robot_id(robot_id: int) -> int:
 
 ISAACLAB_LOCAL_ROBOT_ID = 2 if _env_int("ISAACLAB_LOCAL_ROBOT_ID", 1) == 2 else 1
 ISAACLAB_PEER_ROBOT_ID = _peer_robot_id(ISAACLAB_LOCAL_ROBOT_ID)
+# 手臂 PD 直驱：镜像动作对手臂只发位置目标（执行器刚度产生柔性夹持力，能真正抱住箱子），
+# 腿/腰仍运动学硬写保持行走镜像。ISAACLAB_G1_ARM_PD_DRIVE=0 可退回全硬写（旧行为）。
+ISAACLAB_G1_ARM_PD_DRIVE = os.environ.get("ISAACLAB_G1_ARM_PD_DRIVE", "1") != "0"
 ISAACLAB_LOCAL_ROBOT_NAME = _robot_name(ISAACLAB_LOCAL_ROBOT_ID)
 ISAACLAB_PEER_ROBOT_NAME = _robot_name(ISAACLAB_PEER_ROBOT_ID)
 _object_sync_role = os.environ.get("ISAACLAB_OBJECT_SYNC_ROLE", "auto").strip().lower()
@@ -611,6 +614,7 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        arm_pd_drive=ISAACLAB_G1_ARM_PD_DRIVE,
     )
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_2",
@@ -637,6 +641,7 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        arm_pd_drive=ISAACLAB_G1_ARM_PD_DRIVE,
     )
     local_gripper = G1GripperSyncActionCfg(
         asset_name=ISAACLAB_LOCAL_ROBOT_NAME,

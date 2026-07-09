@@ -301,6 +301,24 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._enabled = cfg.enabled and self.num_envs == 1
 
         self._body_mujoco_ids, self._body_isaac_ids = self._build_body_joint_ids(cfg.mirror_joint_names)
+        # PD direct-drive split: joints matching ``pd_drive_joint_names`` (arms) are driven by
+        # position target only (compliant grasp force); the rest keep kinematic hard-write.
+        # With ``arm_pd_drive`` off this collapses to "all body joints hard-written" (unchanged).
+        self._pd_drive_isaac_ids: list[int] = []
+        self._hard_write_isaac_ids: list[int] = list(self._body_isaac_ids)
+        if cfg.arm_pd_drive:
+            _pd_patterns = [re.compile(p) for p in cfg.pd_drive_joint_names]
+            _joint_names = self._asset.joint_names
+            self._pd_drive_isaac_ids = [
+                jid for jid in self._body_isaac_ids
+                if any(p.fullmatch(_joint_names[jid]) for p in _pd_patterns)
+            ]
+            _pd_set = set(self._pd_drive_isaac_ids)
+            self._hard_write_isaac_ids = [jid for jid in self._body_isaac_ids if jid not in _pd_set]
+            print(
+                f"[INFO] MuJoCo G1 mirror PD direct-drive: {len(self._pd_drive_isaac_ids)} arm joints "
+                f"(position-target/compliant grasp), {len(self._hard_write_isaac_ids)} joints kinematic hard-write"
+            )
         self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
@@ -453,11 +471,14 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
 
-        self._asset.write_joint_state_to_sim(
-            joint_pos[:, self._body_isaac_ids],
-            joint_vel[:, self._body_isaac_ids],
-            joint_ids=self._body_isaac_ids,
-        )
+        # Kinematic hard-write only the non-PD joints (legs/waist); PD-driven arm joints get a
+        # position target below but no state overwrite, so the actuator produces grasp force.
+        if self._hard_write_isaac_ids:
+            self._asset.write_joint_state_to_sim(
+                joint_pos[:, self._hard_write_isaac_ids],
+                joint_vel[:, self._hard_write_isaac_ids],
+                joint_ids=self._hard_write_isaac_ids,
+            )
         self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
@@ -580,14 +601,17 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._asset.write_root_link_pose_to_sim(self._root_pose)
         self._asset.write_root_link_velocity_to_sim(self._root_velocity)
 
-        # Body joints (legs, arms, waist): revert to the init_state joint positions
+        # Body joints (legs, arms, waist): revert to the init_state joint positions.
+        # PD-driven arm joints hold the default pose via position target (compliant); the rest
+        # are hard-written. Mirrors the split in apply_actions so drive mode never flips.
         joint_pos = self._asset.data.default_joint_pos.clone()
         joint_vel = torch.zeros_like(joint_pos)
-        self._asset.write_joint_state_to_sim(
-            joint_pos[:, self._body_isaac_ids],
-            joint_vel[:, self._body_isaac_ids],
-            joint_ids=self._body_isaac_ids,
-        )
+        if self._hard_write_isaac_ids:
+            self._asset.write_joint_state_to_sim(
+                joint_pos[:, self._hard_write_isaac_ids],
+                joint_vel[:, self._hard_write_isaac_ids],
+                joint_ids=self._hard_write_isaac_ids,
+            )
         self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
 

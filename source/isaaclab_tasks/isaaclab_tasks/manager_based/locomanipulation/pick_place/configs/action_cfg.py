@@ -135,6 +135,23 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     ]
     """Regex list of 29-DoF MuJoCo body joints to mirror into Isaac Lab."""
 
+    arm_pd_drive: bool = False
+    """When True, the mirrored arm joints are driven by position targets only (compliant PD
+    control via the actuator's stiffness/damping), so the arms exert real contact/grasping
+    force and can hold an object. When False (default), every mirrored body joint is written
+    with ``write_joint_state_to_sim`` (kinematic hard-write, infinite stiffness, no grasp
+    force — an object between the palms is pushed out rather than held). Legs and waist always
+    stay hard-written to preserve walking-mirror fidelity; only the joints matching
+    ``pd_drive_joint_names`` switch to PD drive."""
+
+    pd_drive_joint_names: list[str] = [
+        ".*_shoulder_.*_joint",
+        ".*_elbow_joint",
+        ".*_wrist_.*_joint",
+    ]
+    """Regex patterns (fullmatch against 29-DoF joint names) selecting which mirrored joints are
+    PD-driven when ``arm_pd_drive`` is True. Default: both arms (shoulder/elbow/wrist)."""
+
     mirror_hands: bool = True
     """Whether to mirror hand joints from MuJoCo."""
 
