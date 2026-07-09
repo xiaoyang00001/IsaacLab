@@ -161,7 +161,6 @@ def _find_gr00t_g1_43dof_usd() -> str:
     )
     for root in candidates:
         for usd_name in (
-            "g1_43dof_isaaclab_nomdl.usd",
             "g1_43dof.usd",
             "g1_43dof_isaaclab_no_material.usda",
             "g1_43dof_isaaclab_nomdl.usda",
