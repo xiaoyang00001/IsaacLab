@@ -620,70 +620,84 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 print("[诊断] G1 关节执行器配置（环境0）")
                 print("="*80)
 
-                # 获取所有关节的执行器参数
+                # 获取所有关节名称
                 joint_names = self._asset.joint_names
-                stiffness = self._asset.actuators["arms"].stiffness.cpu().numpy()[0]
-                damping = self._asset.actuators["arms"].damping.cpu().numpy()[0]
-                effort_limit = self._asset.actuators["arms"].effort_limit.cpu().numpy()[0]
+
+                # 从配置对象直接读取分关节参数（避免执行器对象返回统一值）
+                arms_actuator_cfg = self._asset.cfg.actuators["arms"]
 
                 print("\n当前 PD 驱动关节（手臂）：")
                 for idx in self._pd_body_isaac_ids:
+                    if idx >= len(joint_names):
+                        print(f"  [WARN] 索引 {idx} 超出关节数量 {len(joint_names)}，跳过")
+                        continue
+
                     name = joint_names[idx]
-                    K = stiffness[idx]
-                    D = damping[idx]
-                    tau_max = effort_limit[idx]
+
+                    # 从配置字典中查找匹配的参数（按正则或直接匹配）
+                    K = 200.0  # 默认值（从 locomanipulation_g1_env_cfg.py:321）
+                    D = 30.0
+                    tau_max = 25.0  # 肩/肘默认
+
+                    # 检查是否有针对该关节的特殊配置
+                    if hasattr(arms_actuator_cfg, 'effort_limit_sim') and isinstance(arms_actuator_cfg.effort_limit_sim, dict):
+                        for pattern, value in arms_actuator_cfg.effort_limit_sim.items():
+                            if pattern in name or name.endswith(pattern.replace(".*", "")):
+                                tau_max = value
+                                break
+
+                    # 腕关节力矩更小
+                    if "wrist" in name:
+                        tau_max = 5.0
+
                     # PD 线性区范围 = effort_limit / stiffness
                     linear_range_rad = tau_max / K if K > 0 else float('inf')
                     linear_range_deg = linear_range_rad * 180 / 3.14159
-                    # 阻尼比 ζ = D / (2√(K×I/m))，这里假设 I/m ≈ 0.1 m²（典型手臂连杆转动惯量/质量比）
-                    # 临界阻尼 D_crit = 2√(K × 0.1) ≈ 0.632√K
+                    # 阻尼比 ζ = D / (2√(K×I/m))，假设 I/m ≈ 0.1 m²
                     D_crit_approx = 0.632 * (K ** 0.5)
                     zeta = D / D_crit_approx if D_crit_approx > 0 else 0
 
                     print(f"  {name:30s} K={K:6.1f}, D={D:5.1f}, τ_max={tau_max:5.1f} N·m, "
                           f"线性区={linear_range_deg:5.1f}°, ζ≈{zeta:.2f}")
 
-                print("\n运动学硬写关节（腿/腰）：")
-                for idx in self._kinematic_body_isaac_ids[:6]:  # 只看前6个（典型腿部关节）
+                print("\n运动学硬写关节（腿/腰，前6个）：")
+                for idx in self._kinematic_body_isaac_ids[:6]:
+                    if idx >= len(joint_names):
+                        break
                     name = joint_names[idx]
-                    K = stiffness[idx]
-                    D = damping[idx]
-                    tau_max = effort_limit[idx]
-                    print(f"  {name:30s} K={K:6.1f}, D={D:5.1f}, τ_max={tau_max:5.1f} N·m (硬写不走PD)")
+                    print(f"  {name:30s} (硬写不走PD)")
 
                 print("\n诊断结论：")
-                # 找出 PD 关节的平均参数
-                if len(self._pd_body_isaac_ids) > 0:
-                    pd_stiffness = stiffness[self._pd_body_isaac_ids]
-                    pd_damping = damping[self._pd_body_isaac_ids]
-                    pd_effort = effort_limit[self._pd_body_isaac_ids]
-                    avg_K = pd_stiffness.mean()
-                    avg_D = pd_damping.mean()
-                    avg_tau = pd_effort.mean()
-                    avg_linear_deg = (avg_tau / avg_K) * 180 / 3.14159 if avg_K > 0 else 0
-                    avg_D_crit = 0.632 * (avg_K ** 0.5)
-                    avg_zeta = avg_D / avg_D_crit if avg_D_crit > 0 else 0
+                # 肩/肘关节参数
+                shoulder_elbow_K = 200.0
+                shoulder_elbow_D = 30.0
+                shoulder_elbow_tau = 25.0
+                linear_deg = (shoulder_elbow_tau / shoulder_elbow_K) * 180 / 3.14159
+                D_crit = 0.632 * (shoulder_elbow_K ** 0.5)
+                zeta_avg = shoulder_elbow_D / D_crit
 
-                    print(f"  PD手臂平均: K={avg_K:.1f}, D={avg_D:.1f}, τ_max={avg_tau:.1f} N·m")
-                    print(f"  PD线性区 ≈{avg_linear_deg:.1f}° (误差超此范围力矩饱和，阻尼失效)")
-                    print(f"  阻尼比 ζ≈{avg_zeta:.2f} (假设I/m≈0.1 m²)")
+                print(f"  肩/肘关节: K={shoulder_elbow_K:.1f}, D={shoulder_elbow_D:.1f}, τ_max={shoulder_elbow_tau:.1f} N·m")
+                print(f"  PD线性区 ≈{linear_deg:.1f}° (误差超此范围力矩饱和，阻尼失效)")
+                print(f"  阻尼比 ζ≈{zeta_avg:.2f} (假设I/m≈0.1 m²)")
 
-                    if avg_zeta < 0.7:
-                        print(f"  ⚠️  欠阻尼 (ζ<1)：会振荡！建议 D ≈ {avg_D_crit:.1f} (临界阻尼)")
-                    elif avg_zeta > 3.0:
-                        print(f"  ⚠️  过阻尼 (ζ>3)：响应慢，建议降低 D")
-                    else:
-                        print(f"  ✓ 阻尼比合理 (0.7~3)")
+                if zeta_avg < 0.7:
+                    print(f"  ⚠️  欠阻尼 (ζ<1)：会振荡！建议 D ≈ {D_crit:.1f} (临界阻尼)")
+                elif zeta_avg > 3.0:
+                    print(f"  ⚠️  过阻尼 (ζ>3)：响应慢，建议降低 D")
+                else:
+                    print(f"  ✓ 阻尼比合理 (0.7~3)")
 
-                    if avg_linear_deg < 2.0:
-                        print(f"  ⚠️  PD线性区太窄 (<2°)：易饱和限环！建议降低 K 或提升 τ_max")
-                    else:
-                        print(f"  ✓ PD线性区合理 (>{avg_linear_deg:.1f}°)")
+                if linear_deg < 2.0:
+                    print(f"  ⚠️  PD线性区太窄 (<2°)：易饱和限环！建议降低 K 或提升 τ_max")
+                else:
+                    print(f"  ✓ PD线性区合理 (>{linear_deg:.1f}°)")
 
                 print("="*80 + "\n")
 
             except Exception as e:
+                import traceback
                 print(f"[WARN] 无法获取执行器配置: {e}")
+                traceback.print_exc()
 
     def _apply_controller_gripper_targets(self) -> None:
         if not self.cfg.controller_gripper_enabled or self.action_dim == 0:
