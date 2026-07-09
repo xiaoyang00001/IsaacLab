@@ -636,7 +636,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
                     # 从配置字典中查找匹配的参数（按正则或直接匹配）
                     K = 200.0  # 默认值（从 locomanipulation_g1_env_cfg.py:321）
-                    D = 30.0
+                    D = 11.0   # 最新调整：降低到临界阻尼 1.2 倍（ζ≈1.2）
                     tau_max = 25.0  # 肩/肘默认
 
                     # 检查是否有针对该关节的特殊配置
@@ -670,7 +670,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 print("\n诊断结论：")
                 # 肩/肘关节参数
                 shoulder_elbow_K = 200.0
-                shoulder_elbow_D = 30.0
+                shoulder_elbow_D = 11.0  # 最新调整
                 shoulder_elbow_tau = 25.0
                 linear_deg = (shoulder_elbow_tau / shoulder_elbow_K) * 180 / 3.14159
                 D_crit = 0.632 * (shoulder_elbow_K ** 0.5)

@@ -307,7 +307,7 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_wrist_.*_joint",
             ],
             # 力矩上限按真实 G1 电机量级（肩/肘 ~25 N·m，腕 ~5 N·m）。
-            # 模板值 300 会让 PD 过冲产生上千牛的夹持力，箱子被挤飞。
+            # 模板值 300 会让 PD 过冲产生上千牛的夹持力,箱子被挤飞。
             effort_limit_sim={
                 ".*_shoulder_.*_joint": 25.0,
                 ".*_elbow_joint": 25.0,
@@ -316,10 +316,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
             velocity_limit_sim=100,
             # 刚度降低到"稳定时不封顶"，让阻尼项有效（避免 bang-bang 振荡）。
             # 计算：稳定误差 < 0.125 rad 时 K×err < effort → K ≤ 25/0.125 = 200。
-            # 临界阻尼 D = 2√(K×I) = 2√(200×0.5) ≈ 20，加 50% 裕度 → 30。
-            # 接触力仍由 effort 封顶（25 N·m → 每臂约 80 N），快速跟踪时短暂封顶可接受。
+            # 临界阻尼 D_crit = 0.632√K = 0.632√200 ≈ 8.9，取 1.2 倍裕度 → 10.7 ≈ 11。
+            # 实测诊断 ζ=3.36（D=30 过阻尼），降到 D=11 实现快速响应 + 轻微超调（ζ≈1.2）。
             stiffness=200.0,
-            damping=30.0,
+            damping=11.0,
             armature={
                 ".*_shoulder_.*": 0.001,
                 ".*_elbow_.*": 0.001,
