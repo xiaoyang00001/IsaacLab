@@ -112,7 +112,9 @@ def main():
     env = gym.make(TASK, cfg=env_cfg).unwrapped
     env.reset()
 
-    robot = env.scene["robot"]
+    robot_key = "robot" if "robot" in env.scene.keys() else "robot_1"
+    robot = env.scene[robot_key]
+    info(f"使用机器人实体: {robot_key}")
     box = env.scene["cart_box1"]
     action = torch.zeros((1, env.action_manager.total_action_dim), device=env.device)
 
