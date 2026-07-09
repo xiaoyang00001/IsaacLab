@@ -360,6 +360,28 @@ def _make_graspable_cart_box_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     )
 
 
+def _make_pushcart_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
+    """Create the pushcart with rigid physics available at spawn time.
+
+    When ``syncable`` is set, the cart switches to kinematic + no-gravity on the ZMQ
+    subscriber side so it purely follows the publisher's synced pose instead of
+    fighting local physics.
+    """
+
+    is_sync_subscriber = syncable and ZMQ_SYNC_ROLE == "subscriber"
+    return UsdFileCfg(
+        usd_path=os.path.join(os.path.dirname(__file__), "props", "pushcart_physics.usda"),
+        scale=(0.5, 0.5, 1.0),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            rigid_body_enabled=True,
+            kinematic_enabled=is_sync_subscriber,
+            disable_gravity=is_sync_subscriber,
+            solver_position_iteration_count=8,
+            max_depenetration_velocity=5.0,
+        ),
+    )
+
+
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """Scene configuration for locomanipulation environment with G1 robot.
@@ -431,31 +453,27 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Pushcart",
         # 对齐 ConveyorBelt（场景位置 y=14.39363，绕 Z 90°），再叠加 +90°Z = 180°Z 总旋转
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "pushcart_physics.usda"),
-            # x/y 各缩小一半，z（高度）不变
-            scale=(0.5, 0.5, 1.0),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=8,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
+        # syncable=True：跨机 ZMQ 同步推车（订阅端切换为 kinematic，跟随发布端位姿）
+        spawn=_make_pushcart_spawn_cfg(syncable=True),
     )
     cart_box1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
         # 推车顶面 z≈0.377，箱子半高 0.0745 → 中心 z
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.45], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=_make_graspable_cart_box_spawn_cfg(),
+        # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
+        spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
     cart_box2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox2",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.60], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=_make_graspable_cart_box_spawn_cfg(),
+        # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
+        spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
     cart_box3 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox3",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.75], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=_make_graspable_cart_box_spawn_cfg(),
+        # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
+        spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
     cart_box4 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox4",
@@ -673,6 +691,10 @@ class ActionsCfg:
         write_joint_state=True,
     )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    pushcart_sync = ZmqObjectSyncActionCfg(asset_name="pushcart", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    cart_box1_sync = ZmqObjectSyncActionCfg(asset_name="cart_box1", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    cart_box2_sync = ZmqObjectSyncActionCfg(asset_name="cart_box2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    cart_box3_sync = ZmqObjectSyncActionCfg(asset_name="cart_box3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
 
 
