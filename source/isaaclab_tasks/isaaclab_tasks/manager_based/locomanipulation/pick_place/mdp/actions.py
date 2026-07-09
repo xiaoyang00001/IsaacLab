@@ -1317,8 +1317,11 @@ class HugBoxAttachAction(ActionTerm):
     实测见 ``hug_box_g1_udp_test.py``。本动作项沿用同一范式解决抱箱：
 
     - 吸附：双掌间距 < ``attach_sep`` 且箱心位于两掌之间时，锁定箱子相对
-      锚点 link（躯干）的位姿，此后每步硬写箱子位姿跟随躯干（腰部动作
-      会带着箱子一起动，与 root 锚定 / 跨机箱子同步同一个"瞬移"哲学）；
+      "两掌中点坐标系"（掌中点位置 + 掌连线偏航）的位姿，此后每步硬写
+      箱子跟随双手——手往哪儿移、箱子跟到哪儿（含腰带手、root 带手），
+      与 root 锚定 / 跨机箱子同步同一个"瞬移"哲学；
+    - 跟手而非锁躯干是为了减轻穿模：操作者吸附后继续收臂/平移手臂时，
+      箱子始终居中在两掌之间，穿透对称且上限只有 (箱宽-掌距)/2；
     - 解除：双掌间距 > ``detach_sep`` 连续 ``detach_debounce_steps`` 步，
       箱子恢复自由动力学（落下）。
 
@@ -1338,7 +1341,6 @@ class HugBoxAttachAction(ActionTerm):
         self._object = None
         self._palm_l: int | None = None
         self._palm_r: int | None = None
-        self._anchor: int | None = None
         if self._enabled:
             try:
                 self._object = env.scene[cfg.object_name]
@@ -1356,17 +1358,16 @@ class HugBoxAttachAction(ActionTerm):
 
             self._palm_l = _find(cfg.left_palm_candidates)
             self._palm_r = _find(cfg.right_palm_candidates)
-            self._anchor = _find(cfg.anchor_link_candidates)
-            if None in (self._palm_l, self._palm_r, self._anchor):
+            if None in (self._palm_l, self._palm_r):
                 self._enabled = False
                 print(
-                    "[WARN] HugBoxAttach disabled: palm/anchor link not found "
-                    f"(palm_l={self._palm_l}, palm_r={self._palm_r}, anchor={self._anchor})."
+                    "[WARN] HugBoxAttach disabled: palm link not found "
+                    f"(palm_l={self._palm_l}, palm_r={self._palm_r})."
                 )
             else:
                 print(
                     f"[INFO] HugBoxAttach enabled: robot={cfg.asset_name}, object={cfg.object_name}, "
-                    f"anchor={body_names[self._anchor]}, attach_sep={cfg.attach_sep}, detach_sep={cfg.detach_sep}"
+                    f"frame=palm-midpoint, attach_sep={cfg.attach_sep}, detach_sep={cfg.detach_sep}"
                 )
 
         self._attached = False
@@ -1399,6 +1400,15 @@ class HugBoxAttachAction(ActionTerm):
         self._attached = False
         self._detach_count = 0
 
+    def _palm_frame(self, pl: torch.Tensor, pr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """两掌中点坐标系：原点 = 掌中点，偏航 = 掌连线方向（俯仰/滚转保持水平）。"""
+        mid = ((pl + pr) / 2.0).unsqueeze(0)
+        lat = pr - pl
+        half = torch.atan2(lat[1], lat[0]) / 2.0
+        zero = torch.zeros((), device=self.device)
+        q_yaw = torch.stack([torch.cos(half), zero, zero, torch.sin(half)]).unsqueeze(0)
+        return mid, q_yaw
+
     def apply_actions(self):
         if not self._enabled:
             return
@@ -1406,9 +1416,10 @@ class HugBoxAttachAction(ActionTerm):
         data = self._asset.data
         pl = data.body_link_pos_w[0, self._palm_l]
         pr = data.body_link_pos_w[0, self._palm_r]
-        anchor_pos = data.body_link_pos_w[0, self._anchor].unsqueeze(0)
-        anchor_quat = data.body_link_quat_w[0, self._anchor].unsqueeze(0)
         sep = torch.norm(pl - pr).item()
+        if sep < 1e-4:
+            return
+        mid, q_yaw = self._palm_frame(pl, pr)
 
         if not self._attached:
             box_pose = self._object.data.root_state_w[:, :7]
@@ -1420,12 +1431,12 @@ class HugBoxAttachAction(ActionTerm):
             seg = pr - pl
             t_par = (torch.dot(c - pl, seg) / torch.clamp(torch.dot(seg, seg), min=1e-9)).item()
             if sep < self.cfg.attach_sep and near and 0.15 < t_par < 0.85:
-                inv_q = quat_inv(anchor_quat)
-                self._rel_pos = quat_apply(inv_q, box_pose[:, :3] - anchor_pos)
+                inv_q = quat_inv(q_yaw)
+                self._rel_pos = quat_apply(inv_q, box_pose[:, :3] - mid)
                 self._rel_quat = quat_mul(inv_q, box_pose[:, 3:7])
                 self._attached = True
                 self._detach_count = 0
-                print(f"[INFO] HugBoxAttach: 吸附 {self.cfg.object_name}（掌距 {sep:.3f} m）")
+                print(f"[INFO] HugBoxAttach: 吸附 {self.cfg.object_name}（掌距 {sep:.3f} m，跟随两掌中点）")
             return
 
         if sep > self.cfg.detach_sep:
@@ -1436,7 +1447,7 @@ class HugBoxAttachAction(ActionTerm):
         else:
             self._detach_count = 0
 
-        target_pos = anchor_pos + quat_apply(anchor_quat, self._rel_pos)
-        target_quat = quat_mul(anchor_quat, self._rel_quat)
+        target_pos = mid + quat_apply(q_yaw, self._rel_pos)
+        target_quat = quat_mul(q_yaw, self._rel_quat)
         self._object.write_root_pose_to_sim(torch.cat([target_pos, target_quat], dim=1))
         self._object.write_root_velocity_to_sim(torch.zeros((1, 6), dtype=torch.float32, device=self.device))

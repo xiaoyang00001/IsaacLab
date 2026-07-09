@@ -267,9 +267,6 @@ class HugBoxAttachActionCfg(ActionTermCfg):
     right_palm_candidates: list[str] = ["right_hand_palm_link", "right_wrist_yaw_link"]
     """Candidate link names for the right palm (first match wins)."""
 
-    anchor_link_candidates: list[str] = ["torso_link", "waist_yaw_link", "pelvis"]
-    """Candidate anchor links the box follows while attached (first match wins)."""
-
     attach_sep: float = 0.26
     """Palm separation (m) below which a bracketed box gets attached."""
 
