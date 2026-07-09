@@ -307,16 +307,19 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_wrist_.*_joint",
             ],
             # 力矩上限按真实 G1 电机量级（肩/肘 ~25 N·m，腕 ~5 N·m）。
-            # 模板值 300 会让 PD 过冲产生上千牛的夹持力，箱子被挤飞；
-            # 空载跟踪误差 = 力矩上限/刚度 ≈ 0.008 rad，不影响镜像观感。
+            # 模板值 300 会让 PD 过冲产生上千牛的夹持力，箱子被挤飞。
             effort_limit_sim={
                 ".*_shoulder_.*_joint": 25.0,
                 ".*_elbow_joint": 25.0,
                 ".*_wrist_.*_joint": 5.0,
             },
             velocity_limit_sim=100,
-            stiffness=3000.0,
-            damping=10.0,
+            # 刚度必须与力矩上限匹配：3000 配 25 N·m 时线性区仅 8 mrad，
+            # 误差稍大即力矩饱和、阻尼失效，手臂自激振荡（上下摆动）。
+            # 500/30 时线性区 50 mrad（约 3°），重力误差 ~0.01 rad 不可察觉，
+            # 阻尼比 ≈ 2 过阻尼，接触与空载都稳定；夹持力仍由 effort 封顶。
+            stiffness=500.0,
+            damping=30.0,
             armature={
                 ".*_shoulder_.*": 0.001,
                 ".*_elbow_.*": 0.001,

@@ -102,7 +102,7 @@ $env:ISAACLAB_G1_ROOT_ZMQ_HOST="192.168.10.230"
 
 1. **身体姿态镜像**（来自远端 UDP）：`mirror_joint_names` 覆盖髋/膝/踝/腰/肩/肘/腕关节，根节点位姿通过独立的 `g1_root` 流镜像（`root_motion_mode="source"`，不启用支撑脚兜底估计）。镜像关节按 `pd_drive_joint_names`（默认匹配肩/肘/腕）分成两组写入：
    - **运动学硬写组**（腿/腰）：每个仿真步 `write_joint_state_to_sim` + 位置/速度目标，步态与远端严格一致；
-   - **PD 弹簧驱动组**（手臂，默认启用）：只下发 `set_joint_position_target` / `set_joint_velocity_target`，不硬写关节状态。手臂由隐式执行器（`stiffness=3000, damping=10`）按力矩拉向目标——碰到箱子推不动时，跟踪误差转化为持续夹持力，静摩擦得以建立，**双臂抱箱搬运因此可行**。遥操作者在远端 MuJoCo 侧没有箱子阻挡，镜像目标会自然落到箱子"内部"，等价于自动过冲。把 `pd_drive_joint_names` 设为空列表可回退到旧的全运动学硬写模式（手臂变成"瞬移墙"，会把箱子挤出且抱不住）。
+   - **PD 弹簧驱动组**（手臂，默认启用）：只下发 `set_joint_position_target` / `set_joint_velocity_target`，不硬写关节状态。手臂由隐式执行器（`stiffness=500, damping=30`，见下文「物理抓取的三个前提」）按力矩拉向目标——碰到箱子推不动时，跟踪误差转化为持续夹持力，静摩擦得以建立，**双臂抱箱搬运因此可行**。遥操作者在远端 MuJoCo 侧没有箱子阻挡，镜像目标会自然落到箱子"内部"，等价于自动过冲。把 `pd_drive_joint_names` 设为空列表可回退到旧的全运动学硬写模式（手臂变成"瞬移墙"，会把箱子挤出且抱不住）。
    - `root_position_mode="relative"`：第一次收到根节点包时记录远端起始位置和 Isaac 本地起始位置，之后世界位置 = **本地起始位置 + (远端当前位置 − 远端起始位置)**，即只镜像位移增量而不是绝对坐标，避免两侧坐标系原点不一致导致机器人瞬移。
    - `root_zmq_required=True`：如果收到了 body 包但还没收到 root 包，会打印一次性 `[WARN] ... the robot will walk in place until root_pos_w/root_quat_w arrive.`——机器人原地摆动但不移动，通常就是这个原因。
 2. **手部/夹爪由 VR 手柄控制，不走 MuJoCo 镜像**：`mirror_hands_from_mujoco = cfg.mirror_hands and not cfg.controller_gripper_enabled`（[actions.py:405](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py#L405)）。当前配置里 `controller_gripper_enabled` 默认为 `True`，所以这个表达式恒为 `False`——手指关节永远不会被 MuJoCo 的手部数据覆盖，全部由 `G1GripperMotionControllerRetargeter` 从 VR 手柄扳机 / 侧握实时生成（action 维度为 4：`[left_index, left_middle, right_index, right_middle]`）。
@@ -123,7 +123,7 @@ $env:ISAACLAB_G1_ROOT_ZMQ_HOST="192.168.10.230"
 
 1. **手臂关节走 PD 不硬写**：`pd_drive_joint_names`（见上文第 1 点），跟踪误差转化为夹持力。
 2. **手指关节走 PD 不硬写**：`write_joint_state=False`（本表），否则手指接触每步被硬写覆盖、穿进箱子。
-3. **力矩上限封顶在真实电机量级**：`effort_limit_sim` 肩/肘 25、腕 5、指节 3 N·m（`G1_43DOF_GR00T_CFG` 的 `arms`/`hands` 执行器）。模板值（手臂 300、指节 60 N·m）会把镜像过冲放大成上千牛的夹持力——遥操作者在远端合拢手臂时没有箱子阻挡，过冲远大于受控实验的 0.25 rad——箱子接触瞬间像捏西瓜籽一样被弹飞（「一抱就飞」）。刚度 3000 不变，空载跟踪误差上限 = 25/3000 ≈ 0.008 rad，镜像观感不受影响；接触力被限制在人类手臂水平（每臂约 80 N、指尖约 60 N）。若仍有轻微弹跳，下一个旋钮是手臂 damping 10 → 30-50（欠阻尼振荡）。
+3. **力矩上限封顶在真实电机量级**：`effort_limit_sim` 肩/肘 25、腕 5、指节 3 N·m（`G1_43DOF_GR00T_CFG` 的 `arms`/`hands` 执行器）。模板值（手臂 300、指节 60 N·m）会把镜像过冲放大成上千牛的夹持力——遥操作者在远端合拢手臂时没有箱子阻挡，过冲远大于受控实验的 0.25 rad——箱子接触瞬间像捏西瓜籽一样被弹飞（「一抱就飞」）。**刚度/阻尼必须与力矩上限匹配**：3000 配 25 N·m 时 PD 线性区仅 25/3000 ≈ 8 mrad，误差稍大即力矩饱和、阻尼失效，手臂自激振荡（上下摆动，MuJoCo 侧静止也摆）。现值 stiffness 500 / damping 30：线性区 ≈ 3°，阻尼比 ≈ 2（过阻尼），重力静差 ~0.01 rad 不可察觉；夹持力仍由 effort 封顶（每臂约 80 N、指尖约 60 N），与刚度无关。
 
 另注意：躯干/骨盆仍是运动学硬写（根位姿镜像的先天特性），箱子顶死在胸口抱仍会被「瞬移墙」挤飞——这是架构固有行为，抱取时用前臂/手掌环抱、避免胸压。
 
