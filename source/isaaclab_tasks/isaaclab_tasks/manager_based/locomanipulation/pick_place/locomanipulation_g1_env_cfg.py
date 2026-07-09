@@ -511,11 +511,11 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
-        # 跟随机器人工位平移：保持原作者相对 robot_1 的偏移 (0.789, 1.170)，
-        # 工位旁无桌面，z 落地（箱高 0.24 → 中心 0.12）
+        # 叠放在 cart_box4 顶面：cart_box4 中心 z=0.90，箱子半高 0.075 → 顶面 z=0.975；
+        # test_box 半高 0.12 → 中心 z=1.095。x/y 对齐 cart_box4，rot 沿用推车朝向。
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[-3.011, 20.178, 0.12],
-            rot=[1.0, 0.0, 0.0, 0.0],
+            pos=[-5.4, 19.39363, 1.095],
+            rot=[0.0, 0.0, 0.0, 1.0],
         ),
         spawn=sim_utils.CuboidCfg(
             size=(0.32, 0.22, 0.24),
