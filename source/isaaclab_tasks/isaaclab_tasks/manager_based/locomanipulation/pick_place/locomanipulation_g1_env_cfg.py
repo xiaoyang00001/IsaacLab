@@ -669,7 +669,9 @@ class ActionsCfg:
         controller_gripper_thumb_2_angle=1.8,
         controller_gripper_action_alpha=1.0,
         controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
+        # 手指走 PD 而非硬写：硬写会每步覆盖接触解算，手指直接穿进箱子。
+        # PD 下手指顶住物体表面即停（不再闭合到满行程 1.8 rad），这是正确物理行为。
+        write_joint_state=False,
     )
     remote_gripper = G1GripperSyncActionCfg(
         asset_name=ISAACLAB_PEER_ROBOT_NAME,
@@ -693,7 +695,8 @@ class ActionsCfg:
         ),
         timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
         controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
+        # 同 local_gripper：远端镜像的手指也走 PD，避免硬写覆盖接触解算。
+        write_joint_state=False,
     )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     pushcart_sync = ZmqObjectSyncActionCfg(asset_name="pushcart", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
