@@ -306,7 +306,14 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_elbow_joint",
                 ".*_wrist_.*_joint",
             ],
-            effort_limit_sim=300,
+            # 力矩上限按真实 G1 电机量级（肩/肘 ~25 N·m，腕 ~5 N·m）。
+            # 模板值 300 会让 PD 过冲产生上千牛的夹持力，箱子被挤飞；
+            # 空载跟踪误差 = 力矩上限/刚度 ≈ 0.008 rad，不影响镜像观感。
+            effort_limit_sim={
+                ".*_shoulder_.*_joint": 25.0,
+                ".*_elbow_joint": 25.0,
+                ".*_wrist_.*_joint": 5.0,
+            },
             velocity_limit_sim=100,
             stiffness=3000.0,
             damping=10.0,
@@ -322,7 +329,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_hand_middle_.*",
                 ".*_hand_thumb_.*",
             ],
-            effort_limit_sim=60.0,
+            # 指节力矩按 Dex3 真实量级（~3 N·m）。60 N·m 在指节杠杆下
+            # 是上千牛捏力，物体接触瞬间被弹飞；3 N·m ≈ 60 N 指尖力，
+            # 捏 1.5 kg 箱子绰绰有余。
+            effort_limit_sim=3.0,
             velocity_limit_sim=20.0,
             stiffness=80.0,
             damping=4.0,
