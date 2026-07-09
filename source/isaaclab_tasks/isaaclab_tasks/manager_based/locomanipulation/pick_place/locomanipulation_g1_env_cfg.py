@@ -333,16 +333,22 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
 )
 
 
-def _make_graspable_cart_box_spawn_cfg() -> UsdFileCfg:
-    """Create the warehouse cardboard box with rigid physics available at spawn time."""
+def _make_graspable_cart_box_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
+    """Create the warehouse cardboard box with rigid physics available at spawn time.
 
+    When ``syncable`` is set, the box switches to kinematic + no-gravity on the ZMQ
+    subscriber side so it purely follows the publisher's synced pose instead of
+    fighting local physics (same pattern as ``test_box``).
+    """
+
+    is_sync_subscriber = syncable and ZMQ_SYNC_ROLE == "subscriber"
     return UsdFileCfg(
         usd_path=os.path.join(os.path.dirname(__file__), "props", "cart_box_d05_physics.usda"),
         mass_props=sim_utils.MassPropertiesCfg(mass=1.5),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
-            kinematic_enabled=False,
-            disable_gravity=False,
+            kinematic_enabled=is_sync_subscriber,
+            disable_gravity=is_sync_subscriber,
             linear_damping=0.1,
             angular_damping=0.1,
             max_depenetration_velocity=0.5,
@@ -453,7 +459,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     cart_box4 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox4",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.90], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=_make_graspable_cart_box_spawn_cfg(),
+        # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
+        spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
     # worktable_tote = RigidObjectCfg(
     #     prim_path="{ENV_REGEX_NS}/WorkTableTote",
@@ -665,6 +672,7 @@ class ActionsCfg:
         write_joint_state=True,
     )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
 
 
 @configclass
