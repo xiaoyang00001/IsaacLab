@@ -5,6 +5,7 @@
 #   ./start_teleop_g1.sh                         # 按默认配置启动
 #   ./start_teleop_g1.sh --headless ...           # 额外参数原样透传给 teleop_se3_agent.py
 #   ./start_teleop_g1.sh --collision-test         # 运行碰撞可视化测试（带 GUI 画面）
+#   ./start_teleop_g1.sh --hug-test               # 运行抱箱演示（证明箱子可被双臂抱住）
 #
 # 覆盖默认值（示例）:
 #   ISAACLAB_G1_ZMQ_HOST=192.168.50.100 ./start_teleop_g1.sh
@@ -13,12 +14,15 @@ set -euo pipefail
 # ---------- 可按需修改的配置（均可用同名环境变量在外部覆盖） ----------
 ISAACLAB_DIR="${ISAACLAB_DIR:-/home/nolo/xiaoyang_IssacLab/IsaacLab}"
 
-# 碰撞可视化测试模式
+# 碰撞可视化测试 / 抱箱演示模式
 _COLLISION_TEST=false
+_HUG_TEST=false
 _FILTERED_ARGS=()
 for _arg in "$@"; do
   if [[ "$_arg" == "--collision-test" ]]; then
     _COLLISION_TEST=true
+  elif [[ "$_arg" == "--hug-test" ]]; then
+    _HUG_TEST=true
   else
     _FILTERED_ARGS+=("$_arg")
   fi
@@ -84,6 +88,12 @@ echo "[start_teleop_g1] 本机 IP（PICO 串流填这个）: $(hostname -I | awk
 if [[ "$_COLLISION_TEST" == true ]]; then
   echo "[start_teleop_g1] 碰撞可视化测试模式"
   exec ./isaaclab.sh -p scripts/environments/teleoperation/collision_g1_test.py \
+    --device "$DEVICE" \
+    --task "$TASK" \
+    "$@"
+elif [[ "$_HUG_TEST" == true ]]; then
+  echo "[start_teleop_g1] 抱箱演示模式"
+  exec ./isaaclab.sh -p scripts/environments/teleoperation/hug_box_g1_test.py \
     --device "$DEVICE" \
     --task "$TASK" \
     "$@"
