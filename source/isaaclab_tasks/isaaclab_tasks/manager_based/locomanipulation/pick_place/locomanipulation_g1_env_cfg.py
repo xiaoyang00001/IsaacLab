@@ -162,7 +162,6 @@ def _find_gr00t_g1_43dof_usd() -> str:
     )
     for root in candidates:
         for usd_name in (
-            "g1_43dof_isaaclab_nomdl.usd",
             "g1_43dof.usd",
             "g1_43dof_isaaclab_no_material.usda",
             "g1_43dof_isaaclab_nomdl.usda",
@@ -334,16 +333,22 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
 )
 
 
-def _make_graspable_cart_box_spawn_cfg() -> UsdFileCfg:
-    """Create the warehouse cardboard box with rigid physics available at spawn time."""
+def _make_graspable_cart_box_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
+    """Create the warehouse cardboard box with rigid physics available at spawn time.
 
+    When ``syncable`` is set, the box switches to kinematic + no-gravity on the ZMQ
+    subscriber side so it purely follows the publisher's synced pose instead of
+    fighting local physics (same pattern as ``test_box``).
+    """
+
+    is_sync_subscriber = syncable and ZMQ_SYNC_ROLE == "subscriber"
     return UsdFileCfg(
         usd_path=os.path.join(os.path.dirname(__file__), "props", "cart_box_d05_physics.usda"),
         mass_props=sim_utils.MassPropertiesCfg(mass=1.5),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
-            kinematic_enabled=False,
-            disable_gravity=False,
+            kinematic_enabled=is_sync_subscriber,
+            disable_gravity=is_sync_subscriber,
             linear_damping=0.1,
             angular_damping=0.1,
             max_depenetration_velocity=0.5,
@@ -429,6 +434,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=os.path.join(os.path.dirname(__file__), "props", "pushcart_physics.usda"),
+            # x/y 各缩小一半，z（高度）不变
+            scale=(0.5, 0.5, 1.0),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=8,
                 max_depenetration_velocity=5.0,
@@ -454,7 +461,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     cart_box4 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox4",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.90], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=_make_graspable_cart_box_spawn_cfg(),
+        # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
+        spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
     # worktable_tote = RigidObjectCfg(
     #     prim_path="{ENV_REGEX_NS}/WorkTableTote",
@@ -512,11 +520,11 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
-        # 跟随机器人工位平移：保持原作者相对 robot_1 的偏移 (0.789, 1.170)，
-        # 工位旁无桌面，z 落地（箱高 0.24 → 中心 0.12）
+        # 叠放在 cart_box4 顶面：cart_box4 中心 z=0.90，箱子半高 0.075 → 顶面 z=0.975；
+        # test_box 半高 0.12 → 中心 z=1.095。x/y 对齐 cart_box4，rot 沿用推车朝向。
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[-3.011, 20.178, 0.12],
-            rot=[1.0, 0.0, 0.0, 0.0],
+            pos=[-5.4, 19.39363, 1.095],
+            rot=[0.0, 0.0, 0.0, 1.0],
         ),
         spawn=sim_utils.CuboidCfg(
             size=(0.32, 0.22, 0.24),
@@ -666,6 +674,7 @@ class ActionsCfg:
         write_joint_state=True,
     )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     # 抱箱吸附：镜像的运动学硬写驱动没有夹持力（摩擦抱不住，实测见 hug_box_g1_udp_test.py），
     # 双掌合抱到位即把箱子按相对位姿吸附到躯干，张臂即释放。仅在箱子为动力学刚体的
     # publisher 端启用；ISAACLAB_HUG_ATTACH=0 可关闭。
