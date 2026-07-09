@@ -314,11 +314,12 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_wrist_.*_joint": 5.0,
             },
             velocity_limit_sim=100,
-            # 刚度/阻尼取临界阻尼（damping_c = 2×sqrt(K×I)，I≈0.5 kg·m²）
-            # 避免欠阻尼振荡。2000/60 → 阻尼比≈1，快速跟踪且不振荡；
-            # 接触力仍由 effort 封顶（25 N·m → 每臂约 80 N）。
-            stiffness=2000.0,
-            damping=60.0,
+            # 刚度降低到"稳定时不封顶"，让阻尼项有效（避免 bang-bang 振荡）。
+            # 计算：稳定误差 < 0.125 rad 时 K×err < effort → K ≤ 25/0.125 = 200。
+            # 临界阻尼 D = 2√(K×I) = 2√(200×0.5) ≈ 20，加 50% 裕度 → 30。
+            # 接触力仍由 effort 封顶（25 N·m → 每臂约 80 N），快速跟踪时短暂封顶可接受。
+            stiffness=200.0,
+            damping=30.0,
             armature={
                 ".*_shoulder_.*": 0.001,
                 ".*_elbow_.*": 0.001,
