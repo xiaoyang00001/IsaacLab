@@ -301,6 +301,9 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._enabled = cfg.enabled and self.num_envs == 1
 
         self._body_mujoco_ids, self._body_isaac_ids = self._build_body_joint_ids(cfg.mirror_joint_names)
+        self._pd_body_isaac_ids, self._kinematic_body_isaac_ids = self._split_pd_drive_joint_ids(
+            cfg.pd_drive_joint_names
+        )
         self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
@@ -415,7 +418,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             root_state = "yes" if sample.root_pos_w is not None or sample.root_quat_w is not None else "no"
             print(
                 "[INFO] MuJoCo G1 mirror received first packet: "
-                f"mirrored_body_joints={len(self._body_isaac_ids)}, "
+                f"mirrored_body_joints={len(self._body_isaac_ids)} "
+                f"(pd_drive={len(self._pd_body_isaac_ids)}, kinematic={len(self._kinematic_body_isaac_ids)}), "
                 f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, "
                 f"body_source={sample.body_source}, root_source={sample.root_source}"
             )
@@ -453,11 +457,15 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
 
-        self._asset.write_joint_state_to_sim(
-            joint_pos[:, self._body_isaac_ids],
-            joint_vel[:, self._body_isaac_ids],
-            joint_ids=self._body_isaac_ids,
-        )
+        # PD-drive joints (arms by default) only receive position/velocity targets below,
+        # so contact forces from held objects are resolved by the actuator instead of
+        # being overwritten by a kinematic state reset every step.
+        if self._kinematic_body_isaac_ids:
+            self._asset.write_joint_state_to_sim(
+                joint_pos[:, self._kinematic_body_isaac_ids],
+                joint_vel[:, self._kinematic_body_isaac_ids],
+                joint_ids=self._kinematic_body_isaac_ids,
+            )
         self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
@@ -877,6 +885,24 @@ class MuJoCoG1MirrorAction(ActionTerm):
     def _build_joint_ids(self, joint_names: list[str]) -> list[int]:
         isaac_name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}
         return [isaac_name_to_id[name] for name in joint_names if name in isaac_name_to_id]
+
+    def _split_pd_drive_joint_ids(self, pd_patterns: list[str]) -> tuple[list[int], list[int]]:
+        """Split mirrored body joints into PD-target-only and kinematic hard-write groups."""
+        compiled = [re.compile(pattern) for pattern in pd_patterns]
+        joint_names = self._asset.joint_names
+        pd_ids = [
+            isaac_id
+            for isaac_id in self._body_isaac_ids
+            if any(pattern.fullmatch(joint_names[isaac_id]) for pattern in compiled)
+        ]
+        pd_id_set = set(pd_ids)
+        kinematic_ids = [isaac_id for isaac_id in self._body_isaac_ids if isaac_id not in pd_id_set]
+        if pd_ids:
+            print(
+                f"[INFO] MuJoCo G1 mirror PD-drive joints ({len(pd_ids)}): "
+                f"{[joint_names[i] for i in pd_ids]}"
+            )
+        return pd_ids, kinematic_ids
 
     def _build_body_ids(self, body_names: list[str]) -> list[int]:
         body_name_to_id = {name: idx for idx, name in enumerate(self._asset.body_names)}

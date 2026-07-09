@@ -100,7 +100,9 @@ $env:ISAACLAB_G1_ROOT_ZMQ_HOST="192.168.10.230"
 
 `ActionsCfg` 里只有一个动作项 `mujoco_g1_mirror`（[action_cfg.py:37](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/configs/action_cfg.py#L37)），代码注释也特别强调：**这个任务不要再加 IK 或 locomotion 动作项，否则会覆盖镜像状态**。它同时做两件事：
 
-1. **身体姿态镜像**（来自远端 UDP）：`mirror_joint_names` 覆盖髋/膝/踝/腰/肩/肘/腕关节，每个仿真步把收到的 29-DoF MuJoCo 关节角直接 `write_joint_state_to_sim` + 设为位置/速度目标；根节点位姿通过独立的 `g1_root` 流镜像（`root_motion_mode="source"`，不启用支撑脚兜底估计）。
+1. **身体姿态镜像**（来自远端 UDP）：`mirror_joint_names` 覆盖髋/膝/踝/腰/肩/肘/腕关节，根节点位姿通过独立的 `g1_root` 流镜像（`root_motion_mode="source"`，不启用支撑脚兜底估计）。镜像关节按 `pd_drive_joint_names`（默认匹配肩/肘/腕）分成两组写入：
+   - **运动学硬写组**（腿/腰）：每个仿真步 `write_joint_state_to_sim` + 位置/速度目标，步态与远端严格一致；
+   - **PD 弹簧驱动组**（手臂，默认启用）：只下发 `set_joint_position_target` / `set_joint_velocity_target`，不硬写关节状态。手臂由隐式执行器（`stiffness=3000, damping=10`）按力矩拉向目标——碰到箱子推不动时，跟踪误差转化为持续夹持力，静摩擦得以建立，**双臂抱箱搬运因此可行**。遥操作者在远端 MuJoCo 侧没有箱子阻挡，镜像目标会自然落到箱子"内部"，等价于自动过冲。把 `pd_drive_joint_names` 设为空列表可回退到旧的全运动学硬写模式（手臂变成"瞬移墙"，会把箱子挤出且抱不住）。
    - `root_position_mode="relative"`：第一次收到根节点包时记录远端起始位置和 Isaac 本地起始位置，之后世界位置 = **本地起始位置 + (远端当前位置 − 远端起始位置)**，即只镜像位移增量而不是绝对坐标，避免两侧坐标系原点不一致导致机器人瞬移。
    - `root_zmq_required=True`：如果收到了 body 包但还没收到 root 包，会打印一次性 `[WARN] ... the robot will walk in place until root_pos_w/root_quat_w arrive.`——机器人原地摆动但不移动，通常就是这个原因。
 2. **手部/夹爪由 VR 手柄控制，不走 MuJoCo 镜像**：`mirror_hands_from_mujoco = cfg.mirror_hands and not cfg.controller_gripper_enabled`（[actions.py:405](../source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/mdp/actions.py#L405)）。当前配置里 `controller_gripper_enabled` 默认为 `True`，所以这个表达式恒为 `False`——手指关节永远不会被 MuJoCo 的手部数据覆盖，全部由 `G1GripperMotionControllerRetargeter` 从 VR 手柄扳机 / 侧握实时生成（action 维度为 4：`[left_index, left_middle, right_index, right_middle]`）。
