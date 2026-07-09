@@ -5,7 +5,8 @@
 #   ./start_teleop_g1.sh                         # 按默认配置启动
 #   ./start_teleop_g1.sh --headless ...           # 额外参数原样透传给 teleop_se3_agent.py
 #   ./start_teleop_g1.sh --collision-test         # 运行碰撞可视化测试（带 GUI 画面）
-#   ./start_teleop_g1.sh --hug-test               # 运行抱箱演示（证明箱子可被双臂抱住）
+#   ./start_teleop_g1.sh --hug-test               # 运行抱箱演示（PD 直驱，证明箱子可被双臂抱住）
+#   ./start_teleop_g1.sh --hug-udp-test           # 抱箱演示（伪 deploy 发 UDP，走真实 action manager 链路）
 #
 # 覆盖默认值（示例）:
 #   ISAACLAB_G1_ZMQ_HOST=192.168.50.100 ./start_teleop_g1.sh
@@ -17,12 +18,15 @@ ISAACLAB_DIR="${ISAACLAB_DIR:-/home/nolo/xiaoyang_IssacLab/IsaacLab}"
 # 碰撞可视化测试 / 抱箱演示模式
 _COLLISION_TEST=false
 _HUG_TEST=false
+_HUG_UDP_TEST=false
 _FILTERED_ARGS=()
 for _arg in "$@"; do
   if [[ "$_arg" == "--collision-test" ]]; then
     _COLLISION_TEST=true
   elif [[ "$_arg" == "--hug-test" ]]; then
     _HUG_TEST=true
+  elif [[ "$_arg" == "--hug-udp-test" ]]; then
+    _HUG_UDP_TEST=true
   else
     _FILTERED_ARGS+=("$_arg")
   fi
@@ -92,8 +96,14 @@ if [[ "$_COLLISION_TEST" == true ]]; then
     --task "$TASK" \
     "$@"
 elif [[ "$_HUG_TEST" == true ]]; then
-  echo "[start_teleop_g1] 抱箱演示模式"
+  echo "[start_teleop_g1] 抱箱演示模式（PD 直驱）"
   exec ./isaaclab.sh -p scripts/environments/teleoperation/hug_box_g1_test.py \
+    --device "$DEVICE" \
+    --task "$TASK" \
+    "$@"
+elif [[ "$_HUG_UDP_TEST" == true ]]; then
+  echo "[start_teleop_g1] 抱箱演示模式（伪 deploy UDP，走真实 action manager 链路）"
+  exec ./isaaclab.sh -p scripts/environments/teleoperation/hug_box_g1_udp_test.py \
     --device "$DEVICE" \
     --task "$TASK" \
     "$@"
