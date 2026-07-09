@@ -463,6 +463,32 @@ def main():
             warn(f"箱子未随上身升高（z={z_lift:.3f}），可能在臂间滑动")
 
     # ===============================================================
+    # ⑤b 行走搬运：root 流平移 0.5m，箱子应跟着走（模拟遥操抱箱行走）
+    # ===============================================================
+    walked_ok = False
+    if held:
+        banner("⑤b 行走搬运：root 流前移 0.5m，抱着的箱子应跟随")
+        box_p0 = box.data.root_pos_w[0].clone()
+        root_p0 = robot.data.root_pos_w[0].clone()
+        walk_pos = root_state0[:3].cpu().numpy().copy()
+        fwd_np = fwd.cpu().numpy()
+        for _ in range(25):
+            walk_pos = walk_pos + fwd_np * 0.02
+            pub.set_root(walk_pos, root_state0[3:7].cpu().numpy())
+            steps(4)  # 0.25 m/s，共 2s 走 0.5m
+        steps(25)
+        box_d = box.data.root_pos_w[0] - box_p0
+        root_d = robot.data.root_pos_w[0] - root_p0
+        box_fwd = torch.dot(box_d, fwd).item()
+        root_fwd = torch.dot(root_d, fwd).item()
+        dz = box_d[2].item()
+        walked_ok = root_fwd > 0.4 and abs(box_fwd - root_fwd) < 0.1 and abs(dz) < 0.08
+        if walked_ok:
+            ok(f"行走搬运成功：机器人前移 {root_fwd:.2f} m，箱子同步前移 {box_fwd:.2f} m（Δz={dz:+.3f}）")
+        else:
+            warn(f"行走搬运异常：机器人前移 {root_fwd:.2f} m，箱子前移 {box_fwd:.2f} m，Δz={dz:+.3f}")
+
+    # ===============================================================
     # ⑥ 松手对照
     # ===============================================================
     banner("⑥ 松手对照：腰回正 + 张开双臂 → 箱子应落地")
