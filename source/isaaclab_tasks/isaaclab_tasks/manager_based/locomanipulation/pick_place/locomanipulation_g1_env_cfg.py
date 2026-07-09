@@ -314,12 +314,11 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_wrist_.*_joint": 5.0,
             },
             velocity_limit_sim=100,
-            # 刚度必须与力矩上限匹配：3000 配 25 N·m 时线性区仅 8 mrad，
-            # 误差稍大即力矩饱和、阻尼失效，手臂自激振荡（上下摆动）。
-            # 500/30 时线性区 50 mrad（约 3°），重力误差 ~0.01 rad 不可察觉，
-            # 阻尼比 ≈ 2 过阻尼，接触与空载都稳定；夹持力仍由 effort 封顶。
-            stiffness=500.0,
-            damping=30.0,
+            # 刚度/阻尼取临界阻尼（damping_c = 2×sqrt(K×I)，I≈0.5 kg·m²）
+            # 避免欠阻尼振荡。2000/60 → 阻尼比≈1，快速跟踪且不振荡；
+            # 接触力仍由 effort 封顶（25 N·m → 每臂约 80 N）。
+            stiffness=2000.0,
+            damping=60.0,
             armature={
                 ".*_shoulder_.*": 0.001,
                 ".*_elbow_.*": 0.001,
