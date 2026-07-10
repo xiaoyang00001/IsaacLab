@@ -365,16 +365,16 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_knee_joint": 20.0,
             },
             stiffness={
-                ".*_hip_yaw_joint": 100.0,
-                ".*_hip_roll_joint": 100.0,
-                ".*_hip_pitch_joint": 100.0,
-                ".*_knee_joint": 200.0,
+                ".*_hip_yaw_joint": _cfg_float("ISAACLAB_G1_HIP_STIFFNESS", 180.0),
+                ".*_hip_roll_joint": _cfg_float("ISAACLAB_G1_HIP_STIFFNESS", 180.0),
+                ".*_hip_pitch_joint": _cfg_float("ISAACLAB_G1_HIP_STIFFNESS", 180.0),
+                ".*_knee_joint": _cfg_float("ISAACLAB_G1_KNEE_STIFFNESS", 260.0),
             },
             damping={
-                ".*_hip_yaw_joint": 2.5,
-                ".*_hip_roll_joint": 2.5,
-                ".*_hip_pitch_joint": 2.5,
-                ".*_knee_joint": 5.0,
+                ".*_hip_yaw_joint": _cfg_float("ISAACLAB_G1_HIP_DAMPING", 8.0),
+                ".*_hip_roll_joint": _cfg_float("ISAACLAB_G1_HIP_DAMPING", 8.0),
+                ".*_hip_pitch_joint": _cfg_float("ISAACLAB_G1_HIP_DAMPING", 8.0),
+                ".*_knee_joint": _cfg_float("ISAACLAB_G1_KNEE_DAMPING", 12.0),
             },
             armature={
                 ".*_hip_.*": 0.03,
@@ -385,12 +385,12 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
         "feet": DCMotorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             stiffness={
-                ".*_ankle_pitch_joint": 20.0,
-                ".*_ankle_roll_joint": 20.0,
+                ".*_ankle_pitch_joint": _cfg_float("ISAACLAB_G1_ANKLE_PITCH_STIFFNESS", 80.0),
+                ".*_ankle_roll_joint": _cfg_float("ISAACLAB_G1_ANKLE_ROLL_STIFFNESS", 60.0),
             },
             damping={
-                ".*_ankle_pitch_joint": 0.2,
-                ".*_ankle_roll_joint": 0.1,
+                ".*_ankle_pitch_joint": _cfg_float("ISAACLAB_G1_ANKLE_PITCH_DAMPING", 3.0),
+                ".*_ankle_roll_joint": _cfg_float("ISAACLAB_G1_ANKLE_ROLL_DAMPING", 3.0),
             },
             effort_limit={
                 ".*_ankle_pitch_joint": 50.0,
@@ -471,42 +471,23 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -1000.66], rot=[1.0, 0.0, 0.0, 0.0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(1.2, 0.8, 0.08),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -0.3], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.2,
-                dynamic_friction=1.0,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.58, 0.54), roughness=0.65),
         ),
     )
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, -100.76], rot=[1, 0, 0, 0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(0.14, 0.08, 0.12),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                enable_gyroscopic_forces=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
-                max_depenetration_velocity=5.0,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.4,
-                dynamic_friction=1.1,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
+            scale=(0.75, 0.75, 0.75),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
         ),
     )
+
     # 本地仓库背景
     # background = AssetBaseCfg(
     #     prim_path="/World/envs/env_.*/Background",
@@ -580,12 +561,28 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         write_hand_joint_state=_isaac_robot_write_hand_joint_state(robot_id),
         use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
         body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
+        body_joint_debug_interval_s=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_DEBUG_INTERVAL_S", 0.0),
         hand_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "HAND_JOINT_TARGET_MAX_DELTA", 0.20),
         hold_default_until_first_packet=_isaac_robot_cfg_bool(robot_id, "HOLD_DEFAULT_UNTIL_FIRST_PACKET", True),
         no_packet_debug_interval_s=_isaac_robot_cfg_float(robot_id, "NO_PACKET_DEBUG_INTERVAL_S", 1.0),
         root_motion_mode=_isaac_robot_cfg(robot_id, "ROOT_MOTION_MODE", "source"),
         root_zmq_required=_isaac_robot_cfg_bool(robot_id, "ROOT_ZMQ_REQUIRED", True),
         root_position_mode=_isaac_robot_cfg(robot_id, "ROOT_POSITION_MODE", "relative"),
+        root_physics_tracking=_isaac_robot_cfg_bool(robot_id, "ROOT_PHYSICS_TRACKING", sync_mode == "physics"),
+        root_physics_body_name=_isaac_robot_cfg(robot_id, "ROOT_PHYSICS_BODY_NAME", "pelvis"),
+        root_physics_track_height=_isaac_robot_cfg_bool(robot_id, "ROOT_PHYSICS_TRACK_HEIGHT", False),
+        root_physics_track_yaw=_isaac_robot_cfg_bool(robot_id, "ROOT_PHYSICS_TRACK_YAW", True),
+        root_physics_pos_kp=_isaac_robot_cfg_float(robot_id, "ROOT_PHYSICS_POS_KP", 350.0),
+        root_physics_pos_kd=_isaac_robot_cfg_float(robot_id, "ROOT_PHYSICS_POS_KD", 65.0),
+        root_physics_max_force=_isaac_robot_cfg_float(robot_id, "ROOT_PHYSICS_MAX_FORCE", 300.0),
+        root_physics_yaw_kp=_isaac_robot_cfg_float(robot_id, "ROOT_PHYSICS_YAW_KP", 80.0),
+        root_physics_yaw_kd=_isaac_robot_cfg_float(robot_id, "ROOT_PHYSICS_YAW_KD", 8.0),
+        root_physics_max_torque=_isaac_robot_cfg_float(robot_id, "ROOT_PHYSICS_MAX_TORQUE", 80.0),
+        physics_initial_state_align=_isaac_robot_cfg_bool(robot_id, "PHYSICS_INITIAL_STATE_ALIGN", True),
+        physics_reset_on_fall=_isaac_robot_cfg_bool(robot_id, "PHYSICS_RESET_ON_FALL", True),
+        physics_reset_root_height=_isaac_robot_cfg_float(robot_id, "PHYSICS_RESET_ROOT_HEIGHT", 0.45),
+        physics_reset_cooldown_s=_isaac_robot_cfg_float(robot_id, "PHYSICS_RESET_COOLDOWN_S", 1.0),
+        physics_reset_use_source_velocity=_isaac_robot_cfg_bool(robot_id, "PHYSICS_RESET_USE_SOURCE_VELOCITY", False),
         mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", False),
         controller_gripper_enabled=_isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
@@ -738,6 +735,14 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
         self.sim.render_interval = 2
+        self.sim.physx.enable_ccd = _cfg_bool("ISAACLAB_PHYSX_ENABLE_CCD", True)
+        self.sim.physx.enable_stabilization = _cfg_bool("ISAACLAB_PHYSX_ENABLE_STABILIZATION", False)
+        self.sim.physx.solve_articulation_contact_last = _cfg_bool(
+            "ISAACLAB_PHYSX_SOLVE_ARTICULATION_CONTACT_LAST", True
+        )
+        self.sim.physx.enable_external_forces_every_iteration = _cfg_bool(
+            "ISAACLAB_PHYSX_ENABLE_EXTERNAL_FORCES_EVERY_ITERATION", True
+        )
         # The default Isaac Lab GPU PhysX buffers target large batched training scenes.
         # This task is a single-env XR mirror, so smaller buffers avoid VRAM exhaustion on 8 GB GPUs.
         self.sim.physx.gpu_max_rigid_contact_count = 2**20

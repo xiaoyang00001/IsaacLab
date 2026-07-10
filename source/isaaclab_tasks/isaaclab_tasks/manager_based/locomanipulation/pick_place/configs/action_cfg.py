@@ -69,7 +69,7 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
 
     ``mirror`` hard-syncs root and 29-DoF body joints for stable walking.
     ``hybrid`` hard-syncs root but drives body joints through actuator targets.
-    ``physics`` drives body joints through actuator targets and leaves root to PhysX.
+    ``physics`` drives body joints through actuator targets and optionally tracks root with physical external wrench.
     ``custom`` honors the explicit ``write_*_state`` flags.
     """
 
@@ -87,6 +87,9 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
 
     body_joint_target_max_delta: float = 0.08
     """Maximum per-step body target change in radians when body joints are not hard-written."""
+
+    body_joint_debug_interval_s: float = 0.0
+    """Seconds between body joint target/tracking debug prints. Non-positive disables debug prints."""
 
     hand_joint_target_max_delta: float = 0.20
     """Maximum per-step hand target change in radians when hand joints are not hard-written."""
@@ -156,6 +159,51 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
 
     source_root_motion_eps: float = 1.0e-3
     """Source root xy displacement threshold used by ``root_motion_mode='auto'``."""
+
+    root_physics_tracking: bool = False
+    """Whether to track the MuJoCo root reference with external forces instead of direct root-state writes."""
+
+    root_physics_body_name: str = "pelvis"
+    """Robot body that receives the physical root-tracking force/torque."""
+
+    root_physics_track_height: bool = False
+    """Whether physical root tracking also follows the reference root height."""
+
+    root_physics_track_yaw: bool = True
+    """Whether physical root tracking applies a yaw torque toward the reference root orientation."""
+
+    root_physics_pos_kp: float = 350.0
+    """Proportional gain for physical root position tracking."""
+
+    root_physics_pos_kd: float = 65.0
+    """Derivative gain for physical root linear-velocity tracking."""
+
+    root_physics_max_force: float = 300.0
+    """Maximum magnitude of the physical root-tracking force in newtons."""
+
+    root_physics_yaw_kp: float = 80.0
+    """Proportional gain for physical root yaw tracking."""
+
+    root_physics_yaw_kd: float = 8.0
+    """Derivative gain for physical root yaw-rate tracking."""
+
+    root_physics_max_torque: float = 80.0
+    """Maximum magnitude of the physical root-tracking yaw torque in newton-meters."""
+
+    physics_initial_state_align: bool = True
+    """Whether physics mode writes one initial root/body state from MuJoCo before switching to physical tracking."""
+
+    physics_reset_on_fall: bool = True
+    """Whether physics mode performs a one-shot root/body reset when the robot has fallen."""
+
+    physics_reset_root_height: float = 0.45
+    """Root height below which the robot is considered fallen in physics mode."""
+
+    physics_reset_cooldown_s: float = 1.0
+    """Minimum seconds between one-shot physics reset events."""
+
+    physics_reset_use_source_velocity: bool = False
+    """Whether reset events write MuJoCo root/body velocities; false writes zero velocities for stability."""
 
     mirror_joint_names: list[str] = [
         ".*_hip_.*_joint",

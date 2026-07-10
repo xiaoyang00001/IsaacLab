@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+import isaaclab.utils.math as math_utils
 from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
@@ -361,6 +362,13 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
+        self._root_physics_body_ids = self._build_body_ids([cfg.root_physics_body_name])
+        if not self._root_physics_body_ids:
+            self._root_physics_body_ids = [0]
+            print(
+                f"[WARN] MuJoCo G1 mirror did not find root_physics_body_name={cfg.root_physics_body_name!r}; "
+                f"using root body {self._asset.body_names[0]!r}."
+            )
 
         self._transport = str(cfg.transport).lower()
         self._locomotion_sync_mode = str(cfg.locomotion_sync_mode).strip().lower()
@@ -373,6 +381,15 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._write_root_state = bool(cfg.write_root_state)
         self._write_body_joint_state = bool(cfg.write_body_joint_state)
         self._write_hand_joint_state = bool(cfg.write_hand_joint_state)
+        self._root_physics_tracking = bool(cfg.root_physics_tracking) and not self._write_root_state
+        self._root_physics_wrench_active = False
+        self._physics_initial_state_aligned = False
+        self._last_physics_reset_time = -1.0e9
+        if cfg.root_physics_tracking and self._write_root_state:
+            print(
+                "[WARN] MuJoCo G1 root physics tracking is disabled because root-state writes are active. "
+                "Use locomotion_sync_mode='physics' or disable write_root_state."
+            )
         if self._write_root_state and not self._write_body_joint_state:
             print(
                 "[WARN] MuJoCo G1 mirror is configured as root-state write without body-joint state write. "
@@ -385,6 +402,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._last_sample: _MirrorSample | None = None
         self._root_pose = self._asset.data.default_root_state[:, :7].clone()
         self._root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
+        self._body_target_pos = self._asset.data.default_joint_pos[:, self._body_isaac_ids].clone()
+        self._hand_target_pos = self._asset.data.default_joint_pos[:, self._all_hand_ids].clone()
         self._source_root_pos0: torch.Tensor | None = None
         self._target_root_pos0 = self._root_pose[:, :3].clone()
         self._foot_min_z: float | None = None
@@ -402,6 +421,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._last_no_packet_debug_time = 0.0
         self._no_packet_start_time = time.monotonic()
         self._last_root_debug_time = 0.0
+        self._last_body_joint_debug_time = 0.0
         self._last_gripper_debug_time = 0.0
         self._last_mirror_hands_from_mujoco = False
 
@@ -476,12 +496,14 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def apply_actions(self):
         if not self._enabled or self._subscriber is None:
+            self._clear_physics_root_tracking()
             self._hold_default_until_first_packet("mirror disabled or subscriber unavailable")
             self._apply_controller_gripper_targets()
             return
 
         sample = self._sample()
         if sample is None:
+            self._clear_physics_root_tracking()
             self._hold_default_until_first_packet("waiting for valid body packets")
             self._apply_controller_gripper_targets()
             return
@@ -500,6 +522,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             self._printed_first_sample = True
 
         source_root_applied = self._apply_source_root_state(sample)
+        self._maybe_reset_physics_state(sample)
+        self._apply_physics_root_tracking(sample)
 
         joint_pos = self._asset.data.joint_pos.clone()
         joint_vel = self._asset.data.joint_vel.clone()
@@ -543,36 +567,42 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if not self.cfg.use_source_joint_velocity:
                 joint_vel[:, self._all_hand_ids] = 0.0
 
-        body_target = joint_pos[:, self._body_isaac_ids]
+        desired_body_target = joint_pos[:, self._body_isaac_ids]
+        body_target = desired_body_target
         body_velocity = joint_vel[:, self._body_isaac_ids]
         if self._write_body_joint_state:
             self._asset.write_joint_state_to_sim(body_target, body_velocity, joint_ids=self._body_isaac_ids)
+            self._body_target_pos = body_target.clone()
         else:
-            body_target = _limit_joint_position_delta(
-                self._asset.data.joint_pos[:, self._body_isaac_ids],
+            self._body_target_pos = _limit_joint_position_delta(
+                self._body_target_pos,
                 body_target,
                 float(self.cfg.body_joint_target_max_delta),
             )
+            body_target = self._body_target_pos
         self._asset.set_joint_position_target(body_target, joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
+        self._print_body_joint_debug(desired_body_target, body_target)
         if mirror_hands_from_mujoco and self._all_hand_ids:
             hand_target = joint_pos[:, self._all_hand_ids]
             hand_velocity = joint_vel[:, self._all_hand_ids]
             if self._write_hand_joint_state:
                 self._asset.write_joint_state_to_sim(hand_target, hand_velocity, joint_ids=self._all_hand_ids)
+                self._hand_target_pos = hand_target.clone()
             else:
-                hand_target = _limit_joint_position_delta(
-                    self._asset.data.joint_pos[:, self._all_hand_ids],
+                self._hand_target_pos = _limit_joint_position_delta(
+                    self._hand_target_pos,
                     hand_target,
                     float(self.cfg.hand_joint_target_max_delta),
                 )
+                hand_target = self._hand_target_pos
             self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
             self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
 
-        if self.cfg.root_motion_mode in {"stance", "auto"}:
+        if self._write_root_state and self.cfg.root_motion_mode in {"stance", "auto"}:
             self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
-        if self.cfg.ground_lock and not source_root_applied:
+        if self._write_root_state and self.cfg.ground_lock and not source_root_applied:
             self._apply_ground_lock()
         self._print_root_debug(sample)
 
@@ -585,7 +615,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             "[INFO] MuJoCo G1 mirror config: "
             f"asset={self.cfg.asset_name}, transport={self._transport}, mode={self._locomotion_sync_mode}, "
             f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
-            f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
+            f"write_hands={self._write_hand_joint_state}, root_physics={self._root_physics_tracking}, "
+            f"hold_default={self.cfg.hold_default_until_first_packet}, "
             f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
         )
         self._printed_mirror_config = True
@@ -606,6 +637,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         default_joint_vel = self._asset.data.default_joint_vel[:, self._body_isaac_ids]
         if self._write_body_joint_state:
             self._asset.write_joint_state_to_sim(default_joint_pos, default_joint_vel, joint_ids=self._body_isaac_ids)
+        self._body_target_pos = default_joint_pos.clone()
         self._asset.set_joint_position_target(default_joint_pos, joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(default_joint_vel, joint_ids=self._body_isaac_ids)
 
@@ -658,6 +690,125 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._asset.write_root_link_velocity_to_sim(self._root_velocity)
         return True
 
+    def _maybe_reset_physics_state(self, sample: _MirrorSample) -> None:
+        if self._write_root_state or self._write_body_joint_state:
+            self._physics_initial_state_aligned = True
+            return
+        if sample.root_pos_w is None or sample.root_quat_w is None or sample.joint_pos_mujoco is None:
+            return
+
+        now = time.monotonic()
+        reason: str | None = None
+        if self.cfg.physics_initial_state_align and not self._physics_initial_state_aligned:
+            reason = "initial_align"
+        elif self.cfg.physics_reset_on_fall:
+            cooldown = max(float(self.cfg.physics_reset_cooldown_s), 0.0)
+            if now - self._last_physics_reset_time >= cooldown:
+                root_height = float(self._asset.data.root_link_pos_w[0, 2].item())
+                if root_height < float(self.cfg.physics_reset_root_height):
+                    reason = f"fall_reset(root_z={root_height:.3f})"
+
+        if reason is None:
+            return
+        self._reset_physics_state_to_sample(sample, reason)
+
+    def _reset_physics_state_to_sample(self, sample: _MirrorSample, reason: str) -> None:
+        self._clear_physics_root_tracking()
+
+        root_pose = self._root_pose.clone()
+        if self.cfg.physics_reset_use_source_velocity:
+            root_velocity = self._root_velocity.clone()
+        else:
+            root_velocity = torch.zeros_like(self._root_velocity)
+
+        self._asset.write_root_link_pose_to_sim(root_pose)
+        self._asset.write_root_link_velocity_to_sim(root_velocity)
+
+        body_pos = torch.tensor(
+            sample.joint_pos_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
+        if self.cfg.physics_reset_use_source_velocity and sample.joint_vel_mujoco is not None:
+            body_vel = torch.tensor(
+                sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+        else:
+            body_vel = torch.zeros_like(body_pos)
+
+        self._asset.write_joint_state_to_sim(body_pos, body_vel, joint_ids=self._body_isaac_ids)
+        self._body_target_pos = body_pos.clone()
+        self._asset.set_joint_position_target(body_pos, joint_ids=self._body_isaac_ids)
+        self._asset.set_joint_velocity_target(body_vel, joint_ids=self._body_isaac_ids)
+
+        self._physics_initial_state_aligned = True
+        self._last_physics_reset_time = time.monotonic()
+        root_xyz = root_pose[0, :3].detach().cpu().numpy()
+        print(
+            "[INFO] MuJoCo G1 physics reset: "
+            f"asset={self.cfg.asset_name}, reason={reason}, "
+            f"root_xyz=[{root_xyz[0]:.3f}, {root_xyz[1]:.3f}, {root_xyz[2]:.3f}], "
+            f"body_joints={len(self._body_isaac_ids)}, use_source_velocity={self.cfg.physics_reset_use_source_velocity}"
+        )
+
+    def _apply_physics_root_tracking(self, sample: _MirrorSample) -> None:
+        if not self._root_physics_tracking:
+            return
+        if sample.root_pos_w is None and sample.root_quat_w is None:
+            self._clear_physics_root_tracking()
+            return
+
+        current_pos = self._asset.data.root_link_pos_w
+        current_lin_vel = self._asset.data.root_link_lin_vel_w
+        pos_error = self._root_pose[:, :3] - current_pos
+        vel_error = self._root_velocity[:, :3] - current_lin_vel
+        if not self.cfg.root_physics_track_height:
+            pos_error[:, 2] = 0.0
+            vel_error[:, 2] = 0.0
+
+        force = float(self.cfg.root_physics_pos_kp) * pos_error + float(self.cfg.root_physics_pos_kd) * vel_error
+        max_force = float(self.cfg.root_physics_max_force)
+        if max_force > 0.0:
+            force_norm = torch.linalg.norm(force, dim=-1, keepdim=True)
+            force = force * torch.clamp(max_force / torch.clamp(force_norm, min=1.0e-6), max=1.0)
+
+        torque = torch.zeros_like(force)
+        if self.cfg.root_physics_track_yaw and sample.root_quat_w is not None:
+            _, _, target_yaw = math_utils.euler_xyz_from_quat(self._root_pose[:, 3:7])
+            _, _, current_yaw = math_utils.euler_xyz_from_quat(self._asset.data.root_link_quat_w)
+            yaw_error = math_utils.wrap_to_pi(target_yaw - current_yaw)
+            yaw_vel_error = self._root_velocity[:, 5] - self._asset.data.root_link_ang_vel_w[:, 2]
+            yaw_torque = (
+                float(self.cfg.root_physics_yaw_kp) * yaw_error
+                + float(self.cfg.root_physics_yaw_kd) * yaw_vel_error
+            )
+            max_torque = float(self.cfg.root_physics_max_torque)
+            if max_torque > 0.0:
+                yaw_torque = torch.clamp(yaw_torque, -max_torque, max_torque)
+            torque[:, 2] = yaw_torque
+
+        body_quat_w = self._asset.data.body_link_quat_w[:, self._root_physics_body_ids[0]]
+        force_b = math_utils.quat_apply_inverse(body_quat_w, force)
+        torque_b = math_utils.quat_apply_inverse(body_quat_w, torque)
+        self._asset.permanent_wrench_composer.set_forces_and_torques(
+            forces=force_b.unsqueeze(1),
+            torques=torque_b.unsqueeze(1),
+            body_ids=self._root_physics_body_ids,
+            is_global=False,
+        )
+        self._root_physics_wrench_active = True
+
+    def _clear_physics_root_tracking(self) -> None:
+        if not self._root_physics_tracking or not self._root_physics_wrench_active:
+            return
+        count = len(self._root_physics_body_ids)
+        zero_wrench = torch.zeros((self.num_envs, count, 3), dtype=torch.float32, device=self.device)
+        self._asset.permanent_wrench_composer.set_forces_and_torques(
+            forces=zero_wrench,
+            torques=zero_wrench,
+            body_ids=self._root_physics_body_ids,
+            is_global=False,
+        )
+        self._root_physics_wrench_active = False
+
     def _map_source_root_position(self, source_root_pos: torch.Tensor) -> torch.Tensor:
         mode = str(self.cfg.root_position_mode).lower()
         if mode in {"relative", "delta"}:
@@ -699,11 +850,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
             return
         self._last_root_debug_time = now
 
-        applied_pos = self._root_pose[0, :3].detach().cpu().numpy()
+        ref_pos = self._root_pose[0, :3].detach().cpu().numpy()
+        actual_pos = self._asset.data.root_link_pos_w[0].detach().cpu().numpy()
         if sample.root_pos_w is None:
             print(
                 "[INFO] MuJoCo G1 root mirror: source=none, "
-                f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}], "
+                f"actual_xyz=[{actual_pos[0]:.3f}, {actual_pos[1]:.3f}, {actual_pos[2]:.3f}], "
                 "waiting for g1_root."
             )
             return
@@ -719,7 +871,63 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"fresh={sample.root_fresh}, mode={self.cfg.root_position_mode}, "
             f"src_xyz=[{src_pos[0]:.3f}, {src_pos[1]:.3f}, {src_pos[2]:.3f}], "
             f"src_delta_xy=[{src_delta_xy[0]:.3f}, {src_delta_xy[1]:.3f}], "
-            f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}]"
+            f"ref_xyz=[{ref_pos[0]:.3f}, {ref_pos[1]:.3f}, {ref_pos[2]:.3f}], "
+            f"actual_xyz=[{actual_pos[0]:.3f}, {actual_pos[1]:.3f}, {actual_pos[2]:.3f}], "
+            f"root_physics={self._root_physics_tracking}"
+        )
+
+    def _print_body_joint_debug(self, desired_target: torch.Tensor, command_target: torch.Tensor) -> None:
+        interval = float(self.cfg.body_joint_debug_interval_s)
+        if interval <= 0.0 or len(self._body_isaac_ids) == 0:
+            return
+        now = time.monotonic()
+        if now - self._last_body_joint_debug_time < interval:
+            return
+        self._last_body_joint_debug_time = now
+
+        actual = self._asset.data.joint_pos[:, self._body_isaac_ids]
+        default = self._asset.data.default_joint_pos[:, self._body_isaac_ids]
+        desired_cmd_abs = torch.abs(desired_target - command_target)[0]
+        tracking_abs = torch.abs(command_target - actual)[0]
+        desired_cmd_idx = int(torch.argmax(desired_cmd_abs).item())
+        tracking_idx = int(torch.argmax(tracking_abs).item())
+        desired_cmd_joint = self._asset.joint_names[self._body_isaac_ids[desired_cmd_idx]]
+        tracking_joint = self._asset.joint_names[self._body_isaac_ids[tracking_idx]]
+        leg_ids = [
+            idx
+            for idx, joint_id in enumerate(self._body_isaac_ids)
+            if any(token in self._asset.joint_names[joint_id] for token in ("hip_", "knee", "ankle_"))
+        ]
+        waist_ids = [
+            idx for idx, joint_id in enumerate(self._body_isaac_ids) if "waist_" in self._asset.joint_names[joint_id]
+        ]
+        arm_ids = [
+            idx
+            for idx, joint_id in enumerate(self._body_isaac_ids)
+            if any(token in self._asset.joint_names[joint_id] for token in ("shoulder_", "elbow", "wrist_"))
+        ]
+
+        def segment_stats(local_ids: list[int]) -> tuple[float, float]:
+            if not local_ids:
+                return 0.0, 0.0
+            ids = torch.tensor(local_ids, dtype=torch.long, device=self.device)
+            cmd_delta = torch.max(torch.abs(command_target[:, ids] - default[:, ids])).item()
+            track_err = torch.max(torch.abs(command_target[:, ids] - actual[:, ids])).item()
+            return float(cmd_delta), float(track_err)
+
+        leg_cmd, leg_track = segment_stats(leg_ids)
+        waist_cmd, waist_track = segment_stats(waist_ids)
+        arm_cmd, arm_track = segment_stats(arm_ids)
+        print(
+            "[INFO] MuJoCo G1 body joint debug: "
+            f"asset={self.cfg.asset_name}, "
+            f"desired_cmd_err={float(desired_cmd_abs[desired_cmd_idx].item()):.3f}({desired_cmd_joint}), "
+            f"tracking_err={float(tracking_abs[tracking_idx].item()):.3f}({tracking_joint}), "
+            f"legs_cmd={leg_cmd:.3f}, legs_track={leg_track:.3f}, "
+            f"waist_cmd={waist_cmd:.3f}, waist_track={waist_track:.3f}, "
+            f"arms_cmd={arm_cmd:.3f}, arms_track={arm_track:.3f}, "
+            f"target_max_delta={self.cfg.body_joint_target_max_delta}, "
+            f"use_source_vel={self.cfg.use_source_joint_velocity}"
         )
 
     def _apply_controller_gripper_targets(self) -> None:
@@ -830,7 +1038,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
         debug_msg = self._subscriber.poll_latest() if self._subscriber is not None else None
         root_msg = self._root_subscriber.poll_latest() if self._root_subscriber is not None else None
 
-        body_msg = root_msg if self._has_body_state(root_msg) else debug_msg
+        # Use the dedicated debug/body stream for 29-DoF joint references.
+        # The root stream may include measured body_q for convenience, but it should not
+        # override body_q_target from the debug stream in physical tracking mode.
+        body_msg = debug_msg if self._has_body_state(debug_msg) else root_msg if self._has_body_state(root_msg) else None
         if body_msg is None:
             return None
 
