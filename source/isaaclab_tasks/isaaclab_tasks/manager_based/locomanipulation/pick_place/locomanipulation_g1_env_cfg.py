@@ -678,6 +678,10 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        # 全身关节（腿/腰/臂/腕）均走 PD 位置目标，不做运动学硬写：
+        # 关节层面完全物理（接触/重力由执行器解算），与官方 Isaac 遥操一致。
+        # 根位姿仍由镜像流写入——脚本步态无动力学平衡能力，root 需外部给定。
+        pd_drive_joint_names=[".*"],
         pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
@@ -705,6 +709,10 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        # 全身关节（腿/腰/臂/腕）均走 PD 位置目标，不做运动学硬写：
+        # 关节层面完全物理（接触/重力由执行器解算），与官方 Isaac 遥操一致。
+        # 根位姿仍由镜像流写入——脚本步态无动力学平衡能力，root 需外部给定。
+        pd_drive_joint_names=[".*"],
         pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     local_gripper = G1GripperSyncActionCfg(
