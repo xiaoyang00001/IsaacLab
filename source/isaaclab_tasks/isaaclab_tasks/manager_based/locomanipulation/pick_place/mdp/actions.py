@@ -19,11 +19,12 @@ from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
+from isaaclab.utils.math import quat_apply, quat_inv, quat_mul
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from .configs.action_cfg import AgileBasedLowerBodyActionCfg
+    from .configs.action_cfg import AgileBasedLowerBodyActionCfg, HugBoxAttachActionCfg
 
 
 ISAACLAB_29DOF_JOINT_NAMES = [
@@ -116,6 +117,9 @@ RIGHT_HAND_JOINT_NAMES = [
 class _MirrorSample:
     joint_pos_mujoco: np.ndarray | None = None
     joint_vel_mujoco: np.ndarray | None = None
+    pd_joint_pos_target_mujoco: np.ndarray | None = None
+    pd_joint_vel_target_mujoco: np.ndarray | None = None
+    pd_target_source: str = "none"
     left_hand_pos: np.ndarray | None = None
     right_hand_pos: np.ndarray | None = None
     left_hand_vel: np.ndarray | None = None
@@ -304,6 +308,15 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._pd_body_isaac_ids, self._kinematic_body_isaac_ids = self._split_pd_drive_joint_ids(
             cfg.pd_drive_joint_names
         )
+        mujoco_id_by_isaac_id = dict(zip(self._body_isaac_ids, self._body_mujoco_ids))
+        self._pd_body_mujoco_ids = [mujoco_id_by_isaac_id[isaac_id] for isaac_id in self._pd_body_isaac_ids]
+        self._pd_joint_position_source = str(cfg.pd_joint_position_source).strip().lower()
+        if self._pd_joint_position_source not in {"target", "measured"}:
+            print(
+                "[WARN] MuJoCo G1 mirror invalid pd_joint_position_source="
+                f"{cfg.pd_joint_position_source!r}; using 'target'."
+            )
+            self._pd_joint_position_source = "target"
         self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
@@ -329,6 +342,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._warned_root_missing = False
         self._warned_root_position_mode = False
         self._warned_gripper_unavailable = False
+        self._warned_pd_target_unavailable = False
         self._printed_first_sample = False
         self._last_root_debug_time = 0.0
         self._last_gripper_debug_time = 0.0
@@ -419,10 +433,18 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._last_sample = sample
         if not self._printed_first_sample:
             root_state = "yes" if sample.root_pos_w is not None or sample.root_quat_w is not None else "no"
+            pd_source = (
+                sample.pd_target_source
+                if self._pd_joint_position_source == "target" and sample.pd_joint_pos_target_mujoco is not None
+                else f"{self.cfg.zmq_pose_source} (fallback)"
+                if self._pd_joint_position_source == "target"
+                else self.cfg.zmq_pose_source
+            )
             print(
                 "[INFO] MuJoCo G1 mirror received first packet: "
                 f"mirrored_body_joints={len(self._body_isaac_ids)} "
                 f"(pd_drive={len(self._pd_body_isaac_ids)}, kinematic={len(self._kinematic_body_isaac_ids)}), "
+                f"pd_position_source={pd_source}, "
                 f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, "
                 f"body_source={sample.body_source}, root_source={sample.root_source}"
             )
@@ -439,6 +461,38 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if sample.joint_vel_mujoco is not None:
             dq = torch.tensor(sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
             joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
+
+        # Keep legs/waist on the measured mirror while the physical arm PD tracks
+        # SONIC's smooth command target. A measured state is feedback, not a stable
+        # command: feeding it back as q* creates a moving equilibrium and can excite
+        # the arm even when the operator is still.
+        if self._pd_body_isaac_ids and self._pd_joint_position_source == "target":
+            if sample.pd_joint_pos_target_mujoco is not None:
+                q_pd = torch.tensor(
+                    sample.pd_joint_pos_target_mujoco[self._pd_body_mujoco_ids],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                joint_pos[:, self._pd_body_isaac_ids] = q_pd.unsqueeze(0)
+                if sample.pd_joint_vel_target_mujoco is not None:
+                    dq_pd = torch.tensor(
+                        sample.pd_joint_vel_target_mujoco[self._pd_body_mujoco_ids],
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    joint_vel[:, self._pd_body_isaac_ids] = dq_pd.unsqueeze(0)
+                else:
+                    # SONIC currently publishes body_q_target but no body_dq_target.
+                    # A measured velocity is feedback, not the derivative of q*, so
+                    # never reuse it as a target for this branch.
+                    joint_vel[:, self._pd_body_isaac_ids] = 0.0
+                self._warned_pd_target_unavailable = False
+            elif not self._warned_pd_target_unavailable:
+                print(
+                    "[WARN] MuJoCo G1 mirror has no fresh non-zero body_q_target; "
+                    "PD joints are temporarily falling back to the measured pose."
+                )
+                self._warned_pd_target_unavailable = True
 
         mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
         self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
@@ -750,6 +804,42 @@ class MuJoCoG1MirrorAction(ActionTerm):
         elif self._last_sample is not None:
             sample.joint_vel_mujoco = self._last_sample.joint_vel_mujoco
 
+        # The root stream may be selected as the measured body source, but the
+        # canonical debug packet is where SONIC publishes body_q_target. Inspect
+        # both streams independently so PD arms can use target commands without
+        # changing the measured root/leg mirror semantics.
+        target_candidates = (
+            (
+                self._body_topic,
+                debug_msg,
+                self._subscriber.fresh if self._subscriber is not None else False,
+            ),
+            (
+                self._root_topic,
+                root_msg,
+                self._root_subscriber.fresh if self._root_subscriber is not None else False,
+            ),
+        )
+        for target_source, target_msg, target_fresh in target_candidates:
+            if target_msg is None or not target_fresh:
+                continue
+            target_q = self._first_array(target_msg, ("body_q_target",))
+            if target_q is None and not self._has_measured_body_state(target_msg):
+                target_q = self._first_array(target_msg, ("joint_pos", "q", "dof_pos"))
+            if not self._is_valid_body_target(target_q):
+                continue
+            target_order = str(
+                target_msg.get("target_order", target_msg.get("joint_order", self.cfg.zmq_joint_order))
+            ).lower()
+            if target_order not in {"mujoco", "isaaclab"}:
+                target_order = self.cfg.zmq_joint_order
+            sample.pd_joint_pos_target_mujoco = _body_q_to_mujoco_order(target_q, target_order)
+            target_dq = self._first_array(target_msg, ("body_dq_target",))
+            if target_dq is not None and target_dq.size >= 29 and np.all(np.isfinite(target_dq[:29])):
+                sample.pd_joint_vel_target_mujoco = _body_q_to_mujoco_order(target_dq, target_order)
+            sample.pd_target_source = f"target:{target_source}"
+            break
+
         sample.left_hand_pos = self._select_hand_q(body_msg, "left")
         sample.right_hand_pos = self._select_hand_q(body_msg, "right")
         sample.left_hand_vel = self._select_hand_dq(body_msg, "left")
@@ -801,6 +891,17 @@ class MuJoCoG1MirrorAction(ActionTerm):
         return msg is not None and any(
             key in msg for key in ("body_q", "body_q_measured", "body_q_target", "joint_pos", "q", "dof_pos")
         )
+
+    @staticmethod
+    def _has_measured_body_state(msg: dict[str, Any]) -> bool:
+        return any(key in msg for key in ("body_q_measured", "body_q"))
+
+    @staticmethod
+    def _is_valid_body_target(target: np.ndarray | None) -> bool:
+        if target is None or target.size < 29:
+            return False
+        body_target = target[:29]
+        return bool(np.all(np.isfinite(body_target)) and np.max(np.abs(body_target)) > 1.0e-4)
 
     @staticmethod
     def _first_array(msg: dict[str, Any] | None, keys: tuple[str, ...]) -> np.ndarray | None:
@@ -913,10 +1014,9 @@ class MuJoCoG1MirrorAction(ActionTerm):
     def _apply_pd_target_conditioning(self, joint_pos: torch.Tensor, joint_vel: torch.Tensor) -> None:
         """Smooth PD-drive joint targets in place; optionally zero their velocity targets.
 
-        Mirror packets carry SONIC's measured joint state which jitters at packet rate
-        even when the remote arm is visually still. Hard-written joints hide that jitter;
-        PD joints turn it into torque noise through both the stiffness and damping terms,
-        which can excite sustained arm oscillation.
+        The preferred arm input is SONIC's command target. EMA still removes packet-rate
+        steps; measured-pose fallback may additionally contain feedback noise. When the
+        configured velocity target is zero, damping remains purely dissipative.
         """
         pd_ids = self._pd_body_isaac_ids
         if not pd_ids:
@@ -1390,3 +1490,186 @@ class AgileBasedLowerBodyAction(ActionTerm):
         """Apply the actions to the environment."""
         # Store the raw actions
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+
+class HugBoxAttachAction(ActionTerm):
+    """双臂合抱检测 + 箱子稳定跟随兜底（支持多箱自动选最近）。
+
+    PD 手臂能建立真实接触力，但开环摩擦夹持在抬升/行走时仍可能侧滑。
+    本动作项在双掌已经形成合抱几何后显式锁定箱体相对躯干锚点的位姿：
+
+    - 吸附：双掌间距 < ``attach_sep`` 且某个候选箱心位于两掌之间（两掌都在
+      ``palm_dist_max`` 内）时，在所有满足条件的候选箱里选**离两掌中点最近**的
+      那个，锁定它相对躯干 link 的位姿，此后每步硬写该箱子跟随躯干/root；
+    - 使用稳定躯干帧而非实际掌中点，是因为 PD 手臂在负载/接触下会弹性张开和下沉，
+      不应让这些瞬态把已抱住的箱子拖落；
+    - 解除：双掌间距 > ``detach_sep`` 连续 ``detach_debounce_steps`` 步，
+      箱子恢复自由动力学（落下）。
+
+    候选箱由 ``object_names``（多箱自动选最近）给出；为空时回退到单个
+    ``object_name``。仅在箱子为动力学刚体的一端（object sync publisher）启用；
+    订阅端箱子是 kinematic 跟随体，由 ``zmq_object_sync`` 负责。
+    """
+
+    cfg: "HugBoxAttachActionCfg"
+
+    def __init__(self, cfg: "HugBoxAttachActionCfg", env: "ManagerBasedEnv"):
+        super().__init__(cfg, env)
+        self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._export_IO_descriptor = False
+        self._enabled = cfg.enabled and self.num_envs == 1
+
+        # 解析所有存在于场景中的候选箱：(name, RigidObject)。
+        self._objects: list[tuple[str, Any]] = []
+        self._palm_l: int | None = None
+        self._palm_r: int | None = None
+        self._anchor: int | None = None
+        self._release_joint_ids: list[int] = []
+        if self._enabled:
+            candidate_names = list(cfg.object_names) if cfg.object_names else [cfg.object_name]
+            for name in candidate_names:
+                try:
+                    self._objects.append((name, env.scene[name]))
+                except KeyError:
+                    print(f"[WARN] HugBoxAttach: 候选箱 {name!r} 不在场景中，跳过。")
+            if not self._objects:
+                self._enabled = False
+                print("[WARN] HugBoxAttach disabled: 没有任何候选箱在场景中。")
+        if self._enabled:
+            body_names = self._asset.data.body_names
+
+            def _find(candidates: list[str]) -> int | None:
+                for name in candidates:
+                    if name in body_names:
+                        return body_names.index(name)
+                return None
+
+            self._palm_l = _find(cfg.left_palm_candidates)
+            self._palm_r = _find(cfg.right_palm_candidates)
+            self._anchor = _find(cfg.anchor_link_candidates)
+            joint_name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}
+            self._release_joint_ids = [
+                joint_name_to_id[name] for name in cfg.release_joint_names if name in joint_name_to_id
+            ]
+            if None in (self._palm_l, self._palm_r, self._anchor):
+                self._enabled = False
+                print(
+                    "[WARN] HugBoxAttach disabled: palm/anchor link not found "
+                    f"(palm_l={self._palm_l}, palm_r={self._palm_r}, anchor={self._anchor})."
+                )
+            else:
+                names = ", ".join(n for n, _ in self._objects)
+                print(
+                    f"[INFO] HugBoxAttach enabled: robot={cfg.asset_name}, boxes=[{names}], "
+                    f"frame={body_names[self._anchor]}, attach_sep={cfg.attach_sep}, detach_sep={cfg.detach_sep}"
+                )
+
+        # 当前吸附的箱子句柄（None = 未吸附）及其相对稳定躯干锚点的位姿。
+        self._attached_obj = None
+        self._attached_name: str | None = None
+        self._rel_pos: torch.Tensor | None = None
+        self._rel_quat: torch.Tensor | None = None
+        self._attach_release_joint_target: torch.Tensor | None = None
+        self._detach_count = 0
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions = actions
+        self._processed_actions = actions
+
+    def reset(self, env_ids=None):
+        self._release("环境复位")
+
+    def _release(self, reason: str):
+        if self._attached_obj is not None:
+            print(f"[INFO] HugBoxAttach: 解除吸附 {self._attached_name}（{reason}）")
+        self._attached_obj = None
+        self._attached_name = None
+        self._attach_release_joint_target = None
+        self._detach_count = 0
+
+    def apply_actions(self):
+        if not self._enabled:
+            return
+
+        data = self._asset.data
+        pl = data.body_link_pos_w[0, self._palm_l]
+        pr = data.body_link_pos_w[0, self._palm_r]
+        anchor_pos = data.body_link_pos_w[0, self._anchor].unsqueeze(0)
+        anchor_quat = data.body_link_quat_w[0, self._anchor].unsqueeze(0)
+        sep = torch.norm(pl - pr).item()
+        if sep < 1e-4:
+            return
+        mid = ((pl + pr) / 2.0).unsqueeze(0)
+
+        if self._attached_obj is None:
+            # 未吸附：双掌需先合拢到 attach_sep 以内；再在所有"箱心夹在两掌之间且
+            # 两掌都够近"的候选箱里，选离两掌中点最近的那个吸附。
+            if sep >= self.cfg.attach_sep:
+                return
+            seg = pr - pl
+            seg_sq = torch.clamp(torch.dot(seg, seg), min=1e-9)
+            best = None  # (dist_to_mid, name, obj, box_pose)
+            for name, obj in self._objects:
+                box_pose = obj.data.root_state_w[:, :7]
+                c = box_pose[0, :3]
+                near = (
+                    torch.norm(pl - c).item() < self.cfg.palm_dist_max
+                    and torch.norm(pr - c).item() < self.cfg.palm_dist_max
+                )
+                if not near:
+                    continue
+                t_par = (torch.dot(c - pl, seg) / seg_sq).item()
+                if not (0.15 < t_par < 0.85):
+                    continue
+                d_mid = torch.norm(c - mid[0]).item()
+                if best is None or d_mid < best[0]:
+                    best = (d_mid, name, obj, box_pose)
+            if best is not None:
+                _, name, obj, box_pose = best
+                inv_q = quat_inv(anchor_quat)
+                self._rel_pos = quat_apply(inv_q, box_pose[:, :3] - anchor_pos)
+                self._rel_quat = quat_mul(inv_q, box_pose[:, 3:7])
+                self._attached_obj = obj
+                self._attached_name = name
+                if self._release_joint_ids:
+                    self._attach_release_joint_target = data.joint_pos_target[
+                        0, self._release_joint_ids
+                    ].clone()
+                self._detach_count = 0
+                print(f"[INFO] HugBoxAttach: 吸附 {name}（掌距 {sep:.3f} m，跟随躯干锚点）")
+            return
+
+        # 已吸附：优先看肩 roll 的控制目标是否明确离开吸附姿态；实际掌距只作
+        # 大幅张臂的安全回退。这样 PD 受载后的弹性张开不会被误判为操作者松手。
+        command_delta = 0.0
+        if self._release_joint_ids and self._attach_release_joint_target is not None:
+            current_target = data.joint_pos_target[0, self._release_joint_ids]
+            command_delta = torch.mean(torch.abs(current_target - self._attach_release_joint_target)).item()
+        release_requested = command_delta > self.cfg.release_target_delta or sep > self.cfg.detach_sep
+        if release_requested:
+            self._detach_count += 1
+            if self._detach_count >= self.cfg.detach_debounce_steps:
+                self._release(f"张臂目标变化 {command_delta:.3f} rad，掌距 {sep:.3f} m")
+                return
+        else:
+            self._detach_count = 0
+
+        target_pos = anchor_pos + quat_apply(anchor_quat, self._rel_pos)
+        target_quat = quat_mul(anchor_quat, self._rel_quat)
+        self._attached_obj.write_root_pose_to_sim(torch.cat([target_pos, target_quat], dim=1))
+        self._attached_obj.write_root_velocity_to_sim(
+            torch.zeros((1, 6), dtype=torch.float32, device=self.device)
+        )

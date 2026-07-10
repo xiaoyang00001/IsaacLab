@@ -8,7 +8,12 @@ from dataclasses import MISSING
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions import AgileBasedLowerBodyAction, G1GripperSyncAction, MuJoCoG1MirrorAction
+from ..mdp.actions import (
+    AgileBasedLowerBodyAction,
+    G1GripperSyncAction,
+    HugBoxAttachAction,
+    MuJoCoG1MirrorAction,
+)
 
 
 @configclass
@@ -153,6 +158,16 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     Set to an empty list to restore the legacy full kinematic mirror.
     """
 
+    pd_joint_position_source: str = "target"
+    """Position field used by PD-drive joints: ``target`` or ``measured``.
+
+    ``target`` keeps the kinematically mirrored legs/waist on the configured
+    ``zmq_pose_source`` while making the physical arm PD track SONIC's smooth
+    ``body_q_target`` independently. If a fresh, non-zero target is unavailable,
+    the action safely falls back to the mirrored/measured pose. ``measured``
+    restores the legacy behavior where every mirrored joint uses the same pose.
+    """
+
     pd_target_smoothing_alpha: float = 0.25
     """EMA smoothing factor applied per physics step to PD-drive joint targets.
 
@@ -285,3 +300,52 @@ class G1GripperSyncActionCfg(ActionTermCfg):
 
     debug_interval_s: float = 0.0
     """Seconds between debug prints. Non-positive disables periodic prints."""
+
+
+@configclass
+class HugBoxAttachActionCfg(ActionTermCfg):
+    """双臂合抱检测 + 箱子吸附跟随的配置（运动学硬写范式下的抱箱方案，支持多箱自动选最近）。"""
+
+    class_type: type[ActionTerm] = HugBoxAttachAction
+
+    enabled: bool = True
+    """Whether this attach action term is active."""
+
+    object_name: str = "test_box"
+    """Single fallback box entity name, used only when ``object_names`` is empty."""
+
+    object_names: list[str] = []
+    """候选箱的场景实体名列表。非空时，动作项在所有满足合抱条件的候选箱里自动选
+    离两掌中点最近的那个吸附；为空时回退到单个 ``object_name``。"""
+
+    left_palm_candidates: list[str] = ["left_hand_palm_link", "left_wrist_yaw_link"]
+    """Candidate link names for the left palm (first match wins)."""
+
+    right_palm_candidates: list[str] = ["right_hand_palm_link", "right_wrist_yaw_link"]
+    """Candidate link names for the right palm (first match wins)."""
+
+    anchor_link_candidates: list[str] = ["torso_link", "waist_yaw_link", "pelvis"]
+    """Candidate links used as the stable carrying frame (first match wins)."""
+
+    release_joint_names: list[str] = ["left_shoulder_roll_joint", "right_shoulder_roll_joint"]
+    """Arm command joints used to detect an intentional opening motion."""
+
+    release_target_delta: float = 0.45
+    """Mean absolute target change (rad) from the attach pose that requests release."""
+
+    attach_sep: float = 0.26
+    """Palm separation (m) below which a bracketed box gets attached."""
+
+    detach_sep: float = 0.70
+    """Palm separation (m) above which the attachment releases.
+
+    This deliberately leaves wide hysteresis above ``attach_sep``: PD arms in
+    this task can elastically separate to about 0.57 m under load without the
+    operator intending to release the box.
+    """
+
+    palm_dist_max: float = 0.35
+    """Max distance (m) from each palm to the box center for attachment."""
+
+    detach_debounce_steps: int = 10
+    """Consecutive physics steps with palm/command release intent required to detach."""

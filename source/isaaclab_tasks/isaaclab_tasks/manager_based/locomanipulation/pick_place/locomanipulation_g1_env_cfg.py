@@ -25,6 +25,7 @@ from isaaclab.utils import configclass
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
     G1GripperSyncActionCfg,
+    HugBoxAttachActionCfg,
     MuJoCoG1MirrorActionCfg,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
@@ -140,6 +141,17 @@ ZMQ_SYNC_ENDPOINT = os.environ.get(
     "ISAACLAB_OBJECT_SYNC_ENDPOINT",
     f"tcp://{_windows_isaaclab_ip(1, '127.0.0.1')}:15555",
 )
+print(
+    "[locomanipulation_g1_env_cfg] "
+    f"local_robot_id={ISAACLAB_LOCAL_ROBOT_ID}, object_sync_role={ZMQ_SYNC_ROLE}, "
+    f"object_sync_endpoint={ZMQ_SYNC_ENDPOINT}"
+)
+if ZMQ_SYNC_ROLE == "subscriber":
+    print(
+        "[WARN] Object-sync subscriber: cart_box1-4/test_box are kinematic display replicas; "
+        "local contacts cannot move them. Validate physical grasp on the publisher, or set "
+        "ISAACLAB_OBJECT_SYNC_ROLE=none for a single-machine grasp test."
+    )
 
 ##
 # Scene definition
@@ -155,6 +167,7 @@ def _find_gr00t_g1_43dof_usd() -> str:
     candidates.extend(
         [
             Path("F:/ISAACWholeBody/GR00T-WholeBodyControl"),
+            Path("D:/src/Isaac/GR00T-WholeBodyControl"),
             Path(__file__).resolve().parents[6] / "GR00T-WholeBodyControl",
             Path.cwd() / "GR00T-WholeBodyControl",
         ]
@@ -625,10 +638,10 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
-        # 镜像流是 SONIC 的 measured 关节状态，控制端不动时目标也在包级抖动。
-        # PD 会把抖动经 K(位置)、D(速度) 两条通道放大成力矩噪声 → 手臂无端摆动。
-        # 速度目标清零 = 阻尼变成对实际运动的纯耗散（无条件镇定），切断主噪声通道；
-        # 平滑 α 可经环境变量继续压低（0.25→0.1 更平滑但更迟滞）。
+        # 腿/腰继续镜像 measured；肩/肘/腕 PD 单独跟踪平滑的 body_q_target。
+        # target 缺失或全零时自动回退 measured，避免启动阶段手臂突然归零。
+        pd_joint_position_source=os.environ.get("ISAACLAB_G1_PD_POSITION_SOURCE", "target"),
+        # 速度目标清零让阻尼成为对实际运动的纯耗散；平滑 α 可继续抑制包级台阶。
         pd_zero_velocity_target=os.environ.get("ISAACLAB_G1_PD_ZERO_VEL_TARGET", "1").strip().lower()
         not in {"0", "false", "no"},
         pd_target_smoothing_alpha=_env_float("ISAACLAB_G1_PD_SMOOTHING_ALPHA", 0.25),
@@ -659,10 +672,8 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
-        # 镜像流是 SONIC 的 measured 关节状态，控制端不动时目标也在包级抖动。
-        # PD 会把抖动经 K(位置)、D(速度) 两条通道放大成力矩噪声 → 手臂无端摆动。
-        # 速度目标清零 = 阻尼变成对实际运动的纯耗散（无条件镇定），切断主噪声通道；
-        # 平滑 α 可经环境变量继续压低（0.25→0.1 更平滑但更迟滞）。
+        # 与 robot_1 相同：硬写关节用 measured，物理手臂 PD 用 body_q_target。
+        pd_joint_position_source=os.environ.get("ISAACLAB_G1_PD_POSITION_SOURCE", "target"),
         pd_zero_velocity_target=os.environ.get("ISAACLAB_G1_PD_ZERO_VEL_TARGET", "1").strip().lower()
         not in {"0", "false", "no"},
         pd_target_smoothing_alpha=_env_float("ISAACLAB_G1_PD_SMOOTHING_ALPHA", 0.25),
@@ -729,6 +740,15 @@ class ActionsCfg:
     cart_box2_sync = ZmqObjectSyncActionCfg(asset_name="cart_box2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box3_sync = ZmqObjectSyncActionCfg(asset_name="cart_box3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    # 稳定搬运兜底：物理手臂先完成合抱，满足掌距/箱心几何后才锁定最近箱体相对
+    # 两掌中点的位姿；张臂连续多步即释放。subscriber 只显示远端同步结果，不重复写。
+    # 这是显式的非物理兜底，可用 ISAACLAB_HUG_ATTACH=0 关闭做纯物理对照。
+    hug_attach = HugBoxAttachActionCfg(
+        asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
+        object_names=["cart_box1", "cart_box2", "cart_box3", "cart_box4", "test_box"],
+        enabled=(ZMQ_SYNC_ROLE != "subscriber")
+        and os.environ.get("ISAACLAB_HUG_ATTACH", "1").strip().lower() not in {"0", "false", "no"},
+    )
 
 
 @configclass
