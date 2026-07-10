@@ -73,8 +73,6 @@ def _load_env_file(path: Path) -> dict[str, str]:
 
 def _load_default_network_config() -> tuple[dict[str, str], Path | None]:
     candidates = [
-        Path("F:/ISAACWholeBody/GR00T-WholeBodyControl/config/g1_udp_network.env"),
-        Path.cwd() / "GR00T-WholeBodyControl/config/g1_udp_network.env",
         Path(__file__).resolve().parents[6] / "scripts/gr00t_wbc/g1_udp_network.env",
     ]
     for path in candidates:
