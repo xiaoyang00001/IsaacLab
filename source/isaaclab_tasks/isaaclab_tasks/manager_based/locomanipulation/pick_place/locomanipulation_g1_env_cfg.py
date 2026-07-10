@@ -124,6 +124,33 @@ def _cfg_str_list_value(value: str | None, default: list[str]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _cfg_pattern_float_dict_value(value: str | None, default: dict[str, float]) -> dict[str, float]:
+    if value is None:
+        return dict(default)
+    value = value.strip()
+    if not value:
+        return {}
+
+    result: dict[str, float] = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            pattern, raw_scale = item.rsplit(":", 1)
+        elif "=" in item:
+            pattern, raw_scale = item.rsplit("=", 1)
+        else:
+            print(f"[WARN] Ignoring malformed joint target scale override {item!r}; expected pattern:scale.")
+            continue
+        pattern = pattern.strip()
+        try:
+            result[pattern] = float(raw_scale.strip())
+        except ValueError:
+            print(f"[WARN] Ignoring malformed joint target scale override {item!r}; scale is not a float.")
+    return result
+
+
 def _isaac_robot_cfg_value(robot_id: int, suffix: str) -> str | None:
     robot_key = f"ISAACLAB_G1_{robot_id}_{suffix}"
     generic_key = f"ISAACLAB_G1_{suffix}"
@@ -155,6 +182,10 @@ def _isaac_robot_cfg_bool(robot_id: int, suffix: str, default: bool) -> bool:
 
 def _isaac_robot_cfg_str_list(robot_id: int, suffix: str, default: list[str]) -> list[str]:
     return _cfg_str_list_value(_isaac_robot_cfg_value(robot_id, suffix), default)
+
+
+def _isaac_robot_cfg_pattern_float_dict(robot_id: int, suffix: str, default: dict[str, float]) -> dict[str, float]:
+    return _cfg_pattern_float_dict_value(_isaac_robot_cfg_value(robot_id, suffix), default)
 
 
 def _isaac_robot_sync_mode(robot_id: int) -> str:
@@ -362,12 +393,20 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
             ".*_hip_pitch_joint": -0.10,
             ".*_knee_joint": 0.30,
             ".*_ankle_pitch_joint": -0.20,
-            "left_shoulder_pitch_joint": 0.2,
-            "right_shoulder_pitch_joint": 0.2,
-            "left_shoulder_roll_joint": 0.2,
-            "right_shoulder_roll_joint": -0.2,
-            "left_elbow_joint": 0.6,
-            "right_elbow_joint": 0.6,
+            "left_shoulder_pitch_joint": 0.0,
+            "right_shoulder_pitch_joint": 0.0,
+            "left_shoulder_roll_joint": 0.3,
+            "right_shoulder_roll_joint": -0.3,
+            "left_shoulder_yaw_joint": 0.0,
+            "right_shoulder_yaw_joint": 0.0,
+            "left_elbow_joint": 1.0,
+            "right_elbow_joint": 1.0,
+            "left_wrist_roll_joint": 0.0,
+            "right_wrist_roll_joint": 0.0,
+            "left_wrist_pitch_joint": 0.0,
+            "right_wrist_pitch_joint": 0.0,
+            "left_wrist_yaw_joint": 0.0,
+            "right_wrist_yaw_joint": 0.0,
         },
         joint_vel={".*": 0.0},
     ),
@@ -584,6 +623,12 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         write_hand_joint_state=_isaac_robot_write_hand_joint_state(robot_id),
         use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
         body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
+        zero_target_only_body_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_BODY_VELOCITY", False),
+        body_joint_target_scale_overrides=_isaac_robot_cfg_pattern_float_dict(
+            robot_id,
+            "BODY_JOINT_TARGET_SCALE_OVERRIDES",
+            {},
+        ),
         hand_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "HAND_JOINT_TARGET_MAX_DELTA", 0.20),
         hold_default_until_first_packet=_isaac_robot_cfg_bool(robot_id, "HOLD_DEFAULT_UNTIL_FIRST_PACKET", True),
         no_packet_debug_interval_s=_isaac_robot_cfg_float(robot_id, "NO_PACKET_DEBUG_INTERVAL_S", 1.0),

@@ -362,6 +362,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             self._body_state_write_isaac_ids,
             self._body_target_only_local_ids,
         ) = self._build_body_state_write_joint_ids(cfg.body_state_write_joint_names)
+        self._body_target_scales = self._build_body_target_scales(cfg.body_joint_target_scale_overrides)
         self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
@@ -512,9 +513,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
         if sample.joint_pos_mujoco is not None:
             q = torch.tensor(sample.joint_pos_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
+            q = q * self._body_target_scales
             joint_pos[:, self._body_isaac_ids] = q.unsqueeze(0)
         if sample.joint_vel_mujoco is not None and self.cfg.use_source_joint_velocity:
             dq = torch.tensor(sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
+            dq = dq * self._body_target_scales
             joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
         elif sample.joint_pos_mujoco is not None:
             joint_vel[:, self._body_isaac_ids] = 0.0
@@ -565,14 +568,16 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     body_target[:, self._body_target_only_local_ids],
                     float(self.cfg.body_joint_target_max_delta),
                 )
-                body_velocity_target[:, self._body_target_only_local_ids] = 0.0
+                if self.cfg.zero_target_only_body_velocity:
+                    body_velocity_target[:, self._body_target_only_local_ids] = 0.0
         else:
             body_target = _limit_joint_position_delta(
                 self._asset.data.joint_pos[:, self._body_isaac_ids],
                 body_target,
                 float(self.cfg.body_joint_target_max_delta),
             )
-            body_velocity_target.zero_()
+            if self.cfg.zero_target_only_body_velocity:
+                body_velocity_target.zero_()
         self._asset.set_joint_position_target(body_target, joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(body_velocity_target, joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
@@ -607,6 +612,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
             f"hard_write_body_joints={len(self._body_state_write_isaac_ids)}/{len(self._body_isaac_ids)}, "
             f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
+            f"zero_target_only_body_velocity={self.cfg.zero_target_only_body_velocity}, "
             f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
         )
         self._printed_mirror_config = True
@@ -1051,6 +1057,23 @@ class MuJoCoG1MirrorAction(ActionTerm):
             local_id for local_id in range(len(self._body_isaac_ids)) if local_id not in state_write_local_set
         ]
         return state_write_local_ids, state_write_isaac_ids, target_only_local_ids
+
+    def _build_body_target_scales(self, scale_overrides: dict[str, float] | None) -> torch.Tensor:
+        scales = torch.ones(len(self._body_isaac_ids), dtype=torch.float32, device=self.device)
+        if not scale_overrides:
+            return scales
+
+        compiled = [(re.compile(pattern), float(scale)) for pattern, scale in scale_overrides.items()]
+        applied: list[str] = []
+        for local_id, isaac_id in enumerate(self._body_isaac_ids):
+            joint_name = self._asset.joint_names[isaac_id]
+            for pattern, scale in compiled:
+                if pattern.fullmatch(joint_name):
+                    scales[local_id] = scale
+                    applied.append(f"{joint_name}:{scale:g}")
+        if applied:
+            print("[INFO] MuJoCo G1 body target scales: " + ", ".join(applied))
+        return scales
 
     def _build_joint_ids(self, joint_names: list[str]) -> list[int]:
         isaac_name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}

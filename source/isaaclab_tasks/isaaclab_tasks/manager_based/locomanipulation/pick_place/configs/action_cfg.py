@@ -88,6 +88,12 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     body_joint_target_max_delta: float = 0.08
     """Maximum per-step body target change in radians when body joints are not hard-written."""
 
+    zero_target_only_body_velocity: bool = False
+    """Whether to zero velocity targets for mirrored body joints that are driven only by actuator targets."""
+
+    body_joint_target_scale_overrides: dict[str, float] | None = None
+    """Regex-to-scale overrides applied to mirrored body joint position and velocity targets."""
+
     hand_joint_target_max_delta: float = 0.20
     """Maximum per-step hand target change in radians when hand joints are not hard-written."""
 
