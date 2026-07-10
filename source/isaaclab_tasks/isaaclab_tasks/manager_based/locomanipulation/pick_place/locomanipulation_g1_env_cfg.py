@@ -106,6 +106,19 @@ def _cfg_float(name: str, default: float) -> float:
         return default
 
 
+def _cfg_optional_float(name: str) -> float | None:
+    value = _cfg_value(name)
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or value.lower() in {"none", "null"}:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def _cfg_bool_value(value: str | None, default: bool) -> bool:
     if value is None:
         return default
@@ -114,6 +127,50 @@ def _cfg_bool_value(value: str | None, default: bool) -> bool:
 
 def _cfg_bool(name: str, default: bool) -> bool:
     return _cfg_bool_value(_cfg_value(name), default)
+
+
+def _cfg_choice(name: str, default: str, choices: set[str]) -> str:
+    value = (_cfg_value(name, default) or default).strip().lower()
+    if value not in choices:
+        print(f"[WARN] Unsupported {name}={value!r}; using {default!r}.")
+        return default
+    return value
+
+
+def _cfg_str_list_value(value: str | None, default: list[str]) -> list[str]:
+    if value is None:
+        return list(default)
+    value = value.strip()
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _cfg_pattern_float_dict_value(value: str | None, default: dict[str, float]) -> dict[str, float]:
+    if value is None:
+        return dict(default)
+    value = value.strip()
+    if not value:
+        return {}
+
+    result: dict[str, float] = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            pattern, raw_scale = item.rsplit(":", 1)
+        elif "=" in item:
+            pattern, raw_scale = item.rsplit("=", 1)
+        else:
+            print(f"[WARN] Ignoring malformed joint target scale override {item!r}; expected pattern:scale.")
+            continue
+        pattern = pattern.strip()
+        try:
+            result[pattern] = float(raw_scale.strip())
+        except ValueError:
+            print(f"[WARN] Ignoring malformed joint target scale override {item!r}; scale is not a float.")
+    return result
 
 
 def _isaac_robot_cfg_value(robot_id: int, suffix: str) -> str | None:
@@ -143,6 +200,14 @@ def _isaac_robot_cfg_float(robot_id: int, suffix: str, default: float) -> float:
 
 def _isaac_robot_cfg_bool(robot_id: int, suffix: str, default: bool) -> bool:
     return _cfg_bool_value(_isaac_robot_cfg_value(robot_id, suffix), default)
+
+
+def _isaac_robot_cfg_str_list(robot_id: int, suffix: str, default: list[str]) -> list[str]:
+    return _cfg_str_list_value(_isaac_robot_cfg_value(robot_id, suffix), default)
+
+
+def _isaac_robot_cfg_pattern_float_dict(robot_id: int, suffix: str, default: dict[str, float]) -> dict[str, float]:
+    return _cfg_pattern_float_dict_value(_isaac_robot_cfg_value(robot_id, suffix), default)
 
 
 def _isaac_robot_sync_mode(robot_id: int) -> str:
@@ -201,7 +266,11 @@ def _grasp_object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
         return sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
     return sim_utils.RigidBodyPropertiesCfg(
         disable_gravity=False,
-        enable_gyroscopic_forces=True,
+        linear_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_LINEAR_DAMPING", 0.05),
+        angular_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_ANGULAR_DAMPING", 5.0),
+        max_angular_velocity=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_ANGULAR_VELOCITY", 90.0),
+        max_contact_impulse=_cfg_optional_float("ISAACLAB_GRASP_OBJECT_MAX_CONTACT_IMPULSE"),
+        enable_gyroscopic_forces=_cfg_bool("ISAACLAB_GRASP_OBJECT_ENABLE_GYROSCOPIC_FORCES", False),
         solver_position_iteration_count=_cfg_int("ISAACLAB_GRASP_OBJECT_SOLVER_POSITION_ITERATIONS", 12),
         solver_velocity_iteration_count=_cfg_int("ISAACLAB_GRASP_OBJECT_SOLVER_VELOCITY_ITERATIONS", 4),
         max_depenetration_velocity=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_DEPENETRATION_VELOCITY", 2.0),
@@ -245,7 +314,17 @@ def _grasp_box_cfg(prim_name: str, stack_index: int) -> RigidObjectCfg:
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=_cfg_float("ISAACLAB_GRASP_OBJECT_STATIC_FRICTION", 2.0),
                 dynamic_friction=_cfg_float("ISAACLAB_GRASP_OBJECT_DYNAMIC_FRICTION", 1.6),
-                restitution=0.0,
+                friction_combine_mode=_cfg_choice(
+                    "ISAACLAB_GRASP_OBJECT_FRICTION_COMBINE_MODE",
+                    "min",
+                    {"average", "min", "multiply", "max"},
+                ),
+                restitution=_cfg_float("ISAACLAB_GRASP_OBJECT_RESTITUTION", 0.0),
+                restitution_combine_mode=_cfg_choice(
+                    "ISAACLAB_GRASP_OBJECT_RESTITUTION_COMBINE_MODE",
+                    "min",
+                    {"average", "min", "multiply", "max"},
+                ),
             ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.36, 0.18), roughness=0.7),
         ),
@@ -306,20 +385,36 @@ def _find_gr00t_g1_43dof_usd() -> str:
     )
 
 
+G1_BODY_STATE_WRITE_JOINT_NAMES = [
+    ".*_hip_.*_joint",
+    ".*_knee_joint",
+    ".*_ankle_.*_joint",
+    "waist_.*_joint",
+]
+"""Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
+
+
+def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
+    if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", True):
+        return None
+    return sim_utils.RigidBodyPropertiesCfg(
+        disable_gravity=False,
+        retain_accelerations=False,
+        linear_damping=0.0,
+        angular_damping=0.0,
+        max_linear_velocity=1000.0,
+        max_angular_velocity=1000.0,
+        max_depenetration_velocity=_cfg_float("ISAACLAB_G1_RIGID_MAX_DEPENETRATION_VELOCITY", 1.0),
+    )
+
+
 G1_43DOF_GR00T_CFG = ArticulationCfg(
     prim_path="/World/envs/env_.*/Robot",
     spawn=UsdFileCfg(
         usd_path=_find_gr00t_g1_43dof_usd(),
         activate_contact_sensors=False,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
-            retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=1.0,
-        ),
+        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
+        rigid_props=_g1_robot_rigid_props(),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             fix_root_link=False,
@@ -334,12 +429,20 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
             ".*_hip_pitch_joint": -0.10,
             ".*_knee_joint": 0.30,
             ".*_ankle_pitch_joint": -0.20,
-            "left_shoulder_pitch_joint": 0.2,
-            "right_shoulder_pitch_joint": 0.2,
-            "left_shoulder_roll_joint": 0.2,
-            "right_shoulder_roll_joint": -0.2,
-            "left_elbow_joint": 0.6,
-            "right_elbow_joint": 0.6,
+            "left_shoulder_pitch_joint": 0.0,
+            "right_shoulder_pitch_joint": 0.0,
+            "left_shoulder_roll_joint": 0.3,
+            "right_shoulder_roll_joint": -0.3,
+            "left_shoulder_yaw_joint": 0.0,
+            "right_shoulder_yaw_joint": 0.0,
+            "left_elbow_joint": 1.0,
+            "right_elbow_joint": 1.0,
+            "left_wrist_roll_joint": 0.0,
+            "right_wrist_roll_joint": 0.0,
+            "left_wrist_pitch_joint": 0.0,
+            "right_wrist_pitch_joint": 0.0,
+            "left_wrist_yaw_joint": 0.0,
+            "right_wrist_yaw_joint": 0.0,
         },
         joint_vel={".*": 0.0},
     ),
@@ -435,15 +538,11 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_elbow_joint",
                 ".*_wrist_.*_joint",
             ],
-            effort_limit_sim=300,
-            velocity_limit_sim=100,
-            stiffness=3000.0,
-            damping=10.0,
-            armature={
-                ".*_shoulder_.*": 0.001,
-                ".*_elbow_.*": 0.001,
-                ".*_wrist_.*_joint": 0.001,
-            },
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_ARM_EFFORT_LIMIT", 80.0),
+            velocity_limit_sim=_cfg_float("ISAACLAB_G1_ARM_VELOCITY_LIMIT", 12.0),
+            stiffness=_cfg_float("ISAACLAB_G1_ARM_STIFFNESS", 600.0),
+            damping=_cfg_float("ISAACLAB_G1_ARM_DAMPING", 30.0),
+            armature=_cfg_float("ISAACLAB_G1_ARM_ARMATURE", 0.01),
         ),
         "hands": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -451,11 +550,11 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_hand_middle_.*",
                 ".*_hand_thumb_.*",
             ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 120.0),
-            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 16.0),
-            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 260.0),
-            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 12.0),
-            armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.005),
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 25.0),
+            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 6.0),
+            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 80.0),
+            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 8.0),
+            armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.02),
         ),
     },
 )
@@ -531,41 +630,20 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -1000.66], rot=[1.0, 0.0, 0.0, 0.0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(1.2, 0.8, 0.08),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -0.3], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.2,
-                dynamic_friction=1.0,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.58, 0.54), roughness=0.65),
         ),
     )
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        # PackingTable (z=-1000.66, 高 0.08) 顶面 = -1000.62，物体半高 0.06 → 底面贴桌面的中心 z
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, -1000.56], rot=[1, 0, 0, 0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(0.14, 0.08, 0.12),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                enable_gyroscopic_forces=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
-                max_depenetration_velocity=5.0,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.4,
-                dynamic_friction=1.1,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
+            scale=(0.75, 0.75, 0.75),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
         ),
     )
     # ------------------------------------------------------------------
@@ -750,12 +828,24 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         write_hand_joint_state=_isaac_robot_write_hand_joint_state(robot_id),
         use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
         body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
+        zero_target_only_body_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_BODY_VELOCITY", False),
+        zero_target_only_hand_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_HAND_VELOCITY", False),
+        body_joint_target_scale_overrides=_isaac_robot_cfg_pattern_float_dict(
+            robot_id,
+            "BODY_JOINT_TARGET_SCALE_OVERRIDES",
+            {},
+        ),
         hand_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "HAND_JOINT_TARGET_MAX_DELTA", 0.20),
         hold_default_until_first_packet=_isaac_robot_cfg_bool(robot_id, "HOLD_DEFAULT_UNTIL_FIRST_PACKET", True),
         no_packet_debug_interval_s=_isaac_robot_cfg_float(robot_id, "NO_PACKET_DEBUG_INTERVAL_S", 1.0),
         root_motion_mode=_isaac_robot_cfg(robot_id, "ROOT_MOTION_MODE", "source"),
         root_zmq_required=_isaac_robot_cfg_bool(robot_id, "ROOT_ZMQ_REQUIRED", True),
         root_position_mode=_isaac_robot_cfg(robot_id, "ROOT_POSITION_MODE", "relative"),
+        body_state_write_joint_names=_isaac_robot_cfg_str_list(
+            robot_id,
+            "BODY_STATE_WRITE_JOINT_NAMES",
+            G1_BODY_STATE_WRITE_JOINT_NAMES,
+        ),
         mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", False),
         controller_gripper_enabled=_isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),

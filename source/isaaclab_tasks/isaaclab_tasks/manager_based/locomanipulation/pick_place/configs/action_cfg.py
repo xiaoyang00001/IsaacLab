@@ -88,6 +88,15 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     body_joint_target_max_delta: float = 0.08
     """Maximum per-step body target change in radians when body joints are not hard-written."""
 
+    zero_target_only_body_velocity: bool = False
+    """Whether to zero velocity targets for mirrored body joints that are driven only by actuator targets."""
+
+    zero_target_only_hand_velocity: bool = False
+    """Whether to zero velocity targets for mirrored hand joints that are driven only by actuator targets."""
+
+    body_joint_target_scale_overrides: dict[str, float] | None = None
+    """Regex-to-scale overrides applied to mirrored body joint position and velocity targets."""
+
     hand_joint_target_max_delta: float = 0.20
     """Maximum per-step hand target change in radians when hand joints are not hard-written."""
 
@@ -167,6 +176,15 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
         ".*_wrist_.*_joint",
     ]
     """Regex list of 29-DoF MuJoCo body joints to mirror into Isaac Lab."""
+
+    body_state_write_joint_names: list[str] | None = None
+    """Regex list of mirrored body joints that may be written directly to PhysX state.
+
+    When ``write_body_joint_state`` is true, only joints matching this list are hard-synced with
+    ``write_joint_state_to_sim``. Mirrored joints that do not match are still driven through actuator targets.
+    If this is ``None``, all mirrored body joints are hard-synced, preserving the legacy mirror behavior.
+    Set this to an empty list to make all mirrored body joints target-only.
+    """
 
     mirror_hands: bool = True
     """Whether to mirror hand joints from MuJoCo."""
