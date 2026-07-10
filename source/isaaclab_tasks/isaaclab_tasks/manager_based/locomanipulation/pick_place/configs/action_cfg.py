@@ -64,6 +64,39 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     zmq_pose_source: str = "measured"
     """Which pose fields to mirror: ``measured``, ``target``, or ``auto``."""
 
+    locomotion_sync_mode: str = "mirror"
+    """How MuJoCo locomotion is applied in Isaac Lab.
+
+    ``mirror`` hard-syncs root and 29-DoF body joints for stable walking.
+    ``hybrid`` hard-syncs root but drives body joints through actuator targets.
+    ``physics`` drives body joints through actuator targets and leaves root to PhysX.
+    ``custom`` honors the explicit ``write_*_state`` flags.
+    """
+
+    write_root_state: bool = True
+    """Whether to write MuJoCo root pose/velocity directly into Isaac Lab."""
+
+    write_body_joint_state: bool = True
+    """Whether to write MuJoCo 29-DoF body joint position/velocity directly into Isaac Lab."""
+
+    write_hand_joint_state: bool = False
+    """Whether MuJoCo mirrored hand joints should also be written directly into Isaac Lab."""
+
+    use_source_joint_velocity: bool = True
+    """Whether to use MuJoCo joint velocity when writing or targeting mirrored joints."""
+
+    body_joint_target_max_delta: float = 0.08
+    """Maximum per-step body target change in radians when body joints are not hard-written."""
+
+    hand_joint_target_max_delta: float = 0.20
+    """Maximum per-step hand target change in radians when hand joints are not hard-written."""
+
+    hold_default_until_first_packet: bool = True
+    """Whether to hold the default standing pose until the first valid MuJoCo body packet arrives."""
+
+    no_packet_debug_interval_s: float = 1.0
+    """Seconds between warnings while waiting for the first valid MuJoCo body packet."""
+
     udp_bind_host: str = "0.0.0.0"
     """Local UDP address to bind for debug packets."""
 
@@ -160,6 +193,9 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     controller_gripper_action_alpha: float = 0.65
     """Low-pass smoothing factor applied to incoming controller gripper commands."""
 
+    controller_gripper_target_max_delta: float = 0.20
+    """Maximum per-step controller gripper target change in radians. Non-positive disables limiting."""
+
     controller_gripper_use_soft_limits: bool = True
     """Whether controller gripper targets are clamped to soft limits instead of hard joint limits."""
 
@@ -244,6 +280,9 @@ class G1GripperSyncActionCfg(ActionTermCfg):
 
     write_joint_state: bool = True
     """Whether gripper targets should also be written directly to joint state."""
+
+    target_max_delta: float = 0.20
+    """Maximum per-step gripper target change in radians when not directly writing joint state."""
 
     debug_interval_s: float = 0.0
     """Seconds between debug prints. Non-positive disables periodic prints."""

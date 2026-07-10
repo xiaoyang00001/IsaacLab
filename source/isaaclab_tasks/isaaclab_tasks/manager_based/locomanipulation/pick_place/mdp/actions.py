@@ -150,6 +150,26 @@ def _body_q_to_mujoco_order(values: np.ndarray, joint_order: str) -> np.ndarray:
     raise ValueError(f"Unsupported joint order: {joint_order}")
 
 
+def _limit_joint_position_delta(
+    current_joint_pos: torch.Tensor,
+    target_joint_pos: torch.Tensor,
+    max_delta: float,
+) -> torch.Tensor:
+    if max_delta <= 0.0:
+        return target_joint_pos
+    delta = torch.clamp(target_joint_pos - current_joint_pos, -max_delta, max_delta)
+    return current_joint_pos + delta
+
+
+def _topic_candidates(topic: str) -> list[str]:
+    topics = [topic]
+    if re.fullmatch(r"g1_\d+_debug", topic):
+        topics.append("g1_debug")
+    elif re.fullmatch(r"g1_\d+_root", topic):
+        topics.append("g1_root")
+    return topics
+
+
 class _ZmqLatestSubscriber:
     def __init__(self, host: str, port: int, topic: str, timeout: float):
         import msgpack
@@ -157,18 +177,23 @@ class _ZmqLatestSubscriber:
 
         self.msgpack = msgpack
         self.zmq = zmq
-        self.topic = topic.encode("utf-8")
+        self.topics = _topic_candidates(topic)
+        self.topic_bytes = [candidate.encode("utf-8") for candidate in self.topics]
+        self.topic = self.topic_bytes[0]
         self.timeout = timeout
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.SUB)
         self.socket.setsockopt(zmq.RCVHWM, 1)
         self.socket.setsockopt(zmq.LINGER, 0)
-        self.socket.setsockopt_string(zmq.SUBSCRIBE, topic)
+        for candidate in self.topics:
+            self.socket.setsockopt_string(zmq.SUBSCRIBE, candidate)
         self.endpoint = f"tcp://{host}:{port}"
-        self.description = f"{self.endpoint}/{topic}"
+        self.description = f"{self.endpoint}/{'|'.join(self.topics)}"
         self.socket.connect(self.endpoint)
         self.last_msg: dict[str, Any] | None = None
         self.last_rx_time = 0.0
+        self.last_topic = "none"
+        self.last_keys = "none"
         print(f"[INFO] MuJoCo G1 mirror ZMQ connected: {self.description}")
 
     def close(self) -> None:
@@ -182,12 +207,25 @@ class _ZmqLatestSubscriber:
     def _decode(self, parts: list[bytes]) -> dict[str, Any] | None:
         if not parts:
             return None
-        if len(parts) >= 2 and parts[0] == self.topic:
+        if len(parts) >= 2 and parts[0] in self.topic_bytes:
+            self.last_topic = parts[0].decode("utf-8", errors="replace")
             payload = parts[-1]
         else:
             raw = parts[0]
-            payload = raw[len(self.topic) :] if raw.startswith(self.topic) else raw
-        return self.msgpack.unpackb(payload, raw=False)
+            payload = raw
+            matched_topic = False
+            for topic in self.topic_bytes:
+                if raw.startswith(topic):
+                    self.last_topic = topic.decode("utf-8", errors="replace")
+                    payload = raw[len(topic) :]
+                    matched_topic = True
+                    break
+            if not matched_topic:
+                self.last_topic = "<raw-msgpack>"
+        decoded = self.msgpack.unpackb(payload, raw=False)
+        if isinstance(decoded, dict):
+            self.last_keys = ",".join(str(key) for key in list(decoded.keys())[:12])
+        return decoded
 
     def poll_latest(self) -> dict[str, Any] | None:
         latest = None
@@ -208,7 +246,9 @@ class _UdpLatestSubscriber:
         import msgpack
 
         self.msgpack = msgpack
-        self.topic = topic.encode("utf-8")
+        self.topics = _topic_candidates(topic)
+        self.topic_bytes = [candidate.encode("utf-8") for candidate in self.topics]
+        self.topic = self.topic_bytes[0]
         self.timeout = timeout
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -217,9 +257,12 @@ class _UdpLatestSubscriber:
         self.socket.setblocking(False)
         actual_rcvbuf = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
         self.endpoint = f"udp://{bind_host}:{int(port)}"
-        self.description = f"{self.endpoint}/{topic}"
+        self.description = f"{self.endpoint}/{'|'.join(self.topics)}"
         self.last_msg: dict[str, Any] | None = None
         self.last_rx_time = 0.0
+        self.last_topic = "none"
+        self.last_keys = "none"
+        self.ignored_packets = 0
         print(f"[INFO] MuJoCo G1 mirror UDP listening: {self.description} SO_RCVBUF={actual_rcvbuf}")
 
     def close(self) -> None:
@@ -230,12 +273,25 @@ class _UdpLatestSubscriber:
         return self.last_msg is not None and (time.monotonic() - self.last_rx_time) <= self.timeout
 
     def _decode(self, packet: bytes) -> dict[str, Any] | None:
-        if not packet.startswith(self.topic):
+        if not packet:
             return None
-        payload = packet[len(self.topic) :]
-        if not payload:
+        payload = packet
+        matched_topic = False
+        for topic in self.topic_bytes:
+            if packet.startswith(topic):
+                self.last_topic = topic.decode("utf-8", errors="replace")
+                payload = packet[len(topic) :]
+                matched_topic = True
+                break
+        try:
+            decoded = self.msgpack.unpackb(payload, raw=False)
+        except Exception:
+            self.ignored_packets += 1
             return None
-        return self.msgpack.unpackb(payload, raw=False)
+        if not matched_topic:
+            self.last_topic = "<raw-msgpack>"
+        self.last_keys = ",".join(str(key) for key in list(decoded.keys())[:12])
+        return decoded if isinstance(decoded, dict) else None
 
     def poll_latest(self) -> dict[str, Any] | None:
         latest = None
@@ -307,6 +363,21 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
 
         self._transport = str(cfg.transport).lower()
+        self._locomotion_sync_mode = str(cfg.locomotion_sync_mode).strip().lower()
+        if self._locomotion_sync_mode not in {"mirror", "hybrid", "physics", "custom"}:
+            print(
+                f"[WARN] Unsupported MuJoCo G1 locomotion_sync_mode={cfg.locomotion_sync_mode!r}; "
+                "falling back to mirror."
+            )
+            self._locomotion_sync_mode = "mirror"
+        self._write_root_state = bool(cfg.write_root_state)
+        self._write_body_joint_state = bool(cfg.write_body_joint_state)
+        self._write_hand_joint_state = bool(cfg.write_hand_joint_state)
+        if self._write_root_state and not self._write_body_joint_state:
+            print(
+                "[WARN] MuJoCo G1 mirror is configured as root-state write without body-joint state write. "
+                "This can make the root teleport while the feet lag behind; use mirror mode for stable walking."
+            )
         self._body_topic = cfg.udp_topic if self._transport == "udp" else cfg.zmq_topic
         self._root_topic = cfg.root_udp_topic if self._transport == "udp" else cfg.root_zmq_topic
         self._subscriber: _ZmqLatestSubscriber | _UdpLatestSubscriber | None = None
@@ -327,6 +398,9 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._warned_root_position_mode = False
         self._warned_gripper_unavailable = False
         self._printed_first_sample = False
+        self._printed_mirror_config = False
+        self._last_no_packet_debug_time = 0.0
+        self._no_packet_start_time = time.monotonic()
         self._last_root_debug_time = 0.0
         self._last_gripper_debug_time = 0.0
         self._last_mirror_hands_from_mujoco = False
@@ -365,6 +439,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 print(f"[WARN] MuJoCo G1 mirror disabled; failed to create {self._transport.upper()} subscriber: {exc}")
         elif cfg.enabled and self.num_envs != 1:
             print("[WARN] MuJoCo G1 mirror is disabled because it only supports num_envs=1 for XR first-person use.")
+        self._print_mirror_config()
 
     def __del__(self):
         for subscriber in (getattr(self, "_subscriber", None), getattr(self, "_root_subscriber", None)):
@@ -401,11 +476,13 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def apply_actions(self):
         if not self._enabled or self._subscriber is None:
+            self._hold_default_until_first_packet("mirror disabled or subscriber unavailable")
             self._apply_controller_gripper_targets()
             return
 
         sample = self._sample()
         if sample is None:
+            self._hold_default_until_first_packet("waiting for valid body packets")
             self._apply_controller_gripper_targets()
             return
         self._last_sample = sample
@@ -415,6 +492,9 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 "[INFO] MuJoCo G1 mirror received first packet: "
                 f"mirrored_body_joints={len(self._body_isaac_ids)}, "
                 f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, "
+                f"mode={self._locomotion_sync_mode}, "
+                f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
+                f"write_hands={self._write_hand_joint_state}, "
                 f"body_source={sample.body_source}, root_source={sample.root_source}"
             )
             self._printed_first_sample = True
@@ -427,9 +507,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if sample.joint_pos_mujoco is not None:
             q = torch.tensor(sample.joint_pos_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
             joint_pos[:, self._body_isaac_ids] = q.unsqueeze(0)
-        if sample.joint_vel_mujoco is not None:
+        if sample.joint_vel_mujoco is not None and self.cfg.use_source_joint_velocity:
             dq = torch.tensor(sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
             joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
+        elif sample.joint_pos_mujoco is not None:
+            joint_vel[:, self._body_isaac_ids] = 0.0
 
         mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
         self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
@@ -442,30 +524,50 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 joint_pos[:, self._right_hand_ids] = torch.tensor(
                     sample.right_hand_pos[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
-            if sample.left_hand_vel is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
+            if (
+                sample.left_hand_vel is not None
+                and self.cfg.use_source_joint_velocity
+                and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES)
+            ):
                 joint_vel[:, self._left_hand_ids] = torch.tensor(
                     sample.left_hand_vel[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
-            if sample.right_hand_vel is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
+            if (
+                sample.right_hand_vel is not None
+                and self.cfg.use_source_joint_velocity
+                and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES)
+            ):
                 joint_vel[:, self._right_hand_ids] = torch.tensor(
                     sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
+            if not self.cfg.use_source_joint_velocity:
+                joint_vel[:, self._all_hand_ids] = 0.0
 
-        self._asset.write_joint_state_to_sim(
-            joint_pos[:, self._body_isaac_ids],
-            joint_vel[:, self._body_isaac_ids],
-            joint_ids=self._body_isaac_ids,
-        )
-        self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
+        body_target = joint_pos[:, self._body_isaac_ids]
+        body_velocity = joint_vel[:, self._body_isaac_ids]
+        if self._write_body_joint_state:
+            self._asset.write_joint_state_to_sim(body_target, body_velocity, joint_ids=self._body_isaac_ids)
+        else:
+            body_target = _limit_joint_position_delta(
+                self._asset.data.joint_pos[:, self._body_isaac_ids],
+                body_target,
+                float(self.cfg.body_joint_target_max_delta),
+            )
+        self._asset.set_joint_position_target(body_target, joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
-            self._asset.write_joint_state_to_sim(
-                joint_pos[:, self._all_hand_ids],
-                joint_vel[:, self._all_hand_ids],
-                joint_ids=self._all_hand_ids,
-            )
-            self._asset.set_joint_position_target(joint_pos[:, self._all_hand_ids], joint_ids=self._all_hand_ids)
-            self._asset.set_joint_velocity_target(joint_vel[:, self._all_hand_ids], joint_ids=self._all_hand_ids)
+            hand_target = joint_pos[:, self._all_hand_ids]
+            hand_velocity = joint_vel[:, self._all_hand_ids]
+            if self._write_hand_joint_state:
+                self._asset.write_joint_state_to_sim(hand_target, hand_velocity, joint_ids=self._all_hand_ids)
+            else:
+                hand_target = _limit_joint_position_delta(
+                    self._asset.data.joint_pos[:, self._all_hand_ids],
+                    hand_target,
+                    float(self.cfg.hand_joint_target_max_delta),
+                )
+            self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
+            self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
 
         if self.cfg.root_motion_mode in {"stance", "auto"}:
@@ -473,6 +575,61 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if self.cfg.ground_lock and not source_root_applied:
             self._apply_ground_lock()
         self._print_root_debug(sample)
+
+    def _print_mirror_config(self) -> None:
+        if self._printed_mirror_config:
+            return
+        body_endpoint = getattr(self._subscriber, "description", "unavailable")
+        root_endpoint = getattr(self._root_subscriber, "description", "disabled")
+        print(
+            "[INFO] MuJoCo G1 mirror config: "
+            f"asset={self.cfg.asset_name}, transport={self._transport}, mode={self._locomotion_sync_mode}, "
+            f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
+            f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
+            f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
+        )
+        self._printed_mirror_config = True
+
+    def _hold_default_until_first_packet(self, reason: str) -> None:
+        if self._last_sample is not None or not self.cfg.hold_default_until_first_packet:
+            return
+
+        default_root = self._asset.data.default_root_state
+        if self._write_root_state and default_root is not None:
+            self._asset.write_root_link_pose_to_sim(default_root[:, :7])
+            if default_root.shape[-1] >= 13:
+                self._asset.write_root_link_velocity_to_sim(default_root[:, 7:13])
+            else:
+                self._asset.write_root_link_velocity_to_sim(torch.zeros_like(self._root_velocity))
+
+        default_joint_pos = self._asset.data.default_joint_pos[:, self._body_isaac_ids]
+        default_joint_vel = self._asset.data.default_joint_vel[:, self._body_isaac_ids]
+        if self._write_body_joint_state:
+            self._asset.write_joint_state_to_sim(default_joint_pos, default_joint_vel, joint_ids=self._body_isaac_ids)
+        self._asset.set_joint_position_target(default_joint_pos, joint_ids=self._body_isaac_ids)
+        self._asset.set_joint_velocity_target(default_joint_vel, joint_ids=self._body_isaac_ids)
+
+        interval = float(self.cfg.no_packet_debug_interval_s)
+        if interval <= 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_no_packet_debug_time < interval:
+            return
+        self._last_no_packet_debug_time = now
+        body_endpoint = getattr(self._subscriber, "description", "unavailable")
+        root_endpoint = getattr(self._root_subscriber, "description", "disabled")
+        body_topic = getattr(self._subscriber, "last_topic", "none")
+        root_topic = getattr(self._root_subscriber, "last_topic", "none")
+        body_keys = getattr(self._subscriber, "last_keys", "none")
+        ignored = getattr(self._subscriber, "ignored_packets", 0)
+        waited = now - self._no_packet_start_time
+        print(
+            "[WARN] MuJoCo G1 mirror has no valid body packet yet; holding default pose. "
+            f"asset={self.cfg.asset_name}, waited={waited:.1f}s, reason={reason}, "
+            f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}, "
+            f"last_body_topic={body_topic}, last_root_topic={root_topic}, "
+            f"last_body_keys={body_keys}, ignored_body_packets={ignored}"
+        )
 
     def _apply_source_root_state(self, sample: _MirrorSample) -> bool:
         if sample.root_pos_w is None and sample.root_quat_w is None:
@@ -495,6 +652,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             ).view(1, 3)
 
         self._source_root_is_moving |= self._detect_source_root_motion(self._root_pose)
+        if not self._write_root_state:
+            return False
         self._asset.write_root_link_pose_to_sim(self._root_pose)
         self._asset.write_root_link_velocity_to_sim(self._root_velocity)
         return True
@@ -595,6 +754,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
             limits = self._asset.data.joint_pos_limits[:, self._all_hand_ids, :]
         unclamped_target = target.clone()
         target = torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
+        if not self.cfg.controller_gripper_write_joint_state:
+            target = _limit_joint_position_delta(
+                self._asset.data.joint_pos[:, self._all_hand_ids],
+                target,
+                float(self.cfg.controller_gripper_target_max_delta),
+            )
         if self.cfg.controller_gripper_write_joint_state:
             joint_vel = torch.zeros_like(target)
             self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
@@ -765,7 +930,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def _select_body_q(self, msg: dict[str, Any]) -> np.ndarray | None:
         if self.cfg.zmq_pose_source == "target":
-            return self._first_array(msg, ("body_q_target", "joint_pos", "q", "dof_pos"))
+            target = self._first_array(msg, ("body_q_target", "joint_pos", "q", "dof_pos"))
+            return target if target is not None else self._first_array(msg, ("body_q_measured", "body_q"))
         if self.cfg.zmq_pose_source == "measured":
             return self._first_array(msg, ("body_q_measured", "body_q", "joint_pos", "q", "dof_pos"))
         target = self._first_array(msg, ("body_q_target",))
@@ -775,7 +941,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def _select_body_dq(self, msg: dict[str, Any]) -> np.ndarray | None:
         if self.cfg.zmq_pose_source == "target":
-            return self._first_array(msg, ("body_dq_target", "joint_vel", "dq", "dof_vel"))
+            target = self._first_array(msg, ("body_dq_target", "joint_vel", "dq", "dof_vel"))
+            return target if target is not None else self._first_array(msg, ("body_dq_measured", "body_dq"))
         return self._first_array(msg, ("body_dq_measured", "body_dq", "joint_vel", "dq", "dof_vel"))
 
     def _select_hand_q(self, msg: dict[str, Any], side: str) -> np.ndarray | None:
@@ -1098,6 +1265,12 @@ class G1GripperSyncAction(ActionTerm):
 
     def _write_hand_target(self, target: torch.Tensor) -> None:
         joint_vel = torch.zeros_like(target)
+        if not self.cfg.write_joint_state:
+            target = _limit_joint_position_delta(
+                self._asset.data.joint_pos[:, self._all_hand_ids],
+                target,
+                float(self.cfg.target_max_delta),
+            )
         if self.cfg.write_joint_state:
             self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
         self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
