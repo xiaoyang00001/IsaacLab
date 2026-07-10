@@ -17,6 +17,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+def _to_bind_endpoint(endpoint: str) -> str:
+    """Rewrite a tcp endpoint host to ``*`` for binding.
+
+    The configured endpoint carries the IP that remote subscribers connect to.
+    Binding must not use that IP: if DHCP reassigns the host address, binding
+    to the stale IP fails with EADDRNOTAVAIL. The publisher only needs the port.
+    """
+    if endpoint.startswith("tcp://"):
+        host_port = endpoint[len("tcp://"):]
+        host, sep, port = host_port.rpartition(":")
+        if sep and host not in ("*", "0.0.0.0"):
+            return f"tcp://*:{port}"
+    return endpoint
+
+
 class ZmqPubSocketManager:
     """A simple global manager to share the PUB socket so we don't bind multiple times to the same port."""
     _context = None
@@ -30,9 +45,10 @@ class ZmqPubSocketManager:
             if cls._context is None:
                 cls._context = zmq.Context()
             sock = cls._context.socket(zmq.PUB)
-            sock.bind(endpoint)
+            bind_endpoint = _to_bind_endpoint(endpoint)
+            sock.bind(bind_endpoint)
             cls._sockets[endpoint] = sock
-            logger.info(f"[ZMQ Object Sync] Publisher bound to shared endpoint {endpoint}")
+            logger.info(f"[ZMQ Object Sync] Publisher bound to {bind_endpoint} (configured endpoint {endpoint})")
         return cls._sockets[endpoint]
 
 @configclass
