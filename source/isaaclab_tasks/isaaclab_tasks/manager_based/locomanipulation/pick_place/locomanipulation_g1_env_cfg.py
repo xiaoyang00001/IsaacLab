@@ -695,10 +695,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     test_box_5 = _grasp_box_cfg("TestBox_5", 4)
 
     # Ground plane
-    ground = AssetBaseCfg(
-        prim_path="/World/GroundPlane",
-        spawn=GroundPlaneCfg(),
-    )
+    # ground = AssetBaseCfg(
+    #     prim_path="/World/GroundPlane",
+    #     spawn=GroundPlaneCfg(),
+    # )
 
     # Lights
     light = AssetBaseCfg(
