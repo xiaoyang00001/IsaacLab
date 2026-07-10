@@ -562,10 +562,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
 
     # Ground plane
-    ground = AssetBaseCfg(
-        prim_path="/World/GroundPlane",
-        spawn=GroundPlaneCfg(),
-    )
+    # ground = AssetBaseCfg(
+    #     prim_path="/World/GroundPlane",
+    #     spawn=GroundPlaneCfg(),
+    # )
 
     # Lights
     light = AssetBaseCfg(
