@@ -591,6 +591,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     hand_target,
                     float(self.cfg.hand_joint_target_max_delta),
                 )
+                if self.cfg.zero_target_only_hand_velocity:
+                    hand_velocity.zero_()
             self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
             self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
@@ -613,6 +615,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"hard_write_body_joints={len(self._body_state_write_isaac_ids)}/{len(self._body_isaac_ids)}, "
             f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
             f"zero_target_only_body_velocity={self.cfg.zero_target_only_body_velocity}, "
+            f"zero_target_only_hand_velocity={self.cfg.zero_target_only_hand_velocity}, "
             f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
         )
         self._printed_mirror_config = True

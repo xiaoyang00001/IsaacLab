@@ -318,7 +318,12 @@ def _grasp_box_cfg(prim_name: str, stack_index: int) -> RigidObjectCfg:
                     "min",
                     {"average", "min", "multiply", "max"},
                 ),
-                restitution=0.0,
+                restitution=_cfg_float("ISAACLAB_GRASP_OBJECT_RESTITUTION", 0.0),
+                restitution_combine_mode=_cfg_choice(
+                    "ISAACLAB_GRASP_OBJECT_RESTITUTION_COMBINE_MODE",
+                    "min",
+                    {"average", "min", "multiply", "max"},
+                ),
             ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.36, 0.18), roughness=0.7),
         ),
@@ -654,6 +659,7 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
         body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
         zero_target_only_body_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_BODY_VELOCITY", False),
+        zero_target_only_hand_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_HAND_VELOCITY", False),
         body_joint_target_scale_overrides=_isaac_robot_cfg_pattern_float_dict(
             robot_id,
             "BODY_JOINT_TARGET_SCALE_OVERRIDES",

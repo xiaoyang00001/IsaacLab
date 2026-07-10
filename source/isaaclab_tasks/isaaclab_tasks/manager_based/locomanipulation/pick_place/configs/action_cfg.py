@@ -91,6 +91,9 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     zero_target_only_body_velocity: bool = False
     """Whether to zero velocity targets for mirrored body joints that are driven only by actuator targets."""
 
+    zero_target_only_hand_velocity: bool = False
+    """Whether to zero velocity targets for mirrored hand joints that are driven only by actuator targets."""
+
     body_joint_target_scale_overrides: dict[str, float] | None = None
     """Regex-to-scale overrides applied to mirrored body joint position and velocity targets."""
 
