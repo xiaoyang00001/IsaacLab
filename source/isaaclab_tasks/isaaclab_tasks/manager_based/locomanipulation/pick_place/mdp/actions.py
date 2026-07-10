@@ -551,6 +551,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
         body_target = joint_pos[:, self._body_isaac_ids]
         body_velocity = joint_vel[:, self._body_isaac_ids]
+        body_velocity_target = body_velocity.clone()
         if self._write_body_joint_state:
             if self._body_state_write_isaac_ids:
                 self._asset.write_joint_state_to_sim(
@@ -564,14 +565,16 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     body_target[:, self._body_target_only_local_ids],
                     float(self.cfg.body_joint_target_max_delta),
                 )
+                body_velocity_target[:, self._body_target_only_local_ids] = 0.0
         else:
             body_target = _limit_joint_position_delta(
                 self._asset.data.joint_pos[:, self._body_isaac_ids],
                 body_target,
                 float(self.cfg.body_joint_target_max_delta),
             )
+            body_velocity_target.zero_()
         self._asset.set_joint_position_target(body_target, joint_ids=self._body_isaac_ids)
-        self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
+        self._asset.set_joint_velocity_target(body_velocity_target, joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
             hand_target = joint_pos[:, self._all_hand_ids]
             hand_velocity = joint_vel[:, self._all_hand_ids]

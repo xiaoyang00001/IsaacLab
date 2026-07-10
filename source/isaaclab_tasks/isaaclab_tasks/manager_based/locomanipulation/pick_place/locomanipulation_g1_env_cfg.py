@@ -326,21 +326,28 @@ G1_BODY_STATE_WRITE_JOINT_NAMES = [
 ]
 """Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
+
+def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
+    if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", True):
+        return None
+    return sim_utils.RigidBodyPropertiesCfg(
+        disable_gravity=False,
+        retain_accelerations=False,
+        linear_damping=0.0,
+        angular_damping=0.0,
+        max_linear_velocity=1000.0,
+        max_angular_velocity=1000.0,
+        max_depenetration_velocity=_cfg_float("ISAACLAB_G1_RIGID_MAX_DEPENETRATION_VELOCITY", 1.0),
+    )
+
+
 G1_43DOF_GR00T_CFG = ArticulationCfg(
     prim_path="/World/envs/env_.*/Robot",
     spawn=UsdFileCfg(
         usd_path=_find_gr00t_g1_43dof_usd(),
         activate_contact_sensors=False,
         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
-            retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=1.0,
-        ),
+        rigid_props=_g1_robot_rigid_props(),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             fix_root_link=False,
@@ -456,15 +463,11 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_elbow_joint",
                 ".*_wrist_.*_joint",
             ],
-            effort_limit_sim=300,
-            velocity_limit_sim=100,
-            stiffness=3000.0,
-            damping=10.0,
-            armature={
-                ".*_shoulder_.*": 0.001,
-                ".*_elbow_.*": 0.001,
-                ".*_wrist_.*_joint": 0.001,
-            },
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_ARM_EFFORT_LIMIT", 80.0),
+            velocity_limit_sim=_cfg_float("ISAACLAB_G1_ARM_VELOCITY_LIMIT", 12.0),
+            stiffness=_cfg_float("ISAACLAB_G1_ARM_STIFFNESS", 600.0),
+            damping=_cfg_float("ISAACLAB_G1_ARM_DAMPING", 30.0),
+            armature=_cfg_float("ISAACLAB_G1_ARM_ARMATURE", 0.01),
         ),
         "hands": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -472,11 +475,11 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_hand_middle_.*",
                 ".*_hand_thumb_.*",
             ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 120.0),
-            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 16.0),
-            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 260.0),
-            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 12.0),
-            armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.005),
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 25.0),
+            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 6.0),
+            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 80.0),
+            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 8.0),
+            armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.02),
         ),
     },
 )
