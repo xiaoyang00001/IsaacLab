@@ -105,6 +105,19 @@ def _cfg_float(name: str, default: float) -> float:
         return default
 
 
+def _cfg_optional_float(name: str) -> float | None:
+    value = _cfg_value(name)
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or value.lower() in {"none", "null"}:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def _cfg_bool_value(value: str | None, default: bool) -> bool:
     if value is None:
         return default
@@ -113,6 +126,14 @@ def _cfg_bool_value(value: str | None, default: bool) -> bool:
 
 def _cfg_bool(name: str, default: bool) -> bool:
     return _cfg_bool_value(_cfg_value(name), default)
+
+
+def _cfg_choice(name: str, default: str, choices: set[str]) -> str:
+    value = (_cfg_value(name, default) or default).strip().lower()
+    if value not in choices:
+        print(f"[WARN] Unsupported {name}={value!r}; using {default!r}.")
+        return default
+    return value
 
 
 def _cfg_str_list_value(value: str | None, default: list[str]) -> list[str]:
@@ -244,7 +265,11 @@ def _grasp_object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
         return sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
     return sim_utils.RigidBodyPropertiesCfg(
         disable_gravity=False,
-        enable_gyroscopic_forces=True,
+        linear_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_LINEAR_DAMPING", 0.05),
+        angular_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_ANGULAR_DAMPING", 5.0),
+        max_angular_velocity=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_ANGULAR_VELOCITY", 90.0),
+        max_contact_impulse=_cfg_optional_float("ISAACLAB_GRASP_OBJECT_MAX_CONTACT_IMPULSE"),
+        enable_gyroscopic_forces=_cfg_bool("ISAACLAB_GRASP_OBJECT_ENABLE_GYROSCOPIC_FORCES", False),
         solver_position_iteration_count=_cfg_int("ISAACLAB_GRASP_OBJECT_SOLVER_POSITION_ITERATIONS", 12),
         solver_velocity_iteration_count=_cfg_int("ISAACLAB_GRASP_OBJECT_SOLVER_VELOCITY_ITERATIONS", 4),
         max_depenetration_velocity=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_DEPENETRATION_VELOCITY", 2.0),
@@ -288,6 +313,11 @@ def _grasp_box_cfg(prim_name: str, stack_index: int) -> RigidObjectCfg:
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=_cfg_float("ISAACLAB_GRASP_OBJECT_STATIC_FRICTION", 2.0),
                 dynamic_friction=_cfg_float("ISAACLAB_GRASP_OBJECT_DYNAMIC_FRICTION", 1.6),
+                friction_combine_mode=_cfg_choice(
+                    "ISAACLAB_GRASP_OBJECT_FRICTION_COMBINE_MODE",
+                    "min",
+                    {"average", "min", "multiply", "max"},
+                ),
                 restitution=0.0,
             ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.36, 0.18), roughness=0.7),
