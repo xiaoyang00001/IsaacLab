@@ -18,7 +18,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UrdfFileCfg, UsdFileCfg
 from isaaclab.utils import configclass
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
@@ -201,9 +201,16 @@ def _grasp_object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
     return sim_utils.RigidBodyPropertiesCfg(
         disable_gravity=False,
         enable_gyroscopic_forces=True,
+        linear_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_LINEAR_DAMPING", 0.8),
+        angular_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_ANGULAR_DAMPING", 2.0),
+        max_linear_velocity=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_LINEAR_VELOCITY", 3.0),
+        max_angular_velocity=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_ANGULAR_VELOCITY", 180.0),
         solver_position_iteration_count=_cfg_int("ISAACLAB_GRASP_OBJECT_SOLVER_POSITION_ITERATIONS", 12),
         solver_velocity_iteration_count=_cfg_int("ISAACLAB_GRASP_OBJECT_SOLVER_VELOCITY_ITERATIONS", 4),
         max_depenetration_velocity=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_DEPENETRATION_VELOCITY", 2.0),
+        max_contact_impulse=_cfg_float("ISAACLAB_GRASP_OBJECT_MAX_CONTACT_IMPULSE", 20.0),
+        sleep_threshold=_cfg_float("ISAACLAB_GRASP_OBJECT_SLEEP_THRESHOLD", 0.005),
+        stabilization_threshold=_cfg_float("ISAACLAB_GRASP_OBJECT_STABILIZATION_THRESHOLD", 0.001),
     )
 
 
@@ -272,6 +279,12 @@ ZMQ_SYNC_ENDPOINT = _cfg_value(
 ##
 
 
+G1_HAND_MODEL = str(_cfg_value("ISAACLAB_G1_HAND_MODEL", "brainco")).strip().lower()
+if G1_HAND_MODEL not in {"brainco", "inspire", "trihand"}:
+    print(f"[WARN] Unsupported ISAACLAB_G1_HAND_MODEL={G1_HAND_MODEL!r}; using brainco.")
+    G1_HAND_MODEL = "brainco"
+
+
 def _find_gr00t_g1_43dof_usd() -> str:
     """Resolve the GR00T G1 43-DoF USD used by the sim2sim viewer."""
 
@@ -305,42 +318,183 @@ def _find_gr00t_g1_43dof_usd() -> str:
     )
 
 
+def _find_inspire_g1_usd() -> str:
+    configured = _cfg_value("ISAACLAB_G1_INSPIRE_USD_PATH")
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(
+        [
+            Path(
+                "D:/Omniverse/isaacsim_assets/Assets/Isaac/5.1/Isaac/Robots/Unitree/G1/"
+                "configuration/inspire_hand/g1_29dof_rev_1_0_with_inspire_hand_retarget_inspire_white_physics.usd"
+            ),
+            Path(
+                "D:/Omniverse/isaacsim_assets/Assets/IsaacLab/Robots/Unitree/G1/"
+                "g1_29dof_inspire_hand.usd"
+            ),
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            return str(path.resolve())
+    searched = "\n  ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "Could not locate G1 Inspire hand USD. Set ISAACLAB_G1_INSPIRE_USD_PATH in g1_udp_network.env. "
+        f"Searched:\n  {searched}"
+    )
+
+
+def _find_brainco_g1_urdf() -> str:
+    configured = _cfg_value("ISAACLAB_G1_BRAINCO_URDF_PATH")
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(
+        Path("F:/ISAACWholeBody/unitree_ros/robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf")
+    )
+    for path in candidates:
+        if path.exists():
+            return str(path.resolve())
+    searched = "\n  ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "Could not locate G1 BrainCo hand URDF. Set ISAACLAB_G1_BRAINCO_URDF_PATH in g1_udp_network.env. "
+        f"Searched:\n  {searched}"
+    )
+
+
+def _find_active_g1_usd() -> str:
+    if G1_HAND_MODEL == "inspire":
+        return _find_inspire_g1_usd()
+    return _find_gr00t_g1_43dof_usd()
+
+
+def _g1_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
+    return sim_utils.RigidBodyPropertiesCfg(
+        disable_gravity=False,
+        retain_accelerations=False,
+        linear_damping=0.0,
+        angular_damping=0.0,
+        max_linear_velocity=1000.0,
+        max_angular_velocity=1000.0,
+        max_depenetration_velocity=1.0,
+    )
+
+
+def _g1_articulation_props() -> sim_utils.ArticulationRootPropertiesCfg:
+    return sim_utils.ArticulationRootPropertiesCfg(
+        enabled_self_collisions=False,
+        fix_root_link=False,
+        solver_position_iteration_count=8,
+        solver_velocity_iteration_count=4,
+    )
+
+
+def _g1_spawn_cfg() -> UrdfFileCfg | UsdFileCfg:
+    activate_contact_sensors = _cfg_bool("ISAACLAB_G1_ACTIVATE_CONTACT_SENSORS", G1_HAND_MODEL in {"brainco", "inspire"})
+    visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55)
+    if G1_HAND_MODEL == "brainco":
+        usd_dir = _cfg_value("ISAACLAB_G1_BRAINCO_USD_DIR")
+        usd_file_name = _cfg_value("ISAACLAB_G1_BRAINCO_USD_FILE_NAME")
+        return UrdfFileCfg(
+            asset_path=_find_brainco_g1_urdf(),
+            usd_dir=usd_dir if usd_dir else None,
+            usd_file_name=usd_file_name if usd_file_name else None,
+            force_usd_conversion=_cfg_bool("ISAACLAB_G1_BRAINCO_FORCE_USD_CONVERSION", False),
+            make_instanceable=_cfg_bool("ISAACLAB_G1_BRAINCO_MAKE_INSTANCEABLE", True),
+            fix_base=_cfg_bool("ISAACLAB_G1_BRAINCO_FIX_BASE", False),
+            merge_fixed_joints=_cfg_bool("ISAACLAB_G1_BRAINCO_MERGE_FIXED_JOINTS", False),
+            convert_mimic_joints_to_normal_joints=_cfg_bool(
+                "ISAACLAB_G1_BRAINCO_CONVERT_MIMIC_JOINTS", False
+            ),
+            collision_from_visuals=_cfg_bool("ISAACLAB_G1_BRAINCO_COLLISION_FROM_VISUALS", False),
+            collider_type=_cfg_value("ISAACLAB_G1_BRAINCO_COLLIDER_TYPE", "convex_hull"),
+            self_collision=_cfg_bool("ISAACLAB_G1_BRAINCO_SELF_COLLISION", False),
+            replace_cylinders_with_capsules=_cfg_bool("ISAACLAB_G1_BRAINCO_REPLACE_CYLINDERS_WITH_CAPSULES", False),
+            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=None, damping=None)
+            ),
+            activate_contact_sensors=activate_contact_sensors,
+            visual_material=visual_material,
+            rigid_props=_g1_rigid_props(),
+            articulation_props=_g1_articulation_props(),
+        )
+    return UsdFileCfg(
+        usd_path=_find_active_g1_usd(),
+        activate_contact_sensors=activate_contact_sensors,
+        visual_material=visual_material,
+        rigid_props=_g1_rigid_props(),
+        articulation_props=_g1_articulation_props(),
+    )
+
+
+def _g1_initial_joint_pos() -> dict[str, float]:
+    joint_pos = {
+        ".*_hip_pitch_joint": -0.10,
+        ".*_knee_joint": 0.30,
+        ".*_ankle_pitch_joint": -0.20,
+        "left_shoulder_pitch_joint": 0.2,
+        "right_shoulder_pitch_joint": 0.2,
+        "left_shoulder_roll_joint": 0.2,
+        "right_shoulder_roll_joint": -0.2,
+        "left_elbow_joint": 0.6,
+        "right_elbow_joint": 0.6,
+    }
+    if G1_HAND_MODEL == "inspire":
+        joint_pos.update(
+            {
+                "L_.*_joint": 0.0,
+                "R_.*_joint": 0.0,
+                "L_thumb_proximal_yaw_joint": -1.57,
+                "R_thumb_proximal_yaw_joint": -1.57,
+            }
+        )
+    elif G1_HAND_MODEL == "brainco":
+        joint_pos.update(
+            {
+                ".*_thumb_metacarpal_joint": 0.0,
+                ".*_thumb_proximal_joint": 0.0,
+                ".*_index_proximal_joint": 0.0,
+                ".*_middle_proximal_joint": 0.0,
+                ".*_ring_proximal_joint": 0.0,
+                ".*_pinky_proximal_joint": 0.0,
+            }
+        )
+    return joint_pos
+
+
+def _g1_hand_joint_expr() -> list[str]:
+    if G1_HAND_MODEL == "brainco":
+        return [
+            ".*_thumb_metacarpal_joint",
+            ".*_thumb_proximal_joint",
+            ".*_index_proximal_joint",
+            ".*_middle_proximal_joint",
+            ".*_ring_proximal_joint",
+            ".*_pinky_proximal_joint",
+        ]
+    if G1_HAND_MODEL == "inspire":
+        return [
+            ".*_index_.*",
+            ".*_middle_.*",
+            ".*_thumb_.*",
+            ".*_ring_.*",
+            ".*_pinky_.*",
+        ]
+    return [
+        ".*_hand_index_.*",
+        ".*_hand_middle_.*",
+        ".*_hand_thumb_.*",
+    ]
+
+
 G1_43DOF_GR00T_CFG = ArticulationCfg(
     prim_path="/World/envs/env_.*/Robot",
-    spawn=UsdFileCfg(
-        usd_path=_find_gr00t_g1_43dof_usd(),
-        activate_contact_sensors=False,
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
-            retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=1.0,
-        ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
-            fix_root_link=False,
-            solver_position_iteration_count=8,
-            solver_velocity_iteration_count=4,
-        ),
-    ),
+    spawn=_g1_spawn_cfg(),
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.78),
         rot=(0.7071, 0.0, 0.0, 0.7071),
-        joint_pos={
-            ".*_hip_pitch_joint": -0.10,
-            ".*_knee_joint": 0.30,
-            ".*_ankle_pitch_joint": -0.20,
-            "left_shoulder_pitch_joint": 0.2,
-            "right_shoulder_pitch_joint": 0.2,
-            "left_shoulder_roll_joint": 0.2,
-            "right_shoulder_roll_joint": -0.2,
-            "left_elbow_joint": 0.6,
-            "right_elbow_joint": 0.6,
-        },
+        joint_pos=_g1_initial_joint_pos(),
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.9,
@@ -446,11 +600,7 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
             },
         ),
         "hands": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_hand_index_.*",
-                ".*_hand_middle_.*",
-                ".*_hand_thumb_.*",
-            ],
+            joint_names_expr=_g1_hand_joint_expr(),
             effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 120.0),
             velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 16.0),
             stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 260.0),
@@ -471,40 +621,20 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -1000.66], rot=[1.0, 0.0, 0.0, 0.0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(1.2, 0.8, 0.08),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -0.3], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.2,
-                dynamic_friction=1.0,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.58, 0.54), roughness=0.65),
         ),
     )
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, -100.76], rot=[1, 0, 0, 0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(0.14, 0.08, 0.12),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                enable_gyroscopic_forces=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
-                max_depenetration_velocity=5.0,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.4,
-                dynamic_friction=1.1,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
+            scale=(0.75, 0.75, 0.75),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
         ),
     )
     # 本地仓库背景
@@ -592,6 +722,13 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
         controller_gripper_thumb_1_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_1_ANGLE", 1.1),
         controller_gripper_thumb_2_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_2_ANGLE", 1.8),
+        controller_gripper_finger_intermediate_scale=_cfg_float(
+            "ISAACLAB_G1_GRIPPER_FINGER_INTERMEDIATE_SCALE", 0.75
+        ),
+        controller_gripper_ring_close_scale=_cfg_float("ISAACLAB_G1_GRIPPER_RING_CLOSE_SCALE", 1.0),
+        controller_gripper_pinky_close_scale=_cfg_float("ISAACLAB_G1_GRIPPER_PINKY_CLOSE_SCALE", 0.85),
+        controller_gripper_thumb_yaw_open_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_OPEN_ANGLE", -1.57),
+        controller_gripper_thumb_yaw_closed_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_CLOSED_ANGLE", -0.45),
         controller_gripper_action_alpha=_cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 1.0),
         controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
         controller_gripper_write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
@@ -632,6 +769,13 @@ class ActionsCfg:
         controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
         controller_gripper_thumb_1_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_1_ANGLE", 1.1),
         controller_gripper_thumb_2_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_2_ANGLE", 1.8),
+        controller_gripper_finger_intermediate_scale=_cfg_float(
+            "ISAACLAB_G1_GRIPPER_FINGER_INTERMEDIATE_SCALE", 0.75
+        ),
+        controller_gripper_ring_close_scale=_cfg_float("ISAACLAB_G1_GRIPPER_RING_CLOSE_SCALE", 1.0),
+        controller_gripper_pinky_close_scale=_cfg_float("ISAACLAB_G1_GRIPPER_PINKY_CLOSE_SCALE", 0.85),
+        controller_gripper_thumb_yaw_open_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_OPEN_ANGLE", -1.57),
+        controller_gripper_thumb_yaw_closed_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_CLOSED_ANGLE", -0.45),
         controller_gripper_action_alpha=_cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 1.0),
         controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
         write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
@@ -661,6 +805,13 @@ class ActionsCfg:
         ),
         timeout=_cfg_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
         controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
+        controller_gripper_finger_intermediate_scale=_cfg_float(
+            "ISAACLAB_G1_GRIPPER_FINGER_INTERMEDIATE_SCALE", 0.75
+        ),
+        controller_gripper_ring_close_scale=_cfg_float("ISAACLAB_G1_GRIPPER_RING_CLOSE_SCALE", 1.0),
+        controller_gripper_pinky_close_scale=_cfg_float("ISAACLAB_G1_GRIPPER_PINKY_CLOSE_SCALE", 0.85),
+        controller_gripper_thumb_yaw_open_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_OPEN_ANGLE", -1.57),
+        controller_gripper_thumb_yaw_closed_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_CLOSED_ANGLE", -0.45),
         write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
         target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
         publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
@@ -750,10 +901,12 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_temp_buffer_capacity = 2**22
 
         local_robot_prim = _robot_prim_name(ISAACLAB_LOCAL_ROBOT_ID)
-        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
-        self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
+        xr_anchor_link = _cfg_value("ISAACLAB_XR_ANCHOR_LINK", "mid360_link")
+        xr_anchor_rotation_link = _cfg_value("ISAACLAB_XR_ANCHOR_ROTATION_LINK", "pelvis")
+        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/{xr_anchor_link}"
+        self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/{xr_anchor_rotation_link}"
         self.xr.fixed_anchor_height = False
-        # Anchor XR to the robot head position, but use the pelvis as the stable robot yaw reference.
+        # Anchor XR to the configured robot sensor link, but use the pelvis as the stable yaw reference by default.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
         self.xr.recenter_yaw_button = ("/user/hand/right", "b")
         self.xr.recenter_yaw_button_event = "release"

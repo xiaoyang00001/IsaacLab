@@ -190,6 +190,21 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     controller_gripper_thumb_2_angle: float = 0.7
     """Maximum thumb tip joint close angle in radians."""
 
+    controller_gripper_finger_intermediate_scale: float = 0.75
+    """Scale applied to five-finger intermediate joints relative to proximal close angle when present."""
+
+    controller_gripper_ring_close_scale: float = 1.0
+    """Scale applied to ring finger close angle relative to index/middle close angle."""
+
+    controller_gripper_pinky_close_scale: float = 0.85
+    """Scale applied to pinky finger close angle relative to index/middle close angle."""
+
+    controller_gripper_thumb_yaw_open_angle: float = -1.57
+    """Five-finger thumb yaw target when the hand is open, for layouts with an absolute thumb-yaw joint."""
+
+    controller_gripper_thumb_yaw_closed_angle: float = -0.45
+    """Five-finger thumb yaw target when the hand is closed, for layouts with an absolute thumb-yaw joint."""
+
     controller_gripper_action_alpha: float = 0.65
     """Low-pass smoothing factor applied to incoming controller gripper commands."""
 
@@ -271,6 +286,21 @@ class G1GripperSyncActionCfg(ActionTermCfg):
 
     controller_gripper_thumb_2_angle: float = 0.7
     """Maximum thumb tip joint close angle in radians."""
+
+    controller_gripper_finger_intermediate_scale: float = 0.75
+    """Scale applied to five-finger intermediate joints relative to proximal close angle when present."""
+
+    controller_gripper_ring_close_scale: float = 1.0
+    """Scale applied to ring finger close angle relative to index/middle close angle."""
+
+    controller_gripper_pinky_close_scale: float = 0.85
+    """Scale applied to pinky finger close angle relative to index/middle close angle."""
+
+    controller_gripper_thumb_yaw_open_angle: float = -1.57
+    """Five-finger thumb yaw target when the hand is open, for layouts with an absolute thumb-yaw joint."""
+
+    controller_gripper_thumb_yaw_closed_angle: float = -0.45
+    """Five-finger thumb yaw target when the hand is closed, for layouts with an absolute thumb-yaw joint."""
 
     controller_gripper_action_alpha: float = 0.65
     """Low-pass smoothing factor applied to incoming local gripper commands."""

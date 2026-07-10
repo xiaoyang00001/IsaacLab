@@ -92,7 +92,7 @@ ISAACLAB_TO_MUJOCO_DOF = [
 
 MUJOCO_29DOF_JOINT_NAMES = [ISAACLAB_29DOF_JOINT_NAMES[i] for i in ISAACLAB_TO_MUJOCO_DOF]
 
-LEFT_HAND_JOINT_NAMES = [
+TRIHAND_LEFT_JOINT_NAMES = [
     "left_hand_thumb_0_joint",
     "left_hand_thumb_1_joint",
     "left_hand_thumb_2_joint",
@@ -101,7 +101,7 @@ LEFT_HAND_JOINT_NAMES = [
     "left_hand_middle_0_joint",
     "left_hand_middle_1_joint",
 ]
-RIGHT_HAND_JOINT_NAMES = [
+TRIHAND_RIGHT_JOINT_NAMES = [
     "right_hand_thumb_0_joint",
     "right_hand_thumb_1_joint",
     "right_hand_thumb_2_joint",
@@ -111,6 +111,145 @@ RIGHT_HAND_JOINT_NAMES = [
     "right_hand_middle_1_joint",
 ]
 
+INSPIRE_LEFT_JOINT_NAMES = [
+    "L_thumb_proximal_yaw_joint",
+    "L_thumb_proximal_pitch_joint",
+    "L_thumb_intermediate_joint",
+    "L_thumb_distal_joint",
+    "L_index_proximal_joint",
+    "L_index_intermediate_joint",
+    "L_middle_proximal_joint",
+    "L_middle_intermediate_joint",
+    "L_ring_proximal_joint",
+    "L_ring_intermediate_joint",
+    "L_pinky_proximal_joint",
+    "L_pinky_intermediate_joint",
+]
+INSPIRE_RIGHT_JOINT_NAMES = [
+    "R_thumb_proximal_yaw_joint",
+    "R_thumb_proximal_pitch_joint",
+    "R_thumb_intermediate_joint",
+    "R_thumb_distal_joint",
+    "R_index_proximal_joint",
+    "R_index_intermediate_joint",
+    "R_middle_proximal_joint",
+    "R_middle_intermediate_joint",
+    "R_ring_proximal_joint",
+    "R_ring_intermediate_joint",
+    "R_pinky_proximal_joint",
+    "R_pinky_intermediate_joint",
+]
+
+BRAINCO_LEFT_JOINT_NAMES = [
+    "left_thumb_metacarpal_joint",
+    "left_thumb_proximal_joint",
+    "left_index_proximal_joint",
+    "left_middle_proximal_joint",
+    "left_ring_proximal_joint",
+    "left_pinky_proximal_joint",
+]
+BRAINCO_RIGHT_JOINT_NAMES = [
+    "right_thumb_metacarpal_joint",
+    "right_thumb_proximal_joint",
+    "right_index_proximal_joint",
+    "right_middle_proximal_joint",
+    "right_ring_proximal_joint",
+    "right_pinky_proximal_joint",
+]
+
+LEFT_HAND_JOINT_NAMES = TRIHAND_LEFT_JOINT_NAMES
+RIGHT_HAND_JOINT_NAMES = TRIHAND_RIGHT_JOINT_NAMES
+
+
+def _resolve_g1_hand_layout(joint_names: list[str]) -> tuple[str, list[str], list[str]]:
+    joint_name_set = set(joint_names)
+    if set(BRAINCO_LEFT_JOINT_NAMES).issubset(joint_name_set) and set(BRAINCO_RIGHT_JOINT_NAMES).issubset(
+        joint_name_set
+    ):
+        return "g1_brainco_6dof_per_hand", BRAINCO_LEFT_JOINT_NAMES, BRAINCO_RIGHT_JOINT_NAMES
+    if set(INSPIRE_LEFT_JOINT_NAMES).issubset(joint_name_set) and set(INSPIRE_RIGHT_JOINT_NAMES).issubset(
+        joint_name_set
+    ):
+        return "g1_inspire_12dof_per_hand", INSPIRE_LEFT_JOINT_NAMES, INSPIRE_RIGHT_JOINT_NAMES
+    if set(TRIHAND_LEFT_JOINT_NAMES).issubset(joint_name_set) and set(TRIHAND_RIGHT_JOINT_NAMES).issubset(
+        joint_name_set
+    ):
+        return "g1_trihand_7dof_per_hand", TRIHAND_LEFT_JOINT_NAMES, TRIHAND_RIGHT_JOINT_NAMES
+    return "unknown", [], []
+
+
+def _compose_g1_hand_target(
+    layout: str,
+    num_envs: int,
+    device: torch.device,
+    index_close: torch.Tensor,
+    middle_close: torch.Tensor,
+    is_left: bool,
+    cfg,
+) -> torch.Tensor:
+    if layout == "g1_brainco_6dof_per_hand":
+        target = torch.zeros((num_envs, 6), dtype=torch.float32, device=device)
+        full_close = torch.maximum(index_close, middle_close)
+        finger_close = cfg.controller_gripper_finger_close_angle
+
+        target[:, 0] = cfg.controller_gripper_thumb_yaw_angle * full_close
+        target[:, 1] = cfg.controller_gripper_thumb_1_angle * full_close
+        target[:, 2] = finger_close * index_close
+        target[:, 3] = finger_close * middle_close
+        target[:, 4] = finger_close * cfg.controller_gripper_ring_close_scale * full_close
+        target[:, 5] = finger_close * cfg.controller_gripper_pinky_close_scale * full_close
+        return target
+
+    if layout == "g1_inspire_12dof_per_hand":
+        target = torch.zeros((num_envs, 12), dtype=torch.float32, device=device)
+        full_close = torch.maximum(index_close, middle_close)
+        finger_close = cfg.controller_gripper_finger_close_angle
+        intermediate_scale = cfg.controller_gripper_finger_intermediate_scale
+        ring_close = finger_close * cfg.controller_gripper_ring_close_scale * full_close
+        pinky_close = finger_close * cfg.controller_gripper_pinky_close_scale * full_close
+        thumb_yaw = cfg.controller_gripper_thumb_yaw_open_angle + (
+            cfg.controller_gripper_thumb_yaw_closed_angle - cfg.controller_gripper_thumb_yaw_open_angle
+        ) * full_close
+
+        target[:, 0] = thumb_yaw
+        target[:, 1] = cfg.controller_gripper_thumb_1_angle * full_close
+        target[:, 2] = cfg.controller_gripper_thumb_2_angle * intermediate_scale * full_close
+        target[:, 3] = cfg.controller_gripper_thumb_2_angle * full_close
+        target[:, 4] = finger_close * index_close
+        target[:, 5] = finger_close * intermediate_scale * index_close
+        target[:, 6] = finger_close * middle_close
+        target[:, 7] = finger_close * intermediate_scale * middle_close
+        target[:, 8] = ring_close
+        target[:, 9] = ring_close * intermediate_scale
+        target[:, 10] = pinky_close
+        target[:, 11] = pinky_close * intermediate_scale
+        return target
+
+    target = torch.zeros((num_envs, 7), dtype=torch.float32, device=device)
+    thumb_close = torch.minimum(index_close, middle_close)
+
+    thumb_yaw = cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
+    thumb_1 = cfg.controller_gripper_thumb_1_angle * thumb_close
+    thumb_2 = cfg.controller_gripper_thumb_2_angle * thumb_close
+    index = cfg.controller_gripper_finger_close_angle * index_close
+    middle = cfg.controller_gripper_finger_close_angle * middle_close
+
+    target[:, 0] = thumb_yaw
+    if is_left:
+        target[:, 1] = thumb_1
+        target[:, 2] = thumb_2
+        target[:, 3] = -index
+        target[:, 4] = -index
+        target[:, 5] = -middle
+        target[:, 6] = -middle
+    else:
+        target[:, 1] = -thumb_1
+        target[:, 2] = -thumb_2
+        target[:, 3] = index
+        target[:, 4] = index
+        target[:, 5] = middle
+        target[:, 6] = middle
+    return target
 
 @dataclass
 class _MirrorSample:
@@ -357,8 +496,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._enabled = cfg.enabled and self.num_envs == 1
 
         self._body_mujoco_ids, self._body_isaac_ids = self._build_body_joint_ids(cfg.mirror_joint_names)
-        self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
-        self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
+        self._hand_layout, self._left_hand_joint_names, self._right_hand_joint_names = _resolve_g1_hand_layout(
+            self._asset.joint_names
+        )
+        self._left_hand_ids = self._build_joint_ids(self._left_hand_joint_names)
+        self._right_hand_ids = self._build_joint_ids(self._right_hand_joint_names)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
 
@@ -516,26 +658,36 @@ class MuJoCoG1MirrorAction(ActionTerm):
         mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
         self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
         if mirror_hands_from_mujoco:
-            if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
+            if (
+                self._hand_layout == "g1_trihand_7dof_per_hand"
+                and sample.left_hand_pos is not None
+                and len(self._left_hand_ids) == len(self._left_hand_joint_names)
+            ):
                 joint_pos[:, self._left_hand_ids] = torch.tensor(
                     sample.left_hand_pos[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
-            if sample.right_hand_pos is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
+            if (
+                self._hand_layout == "g1_trihand_7dof_per_hand"
+                and sample.right_hand_pos is not None
+                and len(self._right_hand_ids) == len(self._right_hand_joint_names)
+            ):
                 joint_pos[:, self._right_hand_ids] = torch.tensor(
                     sample.right_hand_pos[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
             if (
-                sample.left_hand_vel is not None
+                self._hand_layout == "g1_trihand_7dof_per_hand"
+                and sample.left_hand_vel is not None
                 and self.cfg.use_source_joint_velocity
-                and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES)
+                and len(self._left_hand_ids) == len(self._left_hand_joint_names)
             ):
                 joint_vel[:, self._left_hand_ids] = torch.tensor(
                     sample.left_hand_vel[:7], dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
             if (
-                sample.right_hand_vel is not None
+                self._hand_layout == "g1_trihand_7dof_per_hand"
+                and sample.right_hand_vel is not None
                 and self.cfg.use_source_joint_velocity
-                and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES)
+                and len(self._right_hand_ids) == len(self._right_hand_joint_names)
             ):
                 joint_vel[:, self._right_hand_ids] = torch.tensor(
                     sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
@@ -586,6 +738,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"asset={self.cfg.asset_name}, transport={self._transport}, mode={self._locomotion_sync_mode}, "
             f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
             f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
+            f"hand_layout={self._hand_layout}, "
             f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
         )
         self._printed_mirror_config = True
@@ -726,26 +879,37 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if not self.cfg.controller_gripper_enabled or self.action_dim == 0:
             return
         if (
-            len(self._left_hand_ids) != len(LEFT_HAND_JOINT_NAMES)
-            or len(self._right_hand_ids) != len(RIGHT_HAND_JOINT_NAMES)
+            not self._left_hand_joint_names
+            or not self._right_hand_joint_names
+            or len(self._left_hand_ids) != len(self._left_hand_joint_names)
+            or len(self._right_hand_ids) != len(self._right_hand_joint_names)
         ):
             if not self._warned_gripper_unavailable:
                 print(
                     "[WARN] MuJoCo G1 mirror controller gripper disabled; "
-                    f"left_hand_joints={len(self._left_hand_ids)}, right_hand_joints={len(self._right_hand_ids)}"
+                    f"layout={self._hand_layout}, left_hand_joints={len(self._left_hand_ids)}, "
+                    f"right_hand_joints={len(self._right_hand_ids)}"
                 )
                 self._warned_gripper_unavailable = True
             return
 
-        left_target = self._compose_hand_target(
+        left_target = _compose_g1_hand_target(
+            self._hand_layout,
+            self.num_envs,
+            self.device,
             index_close=self._processed_actions[:, 0],
             middle_close=self._processed_actions[:, 1],
             is_left=True,
+            cfg=self.cfg,
         )
-        right_target = self._compose_hand_target(
+        right_target = _compose_g1_hand_target(
+            self._hand_layout,
+            self.num_envs,
+            self.device,
             index_close=self._processed_actions[:, 2],
             middle_close=self._processed_actions[:, 3],
             is_left=False,
+            cfg=self.cfg,
         )
         target = torch.cat((left_target, right_target), dim=-1)
         if self.cfg.controller_gripper_use_soft_limits:
@@ -767,31 +931,15 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._print_gripper_debug(unclamped_target, target, limits)
 
     def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
-        target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
-        thumb_close = torch.minimum(index_close, middle_close)
-
-        thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
-        thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
-        thumb_2 = self.cfg.controller_gripper_thumb_2_angle * thumb_close
-        index = self.cfg.controller_gripper_finger_close_angle * index_close
-        middle = self.cfg.controller_gripper_finger_close_angle * middle_close
-
-        target[:, 0] = thumb_yaw
-        if is_left:
-            target[:, 1] = thumb_1
-            target[:, 2] = thumb_2
-            target[:, 3] = -index
-            target[:, 4] = -index
-            target[:, 5] = -middle
-            target[:, 6] = -middle
-        else:
-            target[:, 1] = -thumb_1
-            target[:, 2] = -thumb_2
-            target[:, 3] = index
-            target[:, 4] = index
-            target[:, 5] = middle
-            target[:, 6] = middle
-        return target
+        return _compose_g1_hand_target(
+            self._hand_layout,
+            self.num_envs,
+            self.device,
+            index_close=index_close,
+            middle_close=middle_close,
+            is_left=is_left,
+            cfg=self.cfg,
+        )
 
     def _print_gripper_debug(
         self,
@@ -1109,8 +1257,11 @@ class G1GripperSyncAction(ActionTerm):
         self._processed_actions = torch.zeros_like(self._raw_actions)
         self._export_IO_descriptor = False
 
-        self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
-        self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
+        self._hand_layout, self._left_hand_joint_names, self._right_hand_joint_names = _resolve_g1_hand_layout(
+            self._asset.joint_names
+        )
+        self._left_hand_ids = self._build_joint_ids(self._left_hand_joint_names)
+        self._right_hand_ids = self._build_joint_ids(self._right_hand_joint_names)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
         self._publisher: _ZmqLatestPublisher | None = None
         self._subscriber: _ZmqLatestSubscriber | None = None
@@ -1125,13 +1276,17 @@ class G1GripperSyncAction(ActionTerm):
             self._enabled = False
             print("[WARN] G1 gripper sync disabled because it only supports num_envs=1.")
             return
-        if len(self._left_hand_ids) != len(LEFT_HAND_JOINT_NAMES) or len(self._right_hand_ids) != len(
-            RIGHT_HAND_JOINT_NAMES
+        if (
+            not self._left_hand_joint_names
+            or not self._right_hand_joint_names
+            or len(self._left_hand_ids) != len(self._left_hand_joint_names)
+            or len(self._right_hand_ids) != len(self._right_hand_joint_names)
         ):
             self._enabled = False
             print(
                 "[WARN] G1 gripper sync disabled; "
-                f"left_hand_joints={len(self._left_hand_ids)}, right_hand_joints={len(self._right_hand_ids)}"
+                f"layout={self._hand_layout}, left_hand_joints={len(self._left_hand_ids)}, "
+                f"right_hand_joints={len(self._right_hand_ids)}"
             )
             return
         if self._transport != "zmq":
@@ -1150,6 +1305,12 @@ class G1GripperSyncAction(ActionTerm):
         except Exception as exc:
             self._enabled = False
             print(f"[WARN] G1 gripper sync disabled; failed to create ZMQ endpoint: {exc}")
+        if self._enabled:
+            print(
+                "[INFO] G1 gripper sync config: "
+                f"robot_id={self.cfg.robot_id}, mode={self._mode}, layout={self._hand_layout}, "
+                f"left_dof={len(self._left_hand_joint_names)}, right_dof={len(self._right_hand_joint_names)}"
+            )
 
     def __del__(self):
         for endpoint in (getattr(self, "_publisher", None), getattr(self, "_subscriber", None)):
@@ -1217,44 +1378,36 @@ class G1GripperSyncAction(ActionTerm):
         self._print_debug("remote", target)
 
     def _compose_target_from_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        left_target = self._compose_hand_target(
+        left_target = _compose_g1_hand_target(
+            self._hand_layout,
+            self.num_envs,
+            self.device,
             index_close=actions[:, 0],
             middle_close=actions[:, 1],
             is_left=True,
+            cfg=self.cfg,
         )
-        right_target = self._compose_hand_target(
+        right_target = _compose_g1_hand_target(
+            self._hand_layout,
+            self.num_envs,
+            self.device,
             index_close=actions[:, 2],
             middle_close=actions[:, 3],
             is_left=False,
+            cfg=self.cfg,
         )
         return torch.cat((left_target, right_target), dim=-1)
 
     def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
-        target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
-        thumb_close = torch.minimum(index_close, middle_close)
-
-        thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
-        thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
-        thumb_2 = self.cfg.controller_gripper_thumb_2_angle * thumb_close
-        index = self.cfg.controller_gripper_finger_close_angle * index_close
-        middle = self.cfg.controller_gripper_finger_close_angle * middle_close
-
-        target[:, 0] = thumb_yaw
-        if is_left:
-            target[:, 1] = thumb_1
-            target[:, 2] = thumb_2
-            target[:, 3] = -index
-            target[:, 4] = -index
-            target[:, 5] = -middle
-            target[:, 6] = -middle
-        else:
-            target[:, 1] = -thumb_1
-            target[:, 2] = -thumb_2
-            target[:, 3] = index
-            target[:, 4] = index
-            target[:, 5] = middle
-            target[:, 6] = middle
-        return target
+        return _compose_g1_hand_target(
+            self._hand_layout,
+            self.num_envs,
+            self.device,
+            index_close=index_close,
+            middle_close=middle_close,
+            is_left=is_left,
+            cfg=self.cfg,
+        )
 
     def _clamp_target(self, target: torch.Tensor) -> torch.Tensor:
         if self.cfg.controller_gripper_use_soft_limits:
@@ -1291,15 +1444,16 @@ class G1GripperSyncAction(ActionTerm):
             else np.zeros(4, dtype=np.float32)
         )
         self._sequence += 1
+        per_hand_dof = len(self._left_hand_joint_names)
         self._publisher.publish(
             {
                 "schema": "g1_gripper_state.v1",
                 "robot_id": int(self.cfg.robot_id),
                 "time": time.time(),
                 "sequence": int(self._sequence),
-                "joint_order": "g1_trihand_7dof_per_hand",
-                "left_hand_q": target_np[:7].astype(float).tolist(),
-                "right_hand_q": target_np[7:14].astype(float).tolist(),
+                "joint_order": self._hand_layout,
+                "left_hand_q": target_np[:per_hand_dof].astype(float).tolist(),
+                "right_hand_q": target_np[per_hand_dof : per_hand_dof * 2].astype(float).tolist(),
                 "raw_openxr_action": actions_np.astype(float).tolist(),
                 "source": "isaaclab_openxr",
             }
@@ -1307,17 +1461,23 @@ class G1GripperSyncAction(ActionTerm):
 
     def _target_from_payload(self, msg: dict[str, Any]) -> torch.Tensor | None:
         try:
+            msg_layout = str(msg.get("joint_order", "")).strip()
+            if msg_layout and msg_layout != self._hand_layout:
+                raise ValueError(f"remote layout {msg_layout!r} does not match local layout {self._hand_layout!r}")
             left = np.asarray(msg["left_hand_q"], dtype=np.float32).reshape(-1)
             right = np.asarray(msg["right_hand_q"], dtype=np.float32).reshape(-1)
-            if left.size < 7 or right.size < 7:
-                raise ValueError("left_hand_q/right_hand_q must each contain at least 7 values")
-            values = np.concatenate((left[:7], right[:7]), axis=0)
+            per_hand_dof = len(self._left_hand_joint_names)
+            if left.size < per_hand_dof or right.size < per_hand_dof:
+                raise ValueError(
+                    f"left_hand_q/right_hand_q must each contain at least {per_hand_dof} values"
+                )
+            values = np.concatenate((left[:per_hand_dof], right[:per_hand_dof]), axis=0)
         except Exception as exc:
             if not self._warned_bad_payload:
                 print(f"[WARN] G1 gripper sync ignored malformed payload: {exc}")
                 self._warned_bad_payload = True
             return None
-        return torch.tensor(values, dtype=torch.float32, device=self.device).view(1, 14)
+        return torch.tensor(values, dtype=torch.float32, device=self.device).view(1, -1)
 
     def _print_debug(self, source: str, target: torch.Tensor) -> None:
         interval = float(self.cfg.debug_interval_s)
