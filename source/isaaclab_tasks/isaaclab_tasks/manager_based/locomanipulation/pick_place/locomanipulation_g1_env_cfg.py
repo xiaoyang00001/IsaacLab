@@ -561,6 +561,59 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    # ------------------------------------------------------------------
+    # 双机器人程序化搬运演示道具（scripts/gr00t_wbc/g1_dual_carry_choreography.py）。
+    # 几何与脚本内常量一一对应，改动必须两侧同步：
+    #   - 箱心 xy = 两机器人出生点中点 (-3.05)，前方 1.1 m (y=20.10)；
+    #   - 箱心 z=0.86 = FK 校准的夹持掌心高度（pelvis 0.78 + 0.083）；
+    #   - 箱长 1.0 m：两端伸到距机器人骨盆 0.25 m，掌心（前伸 0.31 m）握入端部 ~6 cm；
+    #   - 台顶 z=0.74 = 箱底，台面 0.35 m 窄于箱长，不挡两端夹持位。
+    # ------------------------------------------------------------------
+    carry_stand = AssetBaseCfg(
+        prim_path="/World/envs/env_.*/CarryStand",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[-3.05, 20.10, 0.37], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=sim_utils.CuboidCfg(
+            size=(0.35, 0.35, 0.74),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.8,
+                dynamic_friction=0.6,
+                restitution=0.0,
+            ),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.35, 0.32, 0.28), roughness=0.8),
+        ),
+    )
+    carry_crate = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/CarryCrate",
+        # 台顶 0.74 + 半高 0.12 + 5 mm 沉降余量
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-3.05, 20.10, 0.865], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=sim_utils.CuboidCfg(
+            size=(1.0, 0.22, 0.24),
+            rigid_props=(
+                sim_utils.RigidBodyPropertiesCfg(
+                    disable_gravity=False,
+                    enable_gyroscopic_forces=True,
+                    solver_position_iteration_count=8,
+                    solver_velocity_iteration_count=2,
+                    max_depenetration_velocity=0.5,
+                    sleep_threshold=0.0,
+                    stabilization_threshold=0.0,
+                )
+                if ZMQ_SYNC_ROLE != "subscriber"
+                else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=1.5),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.4,
+                dynamic_friction=1.1,
+                restitution=0.0,
+            ),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.45, 0.12), roughness=0.6),
+        ),
+    )
+
     # Ground plane
     ground = AssetBaseCfg(
         prim_path="/World/GroundPlane",
@@ -696,6 +749,7 @@ class ActionsCfg:
     cart_box2_sync = ZmqObjectSyncActionCfg(asset_name="cart_box2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box3_sync = ZmqObjectSyncActionCfg(asset_name="cart_box3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    carry_crate_sync = ZmqObjectSyncActionCfg(asset_name="carry_crate", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
 
 
 @configclass
