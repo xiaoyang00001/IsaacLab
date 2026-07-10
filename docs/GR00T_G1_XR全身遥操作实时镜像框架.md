@@ -166,6 +166,7 @@ self.teleop_devices = DevicesCfg(
 - **改了 `ISAACLAB_G1_ZMQ_HOST` 但没有效果**：默认 `transport=udp` 下这两个变量不生效，见第 4 节说明；要么改用 `ISAACLAB_G1_UDP_BIND_HOST`（本机监听地址，一般不需要改），要么显式设 `ISAACLAB_G1_TRANSPORT=zmq` 并让远端用 ZMQ PUB。
 - **`--enable_pinocchio` 相关的导入顺序问题**：`teleop_se3_agent.py` 已经保证在 `AppLauncher` 启动前先 `import pinocchio`（避免用到 Isaac Sim 自带的 pinocchio 版本），不需要手动调整。
 - **传了 `--num_envs` 大于 1**：`MuJoCoG1MirrorAction` 会静默禁用镜像（只打印一次 WARN），本任务目前只支持单环境 XR 第一人称。
+- **启动报 `Failed to create environment: Address not available (addr='tcp://192.168.10.46:15555')`**：这是对象同步 ZMQ publisher 在 bind 一个本机网卡上不存在的 IP（`ISAACLAB_OBJECT_SYNC_ENDPOINT` 里的地址，来自 `g1_udp_network.env` 的 `WINDOWS_ROBOT_1_ISAACLAB_IP`），常见原因是 DHCP 换了本机 IP 或换了网络。`zmq_object_sync.py` 现在 bind 时自动改用 `tcp://*:端口`，本机不会再因此崩溃；但 endpoint 里的 IP 仍是 robot-2 侧 subscriber 的连接地址，本机 IP 变了必须同步更新 `g1_udp_network.env`（两台 Windows 都要改），否则 robot-2 收不到物体位姿。
 
 ## 11. 相关文件索引
 
