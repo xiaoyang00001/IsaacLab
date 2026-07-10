@@ -168,6 +168,15 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     ]
     """Regex list of 29-DoF MuJoCo body joints to mirror into Isaac Lab."""
 
+    body_state_write_joint_names: list[str] | None = None
+    """Regex list of mirrored body joints that may be written directly to PhysX state.
+
+    When ``write_body_joint_state`` is true, only joints matching this list are hard-synced with
+    ``write_joint_state_to_sim``. Mirrored joints that do not match are still driven through actuator targets.
+    If this is ``None``, all mirrored body joints are hard-synced, preserving the legacy mirror behavior.
+    Set this to an empty list to make all mirrored body joints target-only.
+    """
+
     mirror_hands: bool = True
     """Whether to mirror hand joints from MuJoCo."""
 

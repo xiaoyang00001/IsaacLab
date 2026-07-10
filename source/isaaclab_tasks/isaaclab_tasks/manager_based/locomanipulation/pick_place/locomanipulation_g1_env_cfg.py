@@ -115,6 +115,15 @@ def _cfg_bool(name: str, default: bool) -> bool:
     return _cfg_bool_value(_cfg_value(name), default)
 
 
+def _cfg_str_list_value(value: str | None, default: list[str]) -> list[str]:
+    if value is None:
+        return list(default)
+    value = value.strip()
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def _isaac_robot_cfg_value(robot_id: int, suffix: str) -> str | None:
     robot_key = f"ISAACLAB_G1_{robot_id}_{suffix}"
     generic_key = f"ISAACLAB_G1_{suffix}"
@@ -142,6 +151,10 @@ def _isaac_robot_cfg_float(robot_id: int, suffix: str, default: float) -> float:
 
 def _isaac_robot_cfg_bool(robot_id: int, suffix: str, default: bool) -> bool:
     return _cfg_bool_value(_isaac_robot_cfg_value(robot_id, suffix), default)
+
+
+def _isaac_robot_cfg_str_list(robot_id: int, suffix: str, default: list[str]) -> list[str]:
+    return _cfg_str_list_value(_isaac_robot_cfg_value(robot_id, suffix), default)
 
 
 def _isaac_robot_sync_mode(robot_id: int) -> str:
@@ -304,6 +317,14 @@ def _find_gr00t_g1_43dof_usd() -> str:
         f"Searched:\n  {searched}"
     )
 
+
+G1_BODY_STATE_WRITE_JOINT_NAMES = [
+    ".*_hip_.*_joint",
+    ".*_knee_joint",
+    ".*_ankle_.*_joint",
+    "waist_.*_joint",
+]
+"""Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
 G1_43DOF_GR00T_CFG = ArticulationCfg(
     prim_path="/World/envs/env_.*/Robot",
@@ -471,40 +492,20 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Table
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -1000.66], rot=[1.0, 0.0, 0.0, 0.0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(1.2, 0.8, 0.08),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -0.3], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.2,
-                dynamic_friction=1.0,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.58, 0.54), roughness=0.65),
         ),
     )
 
     object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, -100.76], rot=[1, 0, 0, 0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(0.14, 0.08, 0.12),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                enable_gyroscopic_forces=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=1,
-                max_depenetration_velocity=5.0,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.4,
-                dynamic_friction=1.1,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
+            scale=(0.75, 0.75, 0.75),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
         ),
     )
     # 本地仓库背景
@@ -586,6 +587,11 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         root_motion_mode=_isaac_robot_cfg(robot_id, "ROOT_MOTION_MODE", "source"),
         root_zmq_required=_isaac_robot_cfg_bool(robot_id, "ROOT_ZMQ_REQUIRED", True),
         root_position_mode=_isaac_robot_cfg(robot_id, "ROOT_POSITION_MODE", "relative"),
+        body_state_write_joint_names=_isaac_robot_cfg_str_list(
+            robot_id,
+            "BODY_STATE_WRITE_JOINT_NAMES",
+            G1_BODY_STATE_WRITE_JOINT_NAMES,
+        ),
         mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", False),
         controller_gripper_enabled=_isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),

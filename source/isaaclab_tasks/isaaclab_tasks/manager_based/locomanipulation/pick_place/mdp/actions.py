@@ -357,6 +357,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._enabled = cfg.enabled and self.num_envs == 1
 
         self._body_mujoco_ids, self._body_isaac_ids = self._build_body_joint_ids(cfg.mirror_joint_names)
+        (
+            self._body_state_write_local_ids,
+            self._body_state_write_isaac_ids,
+            self._body_target_only_local_ids,
+        ) = self._build_body_state_write_joint_ids(cfg.body_state_write_joint_names)
         self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
@@ -491,6 +496,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             print(
                 "[INFO] MuJoCo G1 mirror received first packet: "
                 f"mirrored_body_joints={len(self._body_isaac_ids)}, "
+                f"hard_write_body_joints={len(self._body_state_write_isaac_ids)}, "
                 f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, "
                 f"mode={self._locomotion_sync_mode}, "
                 f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
@@ -546,7 +552,18 @@ class MuJoCoG1MirrorAction(ActionTerm):
         body_target = joint_pos[:, self._body_isaac_ids]
         body_velocity = joint_vel[:, self._body_isaac_ids]
         if self._write_body_joint_state:
-            self._asset.write_joint_state_to_sim(body_target, body_velocity, joint_ids=self._body_isaac_ids)
+            if self._body_state_write_isaac_ids:
+                self._asset.write_joint_state_to_sim(
+                    body_target[:, self._body_state_write_local_ids],
+                    body_velocity[:, self._body_state_write_local_ids],
+                    joint_ids=self._body_state_write_isaac_ids,
+                )
+            if self._body_target_only_local_ids:
+                body_target[:, self._body_target_only_local_ids] = _limit_joint_position_delta(
+                    self._asset.data.joint_pos[:, [self._body_isaac_ids[i] for i in self._body_target_only_local_ids]],
+                    body_target[:, self._body_target_only_local_ids],
+                    float(self.cfg.body_joint_target_max_delta),
+                )
         else:
             body_target = _limit_joint_position_delta(
                 self._asset.data.joint_pos[:, self._body_isaac_ids],
@@ -585,6 +602,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             "[INFO] MuJoCo G1 mirror config: "
             f"asset={self.cfg.asset_name}, transport={self._transport}, mode={self._locomotion_sync_mode}, "
             f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
+            f"hard_write_body_joints={len(self._body_state_write_isaac_ids)}/{len(self._body_isaac_ids)}, "
             f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
             f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
         )
@@ -604,8 +622,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
         default_joint_pos = self._asset.data.default_joint_pos[:, self._body_isaac_ids]
         default_joint_vel = self._asset.data.default_joint_vel[:, self._body_isaac_ids]
-        if self._write_body_joint_state:
-            self._asset.write_joint_state_to_sim(default_joint_pos, default_joint_vel, joint_ids=self._body_isaac_ids)
+        if self._write_body_joint_state and self._body_state_write_isaac_ids:
+            self._asset.write_joint_state_to_sim(
+                default_joint_pos[:, self._body_state_write_local_ids],
+                default_joint_vel[:, self._body_state_write_local_ids],
+                joint_ids=self._body_state_write_isaac_ids,
+            )
         self._asset.set_joint_position_target(default_joint_pos, joint_ids=self._body_isaac_ids)
         self._asset.set_joint_velocity_target(default_joint_vel, joint_ids=self._body_isaac_ids)
 
@@ -1004,6 +1026,28 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if not isaac_ids:
             raise RuntimeError("MuJoCo G1 mirror did not match any Isaac Lab joints.")
         return mujoco_ids, isaac_ids
+
+    def _build_body_state_write_joint_ids(
+        self, state_write_patterns: list[str] | None
+    ) -> tuple[list[int], list[int], list[int]]:
+        if state_write_patterns is None:
+            state_write_local_ids = list(range(len(self._body_isaac_ids)))
+            state_write_isaac_ids = list(self._body_isaac_ids)
+        else:
+            compiled = [re.compile(pattern) for pattern in state_write_patterns]
+            state_write_local_ids = []
+            state_write_isaac_ids = []
+            for local_id, isaac_id in enumerate(self._body_isaac_ids):
+                joint_name = self._asset.joint_names[isaac_id]
+                if any(pattern.fullmatch(joint_name) for pattern in compiled):
+                    state_write_local_ids.append(local_id)
+                    state_write_isaac_ids.append(isaac_id)
+
+        state_write_local_set = set(state_write_local_ids)
+        target_only_local_ids = [
+            local_id for local_id in range(len(self._body_isaac_ids)) if local_id not in state_write_local_set
+        ]
+        return state_write_local_ids, state_write_isaac_ids, target_only_local_ids
 
     def _build_joint_ids(self, joint_names: list[str]) -> list[int]:
         isaac_name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}
