@@ -138,6 +138,44 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     mirror_hands: bool = True
     """Whether to mirror hand joints from MuJoCo."""
 
+    pd_drive_joint_names: list[str] = [
+        ".*_shoulder_.*_joint",
+        ".*_elbow_joint",
+        ".*_wrist_.*_joint",
+    ]
+    """Regex list of mirrored body joints driven only through PD position targets.
+
+    Matching joints receive ``set_joint_position_target`` each step but are never
+    hard-written with ``write_joint_state_to_sim``, so the implicit actuator turns
+    any tracking error into a sustained contact force. This lets the arms squeeze
+    and carry objects instead of teleporting through them. Non-matching joints
+    (legs, waist) keep the kinematic hard-write so the mirrored gait stays exact.
+    Set to an empty list to restore the legacy full kinematic mirror.
+    """
+
+    pd_target_smoothing_alpha: float = 0.25
+    """EMA smoothing factor applied per physics step to PD-drive joint targets.
+
+    Mirror packets carry SONIC's measured joint state, which jitters at packet
+    rate even when the remote arm is visually still. Hard-written joints hide
+    that jitter, but PD-driven joints convert it into torque noise (through both
+    the stiffness and damping terms) that can excite sustained arm oscillation.
+    ``1.0`` disables smoothing; ``0.25`` at ~120 Hz physics gives a ~30 ms lag.
+    """
+
+    pd_zero_velocity_target: bool = False
+    """Zero the velocity targets of PD-drive joints instead of mirroring them.
+
+    Turns the damping term into pure dissipation on actual joint velocity —
+    unconditionally stabilizing, at the cost of extra lag during fast arm
+    motion (damping then resists the motion itself). Try this if arms still
+    oscillate with target smoothing enabled.
+    """
+
+    pd_debug_interval_s: float = 0.0
+    """Seconds between PD-drive diagnostic prints (raw/smoothed target vs measured
+    joint state for the first few PD joints). Non-positive disables the prints."""
+
     controller_gripper_enabled: bool = True
     """Whether the action consumes motion-controller gripper inputs for the G1 hands.
 

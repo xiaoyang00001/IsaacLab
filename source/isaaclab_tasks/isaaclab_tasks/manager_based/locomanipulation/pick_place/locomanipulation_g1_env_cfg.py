@@ -306,10 +306,20 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_elbow_joint",
                 ".*_wrist_.*_joint",
             ],
-            effort_limit_sim=300,
+            # 力矩上限按真实 G1 电机量级（肩/肘 ~25 N·m，腕 ~5 N·m）。
+            # 模板值 300 会让 PD 过冲产生上千牛的夹持力,箱子被挤飞。
+            effort_limit_sim={
+                ".*_shoulder_.*_joint": 25.0,
+                ".*_elbow_joint": 25.0,
+                ".*_wrist_.*_joint": 5.0,
+            },
             velocity_limit_sim=100,
-            stiffness=3000.0,
-            damping=10.0,
+            # 刚度降低到"稳定时不封顶"，让阻尼项有效（避免 bang-bang 振荡）。
+            # 计算：稳定误差 < 0.125 rad 时 K×err < effort → K ≤ 25/0.125 = 200。
+            # 临界阻尼 D_crit = 0.632√K = 0.632√200 ≈ 8.9，取 1.2 倍裕度 → 10.7 ≈ 11。
+            # 实测诊断 ζ=3.36（D=30 过阻尼），降到 D=11 实现快速响应 + 轻微超调（ζ≈1.2）。
+            stiffness=200.0,
+            damping=11.0,
             armature={
                 ".*_shoulder_.*": 0.001,
                 ".*_elbow_.*": 0.001,
@@ -322,7 +332,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_hand_middle_.*",
                 ".*_hand_thumb_.*",
             ],
-            effort_limit_sim=60.0,
+            # 指节力矩按 Dex3 真实量级（~3 N·m）。60 N·m 在指节杠杆下
+            # 是上千牛捏力，物体接触瞬间被弹飞；3 N·m ≈ 60 N 指尖力，
+            # 捏 1.5 kg 箱子绰绰有余。
+            effort_limit_sim=3.0,
             velocity_limit_sim=20.0,
             stiffness=80.0,
             damping=4.0,
@@ -447,7 +460,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # 位姿 = USD 内位姿 × 背景放置变换，与原场景摆放逐位一致。
     #
     # Pushcart 与两个箱子都是独立 RigidObject（IsaacLab 不支持嵌套刚体）。
-    # 箱子 z 抬高到推车 bbox 顶面 (z_max=0.3774) 之上避免初始穿透。
+    # cart_box_d05_physics.usda 的根原点在箱子底面中心，碰撞体 z 范围为 0..0.149。
+    # 这里的 cart_box*.init_state.pos[2] 是底面高度，不是箱体中心高度。
     # ------------------------------------------------------------------
     pushcart = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart",
@@ -458,7 +472,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     cart_box1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
-        # 推车顶面 z≈0.377，箱子半高 0.0745 → 中心 z
+        # 箱体底面高度。碰撞体高度 0.149 m，root 原点位于底面中心。
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.45], rot=[0.0, 0.0, 0.0, 1.0]),
         # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
         spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
@@ -537,10 +551,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
-        # 叠放在 cart_box4 顶面：cart_box4 中心 z=0.90，箱子半高 0.075 → 顶面 z=0.975；
-        # test_box 半高 0.12 → 中心 z=1.095。x/y 对齐 cart_box4，rot 沿用推车朝向。
+        # 叠放在 cart_box4 顶面：cart_box4 底面 z=0.90，高 0.149 → 顶面 z=1.049；
+        # test_box 半高 0.12 → 中心 z=1.169。x/y 对齐 cart_box4，rot 沿用推车朝向。
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[-5.4, 19.39363, 1.095],
+            pos=[-5.4, 19.39363, 1.169],
             rot=[0.0, 0.0, 0.0, 1.0],
         ),
         spawn=sim_utils.CuboidCfg(
@@ -664,6 +678,7 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_2",
@@ -690,6 +705,7 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     local_gripper = G1GripperSyncActionCfg(
         asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
@@ -717,7 +733,9 @@ class ActionsCfg:
         controller_gripper_thumb_2_angle=1.8,
         controller_gripper_action_alpha=1.0,
         controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
+        # 手指走 PD 而非硬写：硬写会每步覆盖接触解算，手指直接穿进箱子。
+        # PD 下手指顶住物体表面即停（不再闭合到满行程 1.8 rad），这是正确物理行为。
+        write_joint_state=False,
     )
     remote_gripper = G1GripperSyncActionCfg(
         asset_name=ISAACLAB_PEER_ROBOT_NAME,
@@ -741,7 +759,8 @@ class ActionsCfg:
         ),
         timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
         controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
+        # 同 local_gripper：远端镜像的手指也走 PD，避免硬写覆盖接触解算。
+        write_joint_state=False,
     )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     pushcart_sync = ZmqObjectSyncActionCfg(asset_name="pushcart", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
