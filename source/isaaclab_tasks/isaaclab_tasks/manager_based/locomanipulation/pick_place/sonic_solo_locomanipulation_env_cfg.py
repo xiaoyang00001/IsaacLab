@@ -14,12 +14,12 @@ deploy 按墙钟 50Hz 推进步态相位，sim 必须接近实时行走才有意
 其余机器人、传送带、pick-place 全套机构。任务 id 含 "Locomanipulation" 以复用
 teleop_se3_agent.py 的 deploy_target_mode 与 U 键回调。
 
-移植说明（pickplace-g1-collision 基线）：主配置 ActionsCfg 承载的是镜像遥操/多人
-同步动作，不再包含 SONIC deploy 项；SONIC 三个 action term（deploy target +
-lowstate/state 发布）以本文件的 ``SonicSoloActionsCfg`` 为唯一定义来源，
-SonicFullscene 直接导入复用，防止两场景漂移。机器人本体配置仍取
+SONIC 相关 action 项直接从主配置 ``ActionsCfg`` 实例摘取（主任务场景也挂了
+sonic_robot + SONIC deploy 驱动），保证三个任务的环境变量行为（transport 选择、
+发布开关、全部调参）永远一致，不会漂移。机器人本体配置同样取
 ``_main.SONIC_G1_29DOF_CFG``（与 SONIC 训练对齐的 PD/armature 配方）。
-抱取演示物体的配置（台座/纸箱/物理事件）同样以本文件的模块级常量为唯一来源。
+抱取演示物体的配置（台座/纸箱/物理事件）以本文件的模块级常量为唯一来源，
+SonicFullscene 直接导入引用。
 """
 
 import os
@@ -42,23 +42,15 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 import isaaclab.sim as sim_utils
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
-    SonicDeployTargetActionCfg,
-    SonicRobotStatePublisherActionCfg,
-    UnitreeDdsLowCmdActionCfg,
-    UnitreeLowStatePublisherActionCfg,
-)
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import (
-    SONIC_G1_29DOF_JOINT_ORDER,
-)
 
 from . import locomanipulation_g1_env_cfg as _main
 
-# 环境变量行为与主配置同源：直接复用 _main 的解析结果，保证 SONIC 机器人
-# 本体（fix root / physics mode）与 action term 的模式判定永远一致。
+# 环境变量行为与主配置同源：直接复用 _main 的解析结果。
 _env_flag = _main._env_flag
-SONIC_G1_FIX_ROOT = _main.SONIC_G1_FIX_ROOT
-SONIC_G1_PHYSICS_MODE = _main.SONIC_G1_PHYSICS_MODE
+
+# 主配置的 ActionsCfg 在类体执行时已按环境变量决定 transport 与发布 term；
+# 实例化一份并摘取 SONIC 相关项（dataclass 实例化时 deepcopy 默认值，互不影响）。
+_MAIN_ACTIONS = _main.ActionsCfg()
 
 # ---------------------------------------------------------------------------
 # 抱取演示物体（移植自 sonic-hug-object-demo 分支 c7660b80f）
@@ -210,131 +202,14 @@ class SonicSoloSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class SonicSoloActionsCfg:
-    """SONIC deploy target + 状态发布（两个 SONIC 场景的唯一定义来源）。
+    """只保留 SONIC deploy target + 状态发布（与主配置同一来源，见 _main.ActionsCfg）。"""
 
-    Minimal bridge modes:
-      SONIC_DEPLOY_TRANSPORT=zmq (default): GR00T deploy publishes debug body_q_target over ZMQ.
-      SONIC_DEPLOY_TRANSPORT=dds: IsaacLab behaves like a virtual G1, subscribing rt/lowcmd
-                                  and publishing rt/lowstate for GR00T deploy.
-    """
+    sonic_wholebody = _MAIN_ACTIONS.sonic_wholebody
 
-    if os.environ.get("SONIC_DEPLOY_TRANSPORT", "zmq").lower() == "dds":
-        sonic_wholebody = UnitreeDdsLowCmdActionCfg(
-            asset_name="sonic_robot",
-            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-            domain_id=int(os.environ.get("UNITREE_DDS_DOMAIN_ID", "0")),
-            network_interface=os.environ.get("UNITREE_DDS_INTERFACE", ""),
-            lowcmd_topic=os.environ.get("UNITREE_LOWCMD_TOPIC", "rt/lowcmd"),
-            lowstate_topic=os.environ.get("UNITREE_LOWSTATE_TOPIC", "rt/lowstate"),
-            secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
-            target_order="mujoco",
-            target_rate_limit_rad_per_step=0.08,
-            stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
-            stale_timeout_s=0.5,
-            publish_lowstate_every_apply=True,
-            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
-            debug_log_interval=50,
-        )
-    else:
-        sonic_wholebody = SonicDeployTargetActionCfg(
-            asset_name="sonic_robot",
-            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-            endpoint=os.environ.get("SONIC_DEPLOY_ENDPOINT", "tcp://127.0.0.1:5557"),
-            topic=os.environ.get("SONIC_DEPLOY_TOPIC", "g1_debug"),
-            target_field=os.environ.get("SONIC_DEPLOY_TARGET_FIELD", "last_action"),
-            target_order="mujoco",
-            target_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_TARGET_RATE_LIMIT", "0.16")),
-            # 物理模式：解锁后旁路 rate limiter——软增益 policy 靠快甩目标偏置生成
-            # 扭矩，slew limiter 在平衡环里是 100-250ms 人为迟滞（实测钉死 0.04 摔倒）
-            rate_limit_only_while_root_locked=_env_flag(
-                "SONIC_DEPLOY_RATE_LIMIT_ONLY_LOCKED", not SONIC_G1_FIX_ROOT
-            ),
-            stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
-            lock_root_z=SONIC_G1_FIX_ROOT,  # 物理模式放 Z 自由，让 PhysX settle 到正确地面高度
-            startup_settle_steps=0 if SONIC_G1_FIX_ROOT else 50,  # 物理模式先 settle 再跟 deploy target
-            # 物理模式 unlock 渐变释放（按物理步计数）。SONIC_DEPLOY_UNLOCK_BLEND_STEPS=0
-            # 可做"瞬时交接"实验（最接近 MuJoCo eval 的自由根起始状态）
-            unlock_blend_steps=int(
-                os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "50")
-            ),
-            hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
-            # 摔倒自动恢复（对齐 MuJoCo base_sim.check_fall：root 高度 <0.2m 即自动
-            # 扶正）。SONIC_DEPLOY_AUTO_RECOVER=0 恢复纯手动（J 键）；settle 后是否
-            # 自动重新解锁由 SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER 控制
-            auto_recover_on_fall=_env_flag("SONIC_DEPLOY_AUTO_RECOVER", True),
-            fall_root_height_m=float(os.environ.get("SONIC_DEPLOY_FALL_HEIGHT", "0.2")),
-            auto_unlock_after_recover=_env_flag("SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER", True),
-            stale_timeout_s=0.5,
-            fallback_to_last_action=True,
-            fallback_to_body_q_target=True,
-            reference_target_field=os.environ.get("SONIC_DEPLOY_REFERENCE_TARGET_FIELD", "body_q_target"),
-            # 物理模式需要 policy 腿部平衡补偿，默认不 blend 掉
-            blend_reference_lower_body=_env_flag("SONIC_DEPLOY_BLEND_REFERENCE_LOWER_BODY", SONIC_G1_FIX_ROOT),
-            hold_last_reference_target=_env_flag("SONIC_DEPLOY_HOLD_LAST_REFERENCE", True),
-            # 物理模式下 deploy base_trans/quat 非物理真实值，默认不跟随
-            follow_base_yaw_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_YAW", SONIC_G1_FIX_ROOT),
-            follow_base_translation_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_TRANSLATION", SONIC_G1_FIX_ROOT),
-            base_quat_target_field=os.environ.get("SONIC_DEPLOY_BASE_QUAT_FIELD", "base_quat_target"),
-            base_trans_target_field=os.environ.get("SONIC_DEPLOY_BASE_TRANS_FIELD", "base_trans_target"),
-            base_yaw_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_YAW_RATE_LIMIT", "0.12")),
-            base_translation_rate_limit_m_per_step=float(
-                os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT", "0.08")
-            ),
-            base_translation_scale=float(os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_SCALE", "2.0")),
-            follow_base_height_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_HEIGHT", False),
-            base_height_rate_limit_m_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_HEIGHT_RATE_LIMIT", "0.05")),
-            base_height_scale=float(os.environ.get("SONIC_DEPLOY_BASE_HEIGHT_SCALE", "1.0")),
-            keep_feet_on_ground=_env_flag("SONIC_DEPLOY_KEEP_FEET_ON_GROUND", False),
-            foot_ground_scale=float(os.environ.get("SONIC_DEPLOY_FOOT_GROUND_SCALE", "0.35")),
-            max_squat_drop_m=float(os.environ.get("SONIC_DEPLOY_MAX_SQUAT_DROP", "0.45")),
-            # Synthetic base motion 是固定根可视化功能；物理模式 root 由 PhysX 驱动，默认关
-            synthetic_base_motion_from_lower_body=_env_flag(
-                "SONIC_DEPLOY_SYNTHETIC_BASE_MOTION", not SONIC_G1_PHYSICS_MODE
-            ),
-            synthetic_base_motion_gain=float(os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_GAIN", "0.35")),
-            synthetic_base_motion_deadzone=float(
-                os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_DEADZONE", "0.002")
-            ),
-            synthetic_base_motion_max_step_m=float(
-                os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_MAX_STEP", "0.035")
-            ),
-            debug_log_interval=50,
-        )
-
-    # 默认 ZMQ 链路下，关节由 SonicDeployTargetAction 驱动，但不会回传机器人状态。
-    # 设 SONIC_PUBLISH_LOWSTATE=1（或 teleop 的 --publish_lowstate）时额外开一路 DDS，
-    # 把 sonic_robot 的 sim 状态发到 rt/lowstate，供 GR00T/SONIC deploy 当状态源。
-    # DDS 传输模式（SONIC_DEPLOY_TRANSPORT=dds）已由 UnitreeDdsLowCmdAction 发布 lowstate，
-    # 因此这里仅在非 dds 模式下挂载，避免重复发布与 DDS 重复初始化。
-    if os.environ.get("SONIC_DEPLOY_TRANSPORT", "zmq").lower() != "dds" and _env_flag(
-        "SONIC_PUBLISH_LOWSTATE", False
-    ):
-        sonic_lowstate_pub = UnitreeLowStatePublisherActionCfg(
-            asset_name="sonic_robot",
-            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-            domain_id=int(os.environ.get("UNITREE_DDS_DOMAIN_ID", "0")),
-            network_interface=os.environ.get("UNITREE_DDS_INTERFACE", ""),
-            lowstate_topic=os.environ.get("UNITREE_LOWSTATE_TOPIC", "rt/lowstate"),
-            secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
-            publish_secondary_imu=_env_flag("SONIC_PUBLISH_SECONDARY_IMU", True),
-            target_order="mujoco",
-            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
-            debug_log_interval=100,
-        )
-
-    # 真实物理闭环桥：IsaacLab 用简单 ZMQ/msgpack 发布 sonic_robot 真实状态，
-    # C++ proxy 再用 Unitree C++ SDK 转成 rt/lowstate，避开 Python DDS 与 C++ deploy 不互通的问题。
-    if _env_flag("SONIC_PUBLISH_STATE_ZMQ", False):
-        sonic_state_pub = SonicRobotStatePublisherActionCfg(
-            asset_name="sonic_robot",
-            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
-            bind_endpoint=os.environ.get("SONIC_STATE_ZMQ_BIND", "tcp://127.0.0.1:5560"),
-            topic=os.environ.get("SONIC_STATE_ZMQ_TOPIC", "sonic_state"),
-            target_order="mujoco",
-            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
-            debug_log_interval=100,
-        )
-
+    if hasattr(_MAIN_ACTIONS, "sonic_state_pub"):
+        sonic_state_pub = _MAIN_ACTIONS.sonic_state_pub
+    if hasattr(_MAIN_ACTIONS, "sonic_lowstate_pub"):
+        sonic_lowstate_pub = _MAIN_ACTIONS.sonic_lowstate_pub
 
 @configclass
 class SonicSoloObservationsCfg:

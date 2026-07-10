@@ -458,6 +458,16 @@ def main() -> None:
         # Locomanipulation 配置可能启用/关闭 walker、DDS/ZMQ、IK 等 action term，shape 会随配置变化。
         deploy_zero_actions = torch.zeros(env.action_space.shape, device=env.device)
 
+    # 零动作循环只在「action space 宽度为 0 或没有设备」时启用：
+    # - 主任务（镜像遥操）宽度 >0——XR 扳机→夹爪命令经设备 advance() 流入
+    #   env.step，必须走设备路径；SONIC/镜像/deploy 这类 term 自行消费网络包，
+    #   不吃 env action，两者互不干扰。
+    # - SonicSolo/SonicFullscene 宽度 =0，且 handtracking 设备（无 retargeter）
+    #   的 advance() 不产生 action tensor，只能零动作推进。
+    deploy_zero_action_loop = deploy_target_mode and (
+        teleop_interface is None or int(env.action_space.shape[-1]) == 0
+    )
+
     print("Teleoperation started. Press 'R' to reset the environment.")
     if deploy_target_mode:
         print(
@@ -469,7 +479,7 @@ def main() -> None:
     # CPU 物理 + 空场景可自由跑到 ~85Hz（1.7× 超实时），policy 等效控制率掉到 ~29Hz
     # 必摔；慢于实时同样畸变（步态相位超前于机器人）。每步睡到墙钟节拍；
     # 落后超过 1s（卡顿/断点）则重新对齐，不补帧。SONIC_REALTIME_PACE=0 可关闭。
-    realtime_pace = deploy_target_mode and os.environ.get("SONIC_REALTIME_PACE", "1").lower() in (
+    realtime_pace = deploy_zero_action_loop and os.environ.get("SONIC_REALTIME_PACE", "1").lower() in (
         "1",
         "true",
         "yes",
@@ -484,7 +494,7 @@ def main() -> None:
         try:
             # Teleop/deploy 都不需要 autograd；inference_mode 可以减少 tensor bookkeeping 开销。
             with torch.inference_mode():
-                if deploy_target_mode:
+                if deploy_zero_action_loop:
                     # deploy 模式：零 action 只负责推进 ActionManager/Simulation。
                     # SonicDeployTargetAction 会在 process/apply 阶段自行消费最新 ZMQ/DDS 目标。
                     env.step(deploy_zero_actions)
