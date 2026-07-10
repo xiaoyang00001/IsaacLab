@@ -63,7 +63,38 @@ D:\miniconda3\envs\env_isaaclab\python.exe scripts\gr00t_wbc\g1_dual_carry_chore
 | carry | 13.1 – 20.6 | 两机器人保持面对面，沿世界 +Y 侧步平移 1.5 m |
 | hold | 20.6 – ∞ | 保持终态持续发流 |
 
-## 4. 几何设计与 FK 校准依据
+## 4. 行走驱动原理：运动学镜像回放，不是物理行走
+
+机器人"行走"不是动力学控制（无 RL 策略、无 SONIC、无平衡解算），而是**运动学镜像回放**：
+脚本算出每一时刻"骨盆应该在哪、腿摆什么角度"，喂给 `MuJoCoG1MirrorAction` 每个物理步硬写进仿真。
+机器人本质上是被脚本牵着走的木偶，不存在平衡问题、不会摔倒。链路分三层：
+
+### 4.1 脚本侧：程序化生成轨迹
+
+- **根轨迹（位移的真正来源）**：`eval_robot()` 按相位时间线用 smoothstep 插值出骨盆世界位置
+  (x, y, z) 与朝向 yaw——"前进 1.09 m""原地转身 90°""侧移 1.5 m"都是在根位置层面完成的。
+- **腿部步态（装饰性动画）**：`gait_overlay()` 用正弦函数生成摆腿：hip_pitch 前后摆、
+  knee 在摆动相抬起（`max(0, sin(φ))`）、ankle 反向补偿保持脚掌大致水平，左右腿相位差 π。
+  它只负责"看起来在走"，与根位移只是节奏匹配（速度 ≈ 步频 × 步长），脚底轻微打滑是固有现象。
+- 以 100 Hz 打包发 UDP：29 关节角发 5557/5567（`body_q`），根位姿发 5558/5568
+  （`root_pos_w` / `root_quat_w`）。
+
+### 4.2 环境侧：镜像动作接收执行（`MuJoCoG1MirrorAction.apply_actions`）
+
+| 部位 | 写入方式 | 含义 |
+|---|---|---|
+| 根位姿 | `write_root_link_pose_to_sim()` 每步硬写 | 机器人位移由此产生 |
+| 腿/腰关节 | `write_joint_state_to_sim()` 运动学硬写 | 步态是精确回放 |
+| 手臂 | 只发 PD 位置目标（`pd_drive_joint_names`） | 跟踪误差经执行器转成真实接触力，夹箱是**真物理** |
+
+### 4.3 设计取舍
+
+这本来就是 XR 遥操框架的通道——平时由远端 SONIC/MuJoCo 算全身姿态发过来镜像，本编排只是把
+发送端换成了本地脚本。好处：Isaac Lab 侧零改动；两台机器人的间距被脚本刚性锁定，搬箱时夹持
+距离不会漂。代价：行走没有动力学意义——若要真正的物理行走，需走 SONIC 跟踪或 RL 策略路线
+（即"场景1"框架中 P 物理跟踪的路线）。
+
+## 5. 几何设计与 FK 校准依据
 
 核心巧合：两机器人出生点 `(-3.8, 19.008)` / `(-2.3, 19.008)` 间距恰 1.5 m，箱子放中点 `x = -3.05` 时双方骨盆到箱心各 0.75 m，**全程无需 x 向走位**。
 
@@ -86,7 +117,7 @@ D:\miniconda3\envs\env_isaaclab\python.exe scripts\gr00t_wbc\g1_dual_carry_chore
 
 夹持力预算：squeeze 内收干涉 ~1 cm → Δθ≈0.03 rad → τ≈6 N·m → 每掌 ~15 N 法向力；μ=1.2 下四掌摩擦容量 ~70 N ≫ 箱重 15 N（裕度 4×）。lift 关键帧额外内收，力上限受 `effort_limit_sim=25 N·m` 封顶，不会失稳。
 
-## 5. 调参指南
+## 6. 调参指南
 
 | 症状 | 调整 |
 |---|---|
@@ -97,15 +128,15 @@ D:\miniconda3\envs\env_isaaclab\python.exe scripts\gr00t_wbc\g1_dual_carry_chore
 | 步态脚滑严重 | 属运动学回放固有现象，调 `WALK_FREQ_HZ` 与 `--walk-speed` 匹配观感 |
 | 想重演 | 仿真端按 `R` 复位箱子回高台，重启脚本（机器人瞬移回出生点重演） |
 
-## 6. 排障 Checklist
+## 7. 排障 Checklist
 
 1. 机器人不动：确认 `ISAACLAB_G1_TRANSPORT=udp`（`g1_udp_network.env` 默认）；确认 Isaac Lab 控制台出现 `MuJoCo G1 mirror received first packet`。
 2. 只有一台动：检查 5567/5568 端口未被防火墙拦截；两台的包都由本脚本发出，不需要设置 `ISAACLAB_G1_2_*` 环境变量。
 3. 机器人抖动/姿态跳变：确认远端 SONIC 发送端已关（同端口冲突）。
-4. 箱子没被夹住直接掉落：按第 5 节调 squeeze/lift 关键帧；确认场景里 `CarryCrate` 在高台上（按 `R` 复位）。
+4. 箱子没被夹住直接掉落：按第 6 节调 squeeze/lift 关键帧；确认场景里 `CarryCrate` 在高台上（按 `R` 复位）。
 5. XR 端 RESET（env.reset）会把机器人拉回出生点但脚本时间线不回退——重启脚本即可。
 
-## 7. 相关文件索引
+## 8. 相关文件索引
 
 - 编排脚本（UDP 发布端）：`scripts/gr00t_wbc/g1_dual_carry_choreography.py`
 - 镜像动作实现：`source/.../pick_place/mdp/actions.py`（`MuJoCoG1MirrorAction`）
