@@ -625,6 +625,13 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        # 镜像流是 SONIC 的 measured 关节状态，控制端不动时目标也在包级抖动。
+        # PD 会把抖动经 K(位置)、D(速度) 两条通道放大成力矩噪声 → 手臂无端摆动。
+        # 速度目标清零 = 阻尼变成对实际运动的纯耗散（无条件镇定），切断主噪声通道；
+        # 平滑 α 可经环境变量继续压低（0.25→0.1 更平滑但更迟滞）。
+        pd_zero_velocity_target=os.environ.get("ISAACLAB_G1_PD_ZERO_VEL_TARGET", "1").strip().lower()
+        not in {"0", "false", "no"},
+        pd_target_smoothing_alpha=_env_float("ISAACLAB_G1_PD_SMOOTHING_ALPHA", 0.25),
         pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
@@ -652,6 +659,13 @@ class ActionsCfg:
         root_position_mode="relative",
         mirror_hands=False,
         controller_gripper_enabled=False,
+        # 镜像流是 SONIC 的 measured 关节状态，控制端不动时目标也在包级抖动。
+        # PD 会把抖动经 K(位置)、D(速度) 两条通道放大成力矩噪声 → 手臂无端摆动。
+        # 速度目标清零 = 阻尼变成对实际运动的纯耗散（无条件镇定），切断主噪声通道；
+        # 平滑 α 可经环境变量继续压低（0.25→0.1 更平滑但更迟滞）。
+        pd_zero_velocity_target=os.environ.get("ISAACLAB_G1_PD_ZERO_VEL_TARGET", "1").strip().lower()
+        not in {"0", "false", "no"},
+        pd_target_smoothing_alpha=_env_float("ISAACLAB_G1_PD_SMOOTHING_ALPHA", 0.25),
         pd_debug_interval_s=_env_float("ISAACLAB_G1_PD_DEBUG_S", 0.0),
     )
     local_gripper = G1GripperSyncActionCfg(
