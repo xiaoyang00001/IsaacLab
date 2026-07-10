@@ -56,6 +56,24 @@ def _perpendicular_horizontal_axis(axis: tuple[float, float, float]) -> tuple[fl
     return (-axis[1], axis[0], 0.0)
 
 
+def _rotate_vector_by_quat(quat: Any, vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    w = quat.GetReal()
+    x, y, z = quat.GetImaginary()
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm < 1.0e-9 or not math.isfinite(norm):
+        return vector
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    vx, vy, vz = vector
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    )
+
+
 def _yaw_from_matrix_axis(
     matrix: Any,
     local_axis: tuple[float, float, float],
@@ -81,24 +99,6 @@ def _yaw_from_matrix_axis(
             return _wrap_angle(fallback_world_yaw + local_axis_yaw - fallback_axis_yaw)
 
     return _yaw_from_pxr_quat(matrix.ExtractRotationQuat())
-
-
-def _rotate_vector_by_quat(quat: Any, vector: tuple[float, float, float]) -> tuple[float, float, float]:
-    w = quat.GetReal()
-    x, y, z = quat.GetImaginary()
-    norm = math.sqrt(w * w + x * x + y * y + z * z)
-    if norm < 1.0e-9 or not math.isfinite(norm):
-        return vector
-    w, x, y, z = w / norm, x / norm, y / norm, z / norm
-    vx, vy, vz = vector
-    tx = 2.0 * (y * vz - z * vy)
-    ty = 2.0 * (z * vx - x * vz)
-    tz = 2.0 * (x * vy - y * vx)
-    return (
-        vx + w * tx + (y * tz - z * ty),
-        vy + w * ty + (z * tx - x * tz),
-        vz + w * tz + (x * ty - y * tx),
-    )
 
 
 def _make_yaw_quat(yaw: float) -> Any:
@@ -128,6 +128,8 @@ class XrAnchorSynchronizer:
         self.__smoothed_anchor_quat = None
         self.__last_anchor_quat = None
         self.__anchor_rotation_enabled = True
+        self.__initial_yaw_recenter_done = False
+        self.__initial_yaw_recenter_in_progress = False
 
         # Resolve USD layer identifier of the anchor for updates
         try:
@@ -147,6 +149,8 @@ class XrAnchorSynchronizer:
         self.__smoothed_anchor_quat = None
         self.__last_anchor_quat = None
         self.__anchor_rotation_enabled = True
+        self.__initial_yaw_recenter_done = False
+        self.__initial_yaw_recenter_in_progress = False
         self.sync_headset_to_anchor()
 
     def toggle_anchor_rotation(self):
@@ -155,15 +159,27 @@ class XrAnchorSynchronizer:
 
     def recenter_yaw_to_anchor_prim(self) -> bool:
         """Align the current headset yaw with the configured anchor prim yaw."""
+        self.__initial_yaw_recenter_in_progress = True
+        try:
+            recentered = self._recenter_yaw_to_anchor_prim(log_failures=True, reason="manual")
+        finally:
+            self.__initial_yaw_recenter_in_progress = False
+        if recentered:
+            self.__initial_yaw_recenter_done = True
+        return recentered
+
+    def _recenter_yaw_to_anchor_prim(self, *, log_failures: bool, reason: str) -> bool:
         try:
             rotation_matrix = self._get_anchor_rotation_world_matrix()
             if rotation_matrix is None:
-                logger.warning("XR: Cannot recenter yaw; anchor rotation prim world matrix is unavailable")
+                if log_failures:
+                    logger.warning("XR: Cannot recenter yaw; anchor rotation prim world matrix is unavailable")
                 return False
 
             head_device = self._xr_core.get_input_device("/user/head") if self._xr_core is not None else None
             if head_device is None:
-                logger.warning("XR: Cannot recenter yaw; head input device is unavailable")
+                if log_failures:
+                    logger.warning("XR: Cannot recenter yaw; head input device is unavailable")
                 return False
 
             try:
@@ -171,7 +187,8 @@ class XrAnchorSynchronizer:
             except TypeError:
                 head_matrix = head_device.get_virtual_world_pose()
             if head_matrix is None:
-                logger.warning("XR: Cannot recenter yaw; head pose is unavailable")
+                if log_failures:
+                    logger.warning("XR: Cannot recenter yaw; head pose is unavailable")
                 return False
 
             headset_forward_axis = getattr(self._xr_cfg, "recenter_headset_forward_axis", (1.0, 0.0, 0.0))
@@ -224,12 +241,13 @@ class XrAnchorSynchronizer:
 
             logger.info(
                 "XR: Recentered yaw to anchor prim "
-                f"(anchor_yaw={anchor_prim_yaw:.3f}, headset_yaw={headset_yaw:.3f}, "
+                f"(reason={reason}, anchor_yaw={anchor_prim_yaw:.3f}, headset_yaw={headset_yaw:.3f}, "
                 f"correction={yaw_correction:.3f})"
             )
             return True
         except Exception as e:
-            logger.warning(f"XR: Recenter yaw failed: {e}")
+            if log_failures:
+                logger.warning(f"XR: Recenter yaw failed: {e}")
             return False
 
     def sync_headset_to_anchor(self):
@@ -244,11 +262,24 @@ class XrAnchorSynchronizer:
             rotation_matrix = self._get_anchor_rotation_world_matrix()
             if rotation_matrix is None:
                 rotation_matrix = position_matrix
-
             rt_pos = position_matrix.ExtractTranslation()
 
             if self.__anchor_prim_initial_quat is None:
                 self._set_anchor_rotation_origin(rotation_matrix)
+
+            if (
+                getattr(self._xr_cfg, "recenter_yaw_on_start", False)
+                and not self.__initial_yaw_recenter_done
+                and not self.__initial_yaw_recenter_in_progress
+            ):
+                self.__initial_yaw_recenter_in_progress = True
+                try:
+                    recentered = self._recenter_yaw_to_anchor_prim(log_failures=False, reason="startup")
+                finally:
+                    self.__initial_yaw_recenter_in_progress = False
+                if recentered:
+                    self.__initial_yaw_recenter_done = True
+                    return
 
             if getattr(self._xr_cfg, "fixed_anchor_height", False):
                 if self.__anchor_prim_initial_height is None:

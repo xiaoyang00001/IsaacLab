@@ -113,6 +113,13 @@ class XrCfg:
     If True, the anchor height will be fixed to the initial height of the anchor prim.
     """
 
+    recenter_yaw_on_start: bool = False
+    """Whether to recenter yaw once when the first headset pose is available.
+
+    This aligns the configured headset forward axis with the anchor rotation prim forward axis without
+    requiring a controller button press.
+    """
+
     recenter_yaw_button: tuple[str, str] | None = None
     """Optional XR controller button binding used to recenter yaw.
 
@@ -136,6 +143,7 @@ class XrCfg:
 
     recenter_headset_fallback_axis: tuple[float, float, float] | None = None
     """Optional local-space headset axis used to recover yaw when the forward axis is near vertical."""
+
 
 from typing import Any
 

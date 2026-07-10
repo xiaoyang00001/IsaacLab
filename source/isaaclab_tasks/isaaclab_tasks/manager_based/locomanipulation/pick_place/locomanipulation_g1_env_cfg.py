@@ -30,6 +30,13 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
+from copy import deepcopy
+
+from isaaclab_assets.robots.unitree import G1_29DOF_CFG
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import (
+    SONIC_G1_29DOF_DEFAULT_ANGLES,
+    SONIC_G1_29DOF_JOINT_ORDER,
+)
 
 _ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -139,6 +146,29 @@ else:
 ZMQ_SYNC_ENDPOINT = os.environ.get(
     "ISAACLAB_OBJECT_SYNC_ENDPOINT",
     f"tcp://{_windows_isaaclab_ip(1, '127.0.0.1')}:15555",
+)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+SONIC_G1_PHYSICS_MODE = _env_flag("SONIC_G1_PHYSICS_MODE", False)
+SONIC_G1_FIX_ROOT = not SONIC_G1_PHYSICS_MODE
+SONIC_G1_VISUAL_SERVO_MODE = _env_flag("SONIC_G1_VISUAL_SERVO_MODE", SONIC_G1_FIX_ROOT)
+SONIC_G1_SELF_COLLISIONS = SONIC_G1_PHYSICS_MODE and _env_flag("SONIC_G1_SELF_COLLISIONS", False)
+ENABLE_WALKER_ROBOT = _env_flag("LOCIMANIP_ENABLE_WALKER_ROBOT", False) and SONIC_G1_PHYSICS_MODE
+print(
+    "[locomanip_cfg] "
+    f"SONIC_G1_FIX_ROOT={SONIC_G1_FIX_ROOT} "
+    f"SONIC_G1_PHYSICS_MODE={SONIC_G1_PHYSICS_MODE} "
+    f"SONIC_G1_VISUAL_SERVO_MODE={SONIC_G1_VISUAL_SERVO_MODE} "
+    f"SONIC_G1_SELF_COLLISIONS={SONIC_G1_SELF_COLLISIONS} "
+    f"ENABLE_WALKER_ROBOT={ENABLE_WALKER_ROBOT} "
+    f"legacy_SONIC_G1_FIX_ROOT_env={os.environ.get('SONIC_G1_FIX_ROOT', '<unset>')!r}"
 )
 
 ##
@@ -331,6 +361,187 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
     },
 )
 
+
+
+# 第四个机器人：GEAR-SONIC ONNX/Deploy 驱动。
+#
+# 短期目标是先验证 PICO manager -> GR00T/SONIC deploy -> IsaacLab 的目标链路，
+# 等价于 MuJoCo run_sim_loop.py 当前承担的“站稳状态源/可视化机器人”角色；因此默认固定
+# root 并关闭重力，避免没有完整 LowState/平衡闭环时启动即倒。长期做 IsaacLab Unitree DDS
+# 闭环物理验证时，设置 SONIC_G1_PHYSICS_MODE=1 才恢复自由根节点和重力。
+# init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
+# X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
+#
+# 阶段 3.3 E3 D：mocap anchor 时变信号已接，解 fix_root_link 再次物理验证
+# 对比 3.1 初次物理验证（立刻摔倒），看 mocap motion 信号是否提供有意义的平衡反馈
+#
+# 阶段 A（gr00t-sonic-actuator-match 分支）：用 SONIC 训练同款 ImplicitActuator + PD 配方
+# 替换默认 G1_29DOF_CFG 的 DCMotor。参考 gear_sonic/envs/manager_env/robots/g1.py:10-358
+# （来自 BeyondMimic / whole_body_tracking）。NATURAL_FREQ=10Hz、DAMPING_RATIO=2.0，
+# 各 actuator armature 配 stiffness=armature×NATURAL_FREQ²、damping=2×DAMPING_RATIO×armature×NATURAL_FREQ。
+# 注意：不动 G1_29DOF_CFG（robot / walker_robot / remote_robot 仍用 IsaacLab DCMotor）。
+# 默认 fixed-root deploy 验证是“目标可视化”，不是完整物理闭环；这里会在定义完训练 PD
+# 后按 SONIC_G1_VISUAL_SERVO_MODE 切回 IsaacLab 原始高刚度位置伺服，让手臂更忠实跟随
+# GR00T/SONIC deploy 的实际 motor target。设置 SONIC_G1_VISUAL_SERVO_MODE=0 可恢复训练 PD。
+from isaaclab.actuators import ImplicitActuatorCfg as _SonicImplicitActuatorCfg
+
+_SONIC_ARMATURE_5020 = 0.003609725
+_SONIC_ARMATURE_7520_14 = 0.010177520
+_SONIC_ARMATURE_7520_22 = 0.025101925
+_SONIC_ARMATURE_4010 = 0.00425
+_SONIC_NATURAL_FREQ = 10.0 * 2.0 * 3.1415926535  # 10Hz
+_SONIC_DAMPING_RATIO = 2.0
+
+_S_5020 = _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ**2
+_S_7520_14 = _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ**2
+_S_7520_22 = _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ**2
+_S_4010 = _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ**2
+
+_D_5020 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ
+_D_7520_14 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ
+_D_7520_22 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ
+_D_4010 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ
+
+SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+SONIC_G1_29DOF_CFG.spawn.activate_contact_sensors = SONIC_G1_PHYSICS_MODE
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = SONIC_G1_FIX_ROOT
+SONIC_G1_29DOF_CFG.spawn.articulation_props.enabled_self_collisions = SONIC_G1_SELF_COLLISIONS
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = _env_flag("SONIC_G1_DISABLE_GRAVITY", SONIC_G1_FIX_ROOT)
+if SONIC_G1_PHYSICS_MODE:
+    # retain_accelerations=True 让 PhysX 在每步结束后保留 link 加速度，
+    # 使 body_com_lin_acc_w 返回真实值（用于 IMU accelerometer 计算）。
+    SONIC_G1_29DOF_CFG.spawn.rigid_props.retain_accelerations = True
+# Z=0.76：脚底在地面上方约 9mm。lock_root_z=False 的物理模式下 root Z 自由，
+# settle 阶段自然落地；若 spawn 时脚穿透地面（如 0.72 → 约 -3cm）会触发 PhysX
+# depenetration 向上弹射冲击。宁高勿低。
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.76)
+SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+SONIC_G1_29DOF_CFG.init_state.joint_pos = dict(
+    zip(SONIC_G1_29DOF_JOINT_ORDER, SONIC_G1_29DOF_DEFAULT_ANGLES, strict=True)
+)
+# 整体替换 actuators，与 SONIC 训练完全对齐
+SONIC_G1_29DOF_CFG.actuators = {
+    "legs": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_hip_yaw_joint",
+            ".*_hip_roll_joint",
+            ".*_hip_pitch_joint",
+            ".*_knee_joint",
+        ],
+        effort_limit_sim={
+            ".*_hip_yaw_joint": 88.0,
+            ".*_hip_roll_joint": 139.0,
+            ".*_hip_pitch_joint": 139.0,
+            ".*_knee_joint": 139.0,
+        },
+        velocity_limit_sim={
+            ".*_hip_yaw_joint": 32.0,
+            ".*_hip_roll_joint": 20.0,
+            ".*_hip_pitch_joint": 20.0,
+            ".*_knee_joint": 20.0,
+        },
+        stiffness={
+            ".*_hip_pitch_joint": _S_7520_22,
+            ".*_hip_roll_joint": _S_7520_22,
+            ".*_hip_yaw_joint": _S_7520_14,
+            ".*_knee_joint": _S_7520_22,
+        },
+        damping={
+            ".*_hip_pitch_joint": _D_7520_22,
+            ".*_hip_roll_joint": _D_7520_22,
+            ".*_hip_yaw_joint": _D_7520_14,
+            ".*_knee_joint": _D_7520_22,
+        },
+        armature={
+            ".*_hip_pitch_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_roll_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_yaw_joint": _SONIC_ARMATURE_7520_14,
+            ".*_knee_joint": _SONIC_ARMATURE_7520_22,
+        },
+    ),
+    "feet": _SonicImplicitActuatorCfg(
+        joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_roll_joint", "waist_pitch_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist_yaw": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_yaw_joint"],
+        effort_limit_sim=88.0,
+        velocity_limit_sim=32.0,
+        stiffness=_S_7520_14,
+        damping=_D_7520_14,
+        armature=_SONIC_ARMATURE_7520_14,
+    ),
+    "arms": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_shoulder_pitch_joint",
+            ".*_shoulder_roll_joint",
+            ".*_shoulder_yaw_joint",
+            ".*_elbow_joint",
+            ".*_wrist_roll_joint",
+            ".*_wrist_pitch_joint",
+            ".*_wrist_yaw_joint",
+        ],
+        effort_limit_sim={
+            ".*_shoulder_pitch_joint": 25.0,
+            ".*_shoulder_roll_joint": 25.0,
+            ".*_shoulder_yaw_joint": 25.0,
+            ".*_elbow_joint": 25.0,
+            ".*_wrist_roll_joint": 25.0,
+            ".*_wrist_pitch_joint": 5.0,
+            ".*_wrist_yaw_joint": 5.0,
+        },
+        velocity_limit_sim={
+            ".*_shoulder_pitch_joint": 37.0,
+            ".*_shoulder_roll_joint": 37.0,
+            ".*_shoulder_yaw_joint": 37.0,
+            ".*_elbow_joint": 37.0,
+            ".*_wrist_roll_joint": 37.0,
+            ".*_wrist_pitch_joint": 22.0,
+            ".*_wrist_yaw_joint": 22.0,
+        },
+        stiffness={
+            ".*_shoulder_pitch_joint": _S_5020,
+            ".*_shoulder_roll_joint": _S_5020,
+            ".*_shoulder_yaw_joint": _S_5020,
+            ".*_elbow_joint": _S_5020,
+            ".*_wrist_roll_joint": _S_5020,
+            ".*_wrist_pitch_joint": _S_4010,
+            ".*_wrist_yaw_joint": _S_4010,
+        },
+        damping={
+            ".*_shoulder_pitch_joint": _D_5020,
+            ".*_shoulder_roll_joint": _D_5020,
+            ".*_shoulder_yaw_joint": _D_5020,
+            ".*_elbow_joint": _D_5020,
+            ".*_wrist_roll_joint": _D_5020,
+            ".*_wrist_pitch_joint": _D_4010,
+            ".*_wrist_yaw_joint": _D_4010,
+        },
+        armature={
+            ".*_shoulder_pitch_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_yaw_joint": _SONIC_ARMATURE_5020,
+            ".*_elbow_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_pitch_joint": _SONIC_ARMATURE_4010,
+            ".*_wrist_yaw_joint": _SONIC_ARMATURE_4010,
+        },
+    ),
+}
+if SONIC_G1_VISUAL_SERVO_MODE:
+    SONIC_G1_29DOF_CFG.actuators = deepcopy(G1_29DOF_CFG.actuators)
 
 def _make_graspable_cart_box_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     """Create the warehouse cardboard box with rigid physics available at spawn time.
