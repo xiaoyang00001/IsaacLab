@@ -146,41 +146,73 @@ ZMQ_SYNC_ENDPOINT = os.environ.get(
 ##
 
 
-def _find_gr00t_g1_43dof_usd() -> str:
-    """Resolve the GR00T G1 43-DoF USD used by the sim2sim viewer."""
+def _find_g1_inspire_usd() -> str:
+    """Resolve the G1 29-DoF + Inspire five-finger hand USD (53 DoF total).
 
-    candidates = []
-    if "GR00T_WBC_ROOT" in os.environ:
-        candidates.append(Path(os.environ["GR00T_WBC_ROOT"]).expanduser())
-    candidates.extend(
-        [
-            Path("F:/ISAACWholeBody/GR00T-WholeBodyControl"),
-            Path(__file__).resolve().parents[6] / "GR00T-WholeBodyControl",
-            Path.cwd() / "GR00T-WholeBodyControl",
-        ]
+    本机通过 NUCLEUS_ASSET_ROOT_DIR 指向本地资产镜像，ISAACLAB_NUCLEUS_DIR 会落到
+    本地文件；无镜像的机器走 Nucleus 下载。ISAACLAB_G1_INSPIRE_USD 可整体覆盖。
+    """
+
+    override = os.environ.get("ISAACLAB_G1_INSPIRE_USD")
+    if override:
+        usd_path = Path(override).expanduser()
+        if usd_path.exists():
+            print(f"[locomanipulation_g1_env_cfg] G1 Inspire USD (env override): {usd_path.resolve()}")
+            return str(usd_path.resolve())
+        print(f"[WARN] ISAACLAB_G1_INSPIRE_USD not found, falling back to Nucleus: {usd_path}")
+    usd_path = f"{ISAACLAB_NUCLEUS_DIR}/Robots/Unitree/G1/g1_29dof_inspire_hand.usd"
+    print(f"[locomanipulation_g1_env_cfg] G1 Inspire USD: {usd_path}")
+    return usd_path
+
+
+def _make_g1_inspire_floating_usd(source_usd: str) -> str:
+    """生成悬浮底座 overlay：停用 root_joint，把 articulation 根 API 迁到 pelvis。
+
+    官方 Inspire USD 按固定底座打包：ArticulationRootAPI 挂在 root_joint（固定关节
+    prim）上。IsaacLab 的 fix_root_link=False 只会 disable 该关节，不会迁移根 API，
+    PhysX 随即解析不到 articulation（root_joint did not match any rigid bodies）。
+    镜像机器人需要自由根（每帧 write_root_pose_to_sim），所以在缓存目录生成一个
+    引用原 USD 的小 overlay 修正根节点，每次 import 时重新生成，无需手工维护。
+    """
+
+    source_ref = source_usd if "://" in source_usd else Path(source_usd).resolve().as_posix()
+    cache_dir = Path.home() / ".cache" / "isaaclab_g1_inspire"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    overlay = cache_dir / "g1_29dof_inspire_hand_floating.usda"
+    overlay.write_text(
+        '#usda 1.0\n'
+        '(\n'
+        '    defaultPrim = "g1_29dof_rev_1_0"\n'
+        '    metersPerUnit = 1\n'
+        '    upAxis = "Z"\n'
+        ')\n'
+        '\n'
+        'def Xform "g1_29dof_rev_1_0" (\n'
+        f'    prepend references = @{source_ref}@\n'
+        ')\n'
+        '{\n'
+        '    over "root_joint" (\n'
+        '        active = false\n'
+        '    )\n'
+        '    {\n'
+        '    }\n'
+        '\n'
+        '    over "pelvis" (\n'
+        '        prepend apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI"]\n'
+        '    )\n'
+        '    {\n'
+        '    }\n'
+        '}\n',
+        encoding="utf-8",
     )
-    for root in candidates:
-        for usd_name in (
-            "g1_43dof.usd",
-            "g1_43dof_isaaclab_no_material.usda",
-            "g1_43dof_isaaclab_nomdl.usda",
-            "g1_43dof_s3.usda",
-        ):
-            usd_path = root / "gear_sonic/data/robots/g1" / usd_name
-            if usd_path.exists():
-                print(f"[locomanipulation_g1_env_cfg] G1 43-DoF USD: {usd_path.resolve()}")
-                return str(usd_path.resolve())
-    searched = "\n  ".join(str(path) for path in candidates)
-    raise FileNotFoundError(
-        "Could not locate GR00T G1 43-DoF USD. Set GR00T_WBC_ROOT to the GR00T-WholeBodyControl path. "
-        f"Searched:\n  {searched}"
-    )
+    print(f"[locomanipulation_g1_env_cfg] G1 Inspire floating-base overlay: {overlay}")
+    return str(overlay)
 
 
-G1_43DOF_GR00T_CFG = ArticulationCfg(
+G1_INSPIRE_HAND_CFG = ArticulationCfg(
     prim_path="/World/envs/env_.*/Robot",
     spawn=UsdFileCfg(
-        usd_path=_find_gr00t_g1_43dof_usd(),
+        usd_path=_make_g1_inspire_floating_usd(_find_g1_inspire_usd()),
         activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -316,16 +348,21 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_wrist_.*_joint": 0.001,
             },
         ),
+        # Inspire 五指手：proximal 有驱动，intermediate/distal 在 USD 里无 drive，
+        # 全部纳入 actuator 由 IsaacLab 运行时补 PD。参数取自 G1_INSPIRE_FTP_CFG
+        # （isaaclab_assets/robots/unitree.py，官方为该 USD 抓取调的低刚度配方）。
         "hands": ImplicitActuatorCfg(
             joint_names_expr=[
-                ".*_hand_index_.*",
-                ".*_hand_middle_.*",
-                ".*_hand_thumb_.*",
+                ".*_index_.*",
+                ".*_middle_.*",
+                ".*_thumb_.*",
+                ".*_ring_.*",
+                ".*_pinky_.*",
             ],
-            effort_limit_sim=60.0,
-            velocity_limit_sim=20.0,
-            stiffness=80.0,
-            damping=4.0,
+            effort_limit_sim=30.0,
+            velocity_limit_sim=10.0,
+            stiffness=10.0,
+            damping=0.2,
             armature=0.001,
         ),
     },
@@ -526,14 +563,14 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
     #     ),
     # )
-    # Humanoid robots from the GR00T sim2sim viewer asset.
+    # Humanoid robots: G1 29-DoF + Inspire five-finger hands (53 DoF).
     # ID 1 keeps the base config pose (banyun 工位，推车旁，面向 +Y)；ID 2 在其右侧 1.5 m（避开 x=-5.4 的推车）。
-    robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+    robot_1: ArticulationCfg = G1_INSPIRE_HAND_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
     )
-    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+    robot_2: ArticulationCfg = G1_INSPIRE_HAND_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
+        init_state=G1_INSPIRE_HAND_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
@@ -659,9 +696,10 @@ class ActionsCfg:
             f"g1_{ISAACLAB_LOCAL_ROBOT_ID}_gripper",
         ),
         timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
-        controller_gripper_finger_close_angle=1.8,
-        controller_gripper_thumb_1_angle=1.1,
-        controller_gripper_thumb_2_angle=1.8,
+        # Inspire 手满捏目标 = 硬限位（use_soft_limits=False 时按硬限位钳制）：
+        # 手指 proximal 1.70 rad，拇指 proximal_pitch 0.50 rad。
+        controller_gripper_finger_close_angle=1.7,
+        controller_gripper_thumb_1_angle=0.5,
         controller_gripper_action_alpha=1.0,
         controller_gripper_use_soft_limits=False,
         write_joint_state=True,
@@ -778,7 +816,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_temp_buffer_capacity = 2**24
 
         local_robot_prim = _robot_prim_name(ISAACLAB_LOCAL_ROBOT_ID)
-        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
+        # Inspire USD（g1_29dof 系）没有独立 head_link，头部并入 torso_link；
+        # 锚点路径抄错会静默失效，改 USD 时必须核对 prim 结构。
+        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/torso_link"
         self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
         self.xr.fixed_anchor_height = False
         # Anchor XR to the robot head position, but use the pelvis as the stable robot yaw reference.

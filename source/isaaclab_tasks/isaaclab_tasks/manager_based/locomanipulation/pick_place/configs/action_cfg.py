@@ -146,16 +146,20 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     """
 
     controller_gripper_finger_close_angle: float = 1.0
-    """Maximum index/middle finger close angle in radians at full trigger/grip press."""
+    """Maximum finger proximal close angle in radians at full trigger/grip press.
+
+    Inspire hand: trigger drives the index finger, grip drives middle/ring/pinky;
+    intermediate joints follow with the URDF mimic ratio. Hard limit is 1.70 rad.
+    """
 
     controller_gripper_thumb_yaw_angle: float = 0.5
-    """Maximum thumb base yaw offset in radians used to bias the thumb toward the active finger."""
+    """Maximum thumb proximal yaw (palm opposition swing) in radians at full close."""
 
     controller_gripper_thumb_1_angle: float = 0.4
-    """Maximum thumb middle joint close angle in radians."""
+    """Maximum thumb proximal pitch close angle in radians (hard limit 0.50).
 
-    controller_gripper_thumb_2_angle: float = 0.7
-    """Maximum thumb tip joint close angle in radians."""
+    Thumb intermediate/distal joints follow at the URDF mimic ratios (1.6/2.4).
+    """
 
     controller_gripper_action_alpha: float = 0.65
     """Low-pass smoothing factor applied to incoming controller gripper commands."""
@@ -225,16 +229,20 @@ class G1GripperSyncActionCfg(ActionTermCfg):
     """Minimum seconds between local gripper publishes. Non-positive publishes every apply step."""
 
     controller_gripper_finger_close_angle: float = 1.0
-    """Maximum index/middle finger close angle in radians at full trigger/grip press."""
+    """Maximum finger proximal close angle in radians at full trigger/grip press.
+
+    Inspire hand: trigger drives the index finger, grip drives middle/ring/pinky;
+    intermediate joints follow with the URDF mimic ratio. Hard limit is 1.70 rad.
+    """
 
     controller_gripper_thumb_yaw_angle: float = 0.5
-    """Maximum thumb base yaw offset in radians used to bias the thumb toward the active finger."""
+    """Maximum thumb proximal yaw (palm opposition swing) in radians at full close."""
 
     controller_gripper_thumb_1_angle: float = 0.4
-    """Maximum thumb middle joint close angle in radians."""
+    """Maximum thumb proximal pitch close angle in radians (hard limit 0.50).
 
-    controller_gripper_thumb_2_angle: float = 0.7
-    """Maximum thumb tip joint close angle in radians."""
+    Thumb intermediate/distal joints follow at the URDF mimic ratios (1.6/2.4).
+    """
 
     controller_gripper_action_alpha: float = 0.65
     """Low-pass smoothing factor applied to incoming local gripper commands."""

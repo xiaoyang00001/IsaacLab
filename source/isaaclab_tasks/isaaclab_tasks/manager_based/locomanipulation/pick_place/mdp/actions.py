@@ -92,24 +92,75 @@ ISAACLAB_TO_MUJOCO_DOF = [
 
 MUJOCO_29DOF_JOINT_NAMES = [ISAACLAB_29DOF_JOINT_NAMES[i] for i in ISAACLAB_TO_MUJOCO_DOF]
 
+# Inspire 五指手（g1_29dof_inspire_hand.usd），每手 12 关节。顺序与
+# isaaclab.devices.openxr.retargeters.humanoid.unitree.inspire 的关节表一致。
+# 两手闭合方向均为正（限位 [0, +max]），无 Dex3 的左右反号问题。
 LEFT_HAND_JOINT_NAMES = [
-    "left_hand_thumb_0_joint",
-    "left_hand_thumb_1_joint",
-    "left_hand_thumb_2_joint",
-    "left_hand_index_0_joint",
-    "left_hand_index_1_joint",
-    "left_hand_middle_0_joint",
-    "left_hand_middle_1_joint",
+    "L_thumb_proximal_yaw_joint",
+    "L_thumb_proximal_pitch_joint",
+    "L_thumb_intermediate_joint",
+    "L_thumb_distal_joint",
+    "L_index_proximal_joint",
+    "L_index_intermediate_joint",
+    "L_middle_proximal_joint",
+    "L_middle_intermediate_joint",
+    "L_ring_proximal_joint",
+    "L_ring_intermediate_joint",
+    "L_pinky_proximal_joint",
+    "L_pinky_intermediate_joint",
 ]
 RIGHT_HAND_JOINT_NAMES = [
-    "right_hand_thumb_0_joint",
-    "right_hand_thumb_1_joint",
-    "right_hand_thumb_2_joint",
-    "right_hand_index_0_joint",
-    "right_hand_index_1_joint",
-    "right_hand_middle_0_joint",
-    "right_hand_middle_1_joint",
+    "R_thumb_proximal_yaw_joint",
+    "R_thumb_proximal_pitch_joint",
+    "R_thumb_intermediate_joint",
+    "R_thumb_distal_joint",
+    "R_index_proximal_joint",
+    "R_index_intermediate_joint",
+    "R_middle_proximal_joint",
+    "R_middle_intermediate_joint",
+    "R_ring_proximal_joint",
+    "R_ring_intermediate_joint",
+    "R_pinky_proximal_joint",
+    "R_pinky_intermediate_joint",
 ]
+HAND_DOF = len(LEFT_HAND_JOINT_NAMES)
+
+# Inspire 手指机械耦合比（retarget_inspire_white URDF 的 mimic 标签）：
+# 手指 intermediate = 1.0 × proximal；拇指 intermediate/distal = 1.6/2.4 × proximal_pitch。
+_INSPIRE_FINGER_INTERMEDIATE_RATIO = 1.0
+_INSPIRE_THUMB_INTERMEDIATE_RATIO = 1.6
+_INSPIRE_THUMB_DISTAL_RATIO = 2.4
+
+
+def _compose_inspire_hand_target(
+    cfg, index_close: torch.Tensor, middle_close: torch.Tensor, num_envs: int, device
+) -> torch.Tensor:
+    """Map pinch commands (0..1) onto the 12 Inspire hand joints (order = *_HAND_JOINT_NAMES).
+
+    扳机（index_close）驱动食指；侧键（middle_close）驱动中指/无名指/小指；
+    拇指跟随两者较小值对掌。被动的 intermediate/distal 关节按 mimic 比例跟随。
+    """
+    target = torch.zeros((num_envs, HAND_DOF), dtype=torch.float32, device=device)
+    thumb_close = torch.minimum(index_close, middle_close)
+
+    thumb_yaw = cfg.controller_gripper_thumb_yaw_angle * thumb_close
+    thumb_pitch = cfg.controller_gripper_thumb_1_angle * thumb_close
+    index = cfg.controller_gripper_finger_close_angle * index_close
+    grip = cfg.controller_gripper_finger_close_angle * middle_close
+
+    target[:, 0] = thumb_yaw
+    target[:, 1] = thumb_pitch
+    target[:, 2] = _INSPIRE_THUMB_INTERMEDIATE_RATIO * thumb_pitch
+    target[:, 3] = _INSPIRE_THUMB_DISTAL_RATIO * thumb_pitch
+    target[:, 4] = index
+    target[:, 5] = _INSPIRE_FINGER_INTERMEDIATE_RATIO * index
+    target[:, 6] = grip
+    target[:, 7] = _INSPIRE_FINGER_INTERMEDIATE_RATIO * grip
+    target[:, 8] = grip
+    target[:, 9] = _INSPIRE_FINGER_INTERMEDIATE_RATIO * grip
+    target[:, 10] = grip
+    target[:, 11] = _INSPIRE_FINGER_INTERMEDIATE_RATIO * grip
+    return target
 
 
 @dataclass
@@ -326,6 +377,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._warned_root_missing = False
         self._warned_root_position_mode = False
         self._warned_gripper_unavailable = False
+        self._warned_hand_stream_mismatch = False
         self._printed_first_sample = False
         self._last_root_debug_time = 0.0
         self._last_gripper_debug_time = 0.0
@@ -436,21 +488,27 @@ class MuJoCoG1MirrorAction(ActionTerm):
         mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
         self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
         if mirror_hands_from_mujoco:
-            if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
+            # MuJoCo deploy 流是 Dex3 每手 7 关节，驱动不了 Inspire 12 关节手；
+            # 长度不足时跳过并告警一次，避免静默写错关节。
+            left_hand_pos = self._hand_stream_values(sample.left_hand_pos)
+            right_hand_pos = self._hand_stream_values(sample.right_hand_pos)
+            left_hand_vel = self._hand_stream_values(sample.left_hand_vel)
+            right_hand_vel = self._hand_stream_values(sample.right_hand_vel)
+            if left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
                 joint_pos[:, self._left_hand_ids] = torch.tensor(
-                    sample.left_hand_pos[:7], dtype=torch.float32, device=self.device
+                    left_hand_pos, dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
-            if sample.right_hand_pos is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
+            if right_hand_pos is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
                 joint_pos[:, self._right_hand_ids] = torch.tensor(
-                    sample.right_hand_pos[:7], dtype=torch.float32, device=self.device
+                    right_hand_pos, dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
-            if sample.left_hand_vel is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
+            if left_hand_vel is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
                 joint_vel[:, self._left_hand_ids] = torch.tensor(
-                    sample.left_hand_vel[:7], dtype=torch.float32, device=self.device
+                    left_hand_vel, dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
-            if sample.right_hand_vel is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
+            if right_hand_vel is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
                 joint_vel[:, self._right_hand_ids] = torch.tensor(
-                    sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
+                    right_hand_vel, dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
 
         self._asset.write_joint_state_to_sim(
@@ -617,12 +675,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
         left_target = self._compose_hand_target(
             index_close=self._processed_actions[:, 0],
             middle_close=self._processed_actions[:, 1],
-            is_left=True,
         )
         right_target = self._compose_hand_target(
             index_close=self._processed_actions[:, 2],
             middle_close=self._processed_actions[:, 3],
-            is_left=False,
         )
         target = torch.cat((left_target, right_target), dim=-1)
         if self.cfg.controller_gripper_use_soft_limits:
@@ -637,32 +693,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
         self._print_gripper_debug(unclamped_target, target, limits)
 
-    def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
-        target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
-        thumb_close = torch.minimum(index_close, middle_close)
-
-        thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
-        thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
-        thumb_2 = self.cfg.controller_gripper_thumb_2_angle * thumb_close
-        index = self.cfg.controller_gripper_finger_close_angle * index_close
-        middle = self.cfg.controller_gripper_finger_close_angle * middle_close
-
-        target[:, 0] = thumb_yaw
-        if is_left:
-            target[:, 1] = thumb_1
-            target[:, 2] = thumb_2
-            target[:, 3] = -index
-            target[:, 4] = -index
-            target[:, 5] = -middle
-            target[:, 6] = -middle
-        else:
-            target[:, 1] = -thumb_1
-            target[:, 2] = -thumb_2
-            target[:, 3] = index
-            target[:, 4] = index
-            target[:, 5] = middle
-            target[:, 6] = middle
-        return target
+    def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor) -> torch.Tensor:
+        return _compose_inspire_hand_target(self.cfg, index_close, middle_close, self.num_envs, self.device)
 
     def _print_gripper_debug(
         self,
@@ -878,6 +910,19 @@ class MuJoCoG1MirrorAction(ActionTerm):
         isaac_name_to_id = {name: idx for idx, name in enumerate(self._asset.joint_names)}
         return [isaac_name_to_id[name] for name in joint_names if name in isaac_name_to_id]
 
+    def _hand_stream_values(self, values: np.ndarray | None) -> np.ndarray | None:
+        if values is None:
+            return None
+        if len(values) < HAND_DOF:
+            if not self._warned_hand_stream_mismatch:
+                print(
+                    f"[WARN] MuJoCo hand stream carries {len(values)} dof but the Inspire hand "
+                    f"needs {HAND_DOF}; hand mirroring skipped."
+                )
+                self._warned_hand_stream_mismatch = True
+            return None
+        return values[:HAND_DOF]
+
     def _build_body_ids(self, body_names: list[str]) -> list[int]:
         body_name_to_id = {name: idx for idx, name in enumerate(self._asset.body_names)}
         return [body_name_to_id[name] for name in body_names if name in body_name_to_id]
@@ -1089,41 +1134,15 @@ class G1GripperSyncAction(ActionTerm):
         left_target = self._compose_hand_target(
             index_close=actions[:, 0],
             middle_close=actions[:, 1],
-            is_left=True,
         )
         right_target = self._compose_hand_target(
             index_close=actions[:, 2],
             middle_close=actions[:, 3],
-            is_left=False,
         )
         return torch.cat((left_target, right_target), dim=-1)
 
-    def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
-        target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
-        thumb_close = torch.minimum(index_close, middle_close)
-
-        thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
-        thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
-        thumb_2 = self.cfg.controller_gripper_thumb_2_angle * thumb_close
-        index = self.cfg.controller_gripper_finger_close_angle * index_close
-        middle = self.cfg.controller_gripper_finger_close_angle * middle_close
-
-        target[:, 0] = thumb_yaw
-        if is_left:
-            target[:, 1] = thumb_1
-            target[:, 2] = thumb_2
-            target[:, 3] = -index
-            target[:, 4] = -index
-            target[:, 5] = -middle
-            target[:, 6] = -middle
-        else:
-            target[:, 1] = -thumb_1
-            target[:, 2] = -thumb_2
-            target[:, 3] = index
-            target[:, 4] = index
-            target[:, 5] = middle
-            target[:, 6] = middle
-        return target
+    def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor) -> torch.Tensor:
+        return _compose_inspire_hand_target(self.cfg, index_close, middle_close, self.num_envs, self.device)
 
     def _clamp_target(self, target: torch.Tensor) -> torch.Tensor:
         if self.cfg.controller_gripper_use_soft_limits:
@@ -1160,9 +1179,9 @@ class G1GripperSyncAction(ActionTerm):
                 "robot_id": int(self.cfg.robot_id),
                 "time": time.time(),
                 "sequence": int(self._sequence),
-                "joint_order": "g1_trihand_7dof_per_hand",
-                "left_hand_q": target_np[:7].astype(float).tolist(),
-                "right_hand_q": target_np[7:14].astype(float).tolist(),
+                "joint_order": "g1_inspire_12dof_per_hand",
+                "left_hand_q": target_np[:HAND_DOF].astype(float).tolist(),
+                "right_hand_q": target_np[HAND_DOF : 2 * HAND_DOF].astype(float).tolist(),
                 "raw_openxr_action": actions_np.astype(float).tolist(),
                 "source": "isaaclab_openxr",
             }
@@ -1172,15 +1191,15 @@ class G1GripperSyncAction(ActionTerm):
         try:
             left = np.asarray(msg["left_hand_q"], dtype=np.float32).reshape(-1)
             right = np.asarray(msg["right_hand_q"], dtype=np.float32).reshape(-1)
-            if left.size < 7 or right.size < 7:
-                raise ValueError("left_hand_q/right_hand_q must each contain at least 7 values")
-            values = np.concatenate((left[:7], right[:7]), axis=0)
+            if left.size < HAND_DOF or right.size < HAND_DOF:
+                raise ValueError(f"left_hand_q/right_hand_q must each contain at least {HAND_DOF} values")
+            values = np.concatenate((left[:HAND_DOF], right[:HAND_DOF]), axis=0)
         except Exception as exc:
             if not self._warned_bad_payload:
                 print(f"[WARN] G1 gripper sync ignored malformed payload: {exc}")
                 self._warned_bad_payload = True
             return None
-        return torch.tensor(values, dtype=torch.float32, device=self.device).view(1, 14)
+        return torch.tensor(values, dtype=torch.float32, device=self.device).view(1, 2 * HAND_DOF)
 
     def _print_debug(self, source: str, target: torch.Tensor) -> None:
         interval = float(self.cfg.debug_interval_s)
