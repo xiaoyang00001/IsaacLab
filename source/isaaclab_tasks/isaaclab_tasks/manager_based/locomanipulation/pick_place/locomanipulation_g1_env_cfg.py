@@ -66,6 +66,9 @@ def _load_default_network_config() -> None:
     for env_name in ("ISAACLAB_G1_NETWORK_CONFIG", "G1_NETWORK_CONFIG"):
         if os.environ.get(env_name):
             candidates.append(Path(os.environ[env_name]).expanduser())
+    if os.environ.get("GR00T_WBC_ROOT"):
+        candidates.append(Path(os.environ["GR00T_WBC_ROOT"]).expanduser() / "config/g1_udp_network.env")
+    candidates.append(Path("F:/ISAACWholeBody/GR00T-WholeBodyControl/config/g1_udp_network.env"))
     candidates.append(Path(__file__).resolve().parents[6] / "scripts/gr00t_wbc/g1_udp_network.env")
     for path in candidates:
         _load_env_file(path)
@@ -88,6 +91,18 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _isaac_robot_env(robot_id: int, suffix: str, default: str) -> str:
     return os.environ.get(f"ISAACLAB_G1_{robot_id}_{suffix}", os.environ.get(f"ISAACLAB_G1_{suffix}", default))
 
@@ -97,6 +112,23 @@ def _isaac_robot_env_int(robot_id: int, suffix: str, default: int) -> int:
         return int(_isaac_robot_env(robot_id, suffix, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _isaac_robot_env_float(robot_id: int, suffix: str, default: float) -> float:
+    try:
+        return float(_isaac_robot_env(robot_id, suffix, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _isaac_robot_env_bool(robot_id: int, suffix: str, default: bool) -> bool:
+    value = _isaac_robot_env(robot_id, suffix, "1" if default else "0")
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _ubuntu_sender_ip(robot_id: int, default: str) -> str:
@@ -438,7 +470,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    # Body/root streams are mirrored independently for both robot IDs.
+    # Body/root streams are consumed independently for both robot IDs as physics-tracked references.
     mujoco_g1_mirror_1 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_1",
         transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
@@ -459,11 +491,19 @@ class ActionsCfg:
         root_udp_port=_isaac_robot_env_int(1, "ROOT_UDP_PORT", 5558),
         root_udp_topic=_isaac_robot_env(1, "ROOT_UDP_TOPIC", "g1_1_root"),
         root_udp_rcvbuf=_isaac_robot_env_int(1, "ROOT_UDP_RCVBUF", 262144),
+        zmq_pose_source=_isaac_robot_env(1, "POSE_SOURCE", "target"),
         root_motion_mode="source",
         root_zmq_required=True,
         root_position_mode="relative",
+        write_root_state=_isaac_robot_env_bool(1, "WRITE_ROOT_STATE", False),
+        write_body_joint_state=_isaac_robot_env_bool(1, "WRITE_BODY_JOINT_STATE", False),
+        write_hand_joint_state=_isaac_robot_env_bool(1, "WRITE_HAND_JOINT_STATE", False),
+        body_joint_target_max_delta=_isaac_robot_env_float(1, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
+        hand_joint_target_max_delta=_isaac_robot_env_float(1, "HAND_JOINT_TARGET_MAX_DELTA", 0.20),
+        use_source_joint_velocity=_isaac_robot_env_bool(1, "USE_SOURCE_JOINT_VELOCITY", True),
         mirror_hands=False,
         controller_gripper_enabled=False,
+        ground_lock=_isaac_robot_env_bool(1, "GROUND_LOCK", False),
     )
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_2",
@@ -485,11 +525,19 @@ class ActionsCfg:
         root_udp_port=_isaac_robot_env_int(2, "ROOT_UDP_PORT", 5568),
         root_udp_topic=_isaac_robot_env(2, "ROOT_UDP_TOPIC", "g1_2_root"),
         root_udp_rcvbuf=_isaac_robot_env_int(2, "ROOT_UDP_RCVBUF", 262144),
+        zmq_pose_source=_isaac_robot_env(2, "POSE_SOURCE", "target"),
         root_motion_mode="source",
         root_zmq_required=True,
         root_position_mode="relative",
+        write_root_state=_isaac_robot_env_bool(2, "WRITE_ROOT_STATE", False),
+        write_body_joint_state=_isaac_robot_env_bool(2, "WRITE_BODY_JOINT_STATE", False),
+        write_hand_joint_state=_isaac_robot_env_bool(2, "WRITE_HAND_JOINT_STATE", False),
+        body_joint_target_max_delta=_isaac_robot_env_float(2, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
+        hand_joint_target_max_delta=_isaac_robot_env_float(2, "HAND_JOINT_TARGET_MAX_DELTA", 0.20),
+        use_source_joint_velocity=_isaac_robot_env_bool(2, "USE_SOURCE_JOINT_VELOCITY", True),
         mirror_hands=False,
         controller_gripper_enabled=False,
+        ground_lock=_isaac_robot_env_bool(2, "GROUND_LOCK", False),
     )
     local_gripper = G1GripperSyncActionCfg(
         asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
@@ -517,7 +565,8 @@ class ActionsCfg:
         controller_gripper_thumb_2_angle=1.8,
         controller_gripper_action_alpha=1.0,
         controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
+        write_joint_state=_env_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
+        target_max_delta=_env_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
     )
     remote_gripper = G1GripperSyncActionCfg(
         asset_name=ISAACLAB_PEER_ROBOT_NAME,
@@ -541,7 +590,8 @@ class ActionsCfg:
         ),
         timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
         controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
+        write_joint_state=_env_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
+        target_max_delta=_env_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
     )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
 
@@ -558,16 +608,6 @@ class ObservationsCfg:
 class TerminationsCfg:
     """Termination terms for the MDP."""
 
-    time_out = DoneTerm(func=locomanip_mdp.time_out, time_out=True)
-
-    object_dropping = DoneTerm(
-        func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
-    )
-
-    success = DoneTerm(
-        func=manip_mdp.task_done_pick_place,
-        params={"task_link_name": "right_wrist_yaw_link", "robot_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
-    )
 
 
 ##

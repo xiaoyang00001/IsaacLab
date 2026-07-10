@@ -283,10 +283,11 @@ class _ZmqLatestPublisher:
 
 
 class MuJoCoG1MirrorAction(ActionTerm):
-    """Mirror MuJoCo/SONIC G1 root and joint state into the Isaac Lab robot.
+    """Apply MuJoCo/SONIC G1 root and joint references to the Isaac Lab robot.
 
     The term listens to the same debug streams used by ``isaaclab_g1_sim2sim_viewer.py``
-    and writes state directly only after data is received.
+    and normally turns them into actuator targets so PhysX remains authoritative.
+    Direct state writes are guarded by explicit legacy/debug configuration flags.
     Without a live publisher it stays idle, allowing the normal motion-controller locomotion
     action to continue working.
     """
@@ -412,66 +413,78 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if not self._printed_first_sample:
             root_state = "yes" if sample.root_pos_w is not None or sample.root_quat_w is not None else "no"
             print(
-                "[INFO] MuJoCo G1 mirror received first packet: "
-                f"mirrored_body_joints={len(self._body_isaac_ids)}, "
+                "[INFO] MuJoCo G1 reference received first packet: "
+                f"target_body_joints={len(self._body_isaac_ids)}, "
                 f"mirror_hands={self.cfg.mirror_hands}, root={root_state}, "
+                f"write_root_state={self.cfg.write_root_state}, "
+                f"write_body_joint_state={self.cfg.write_body_joint_state}, "
                 f"body_source={sample.body_source}, root_source={sample.root_source}"
             )
             self._printed_first_sample = True
 
         source_root_applied = self._apply_source_root_state(sample)
 
-        joint_pos = self._asset.data.joint_pos.clone()
-        joint_vel = self._asset.data.joint_vel.clone()
-
         if sample.joint_pos_mujoco is not None:
-            q = torch.tensor(sample.joint_pos_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
-            joint_pos[:, self._body_isaac_ids] = q.unsqueeze(0)
-        if sample.joint_vel_mujoco is not None:
-            dq = torch.tensor(sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
-            joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
+            body_target = torch.tensor(
+                sample.joint_pos_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device
+            ).view(1, -1)
+            body_target = self._prepare_joint_position_target(
+                body_target, self._body_isaac_ids, self.cfg.body_joint_target_max_delta
+            )
+            body_velocity = torch.zeros_like(body_target)
+            if self.cfg.use_source_joint_velocity and sample.joint_vel_mujoco is not None:
+                body_velocity = torch.tensor(
+                    sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device
+                ).view(1, -1)
+
+            if self.cfg.write_body_joint_state:
+                self._asset.write_joint_state_to_sim(body_target, body_velocity, joint_ids=self._body_isaac_ids)
+            self._asset.set_joint_position_target(body_target, joint_ids=self._body_isaac_ids)
+            self._asset.set_joint_velocity_target(body_velocity, joint_ids=self._body_isaac_ids)
 
         mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
         self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
-        if mirror_hands_from_mujoco:
-            if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
-                joint_pos[:, self._left_hand_ids] = torch.tensor(
-                    sample.left_hand_pos[:7], dtype=torch.float32, device=self.device
-                ).unsqueeze(0)
-            if sample.right_hand_pos is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
-                joint_pos[:, self._right_hand_ids] = torch.tensor(
-                    sample.right_hand_pos[:7], dtype=torch.float32, device=self.device
-                ).unsqueeze(0)
-            if sample.left_hand_vel is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
-                joint_vel[:, self._left_hand_ids] = torch.tensor(
-                    sample.left_hand_vel[:7], dtype=torch.float32, device=self.device
-                ).unsqueeze(0)
-            if sample.right_hand_vel is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
-                joint_vel[:, self._right_hand_ids] = torch.tensor(
-                    sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
-                ).unsqueeze(0)
-
-        self._asset.write_joint_state_to_sim(
-            joint_pos[:, self._body_isaac_ids],
-            joint_vel[:, self._body_isaac_ids],
-            joint_ids=self._body_isaac_ids,
-        )
-        self._asset.set_joint_position_target(joint_pos[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
-        self._asset.set_joint_velocity_target(joint_vel[:, self._body_isaac_ids], joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
-            self._asset.write_joint_state_to_sim(
-                joint_pos[:, self._all_hand_ids],
-                joint_vel[:, self._all_hand_ids],
-                joint_ids=self._all_hand_ids,
+            hand_target = self._asset.data.joint_pos[:, self._all_hand_ids].clone()
+            hand_velocity = torch.zeros_like(hand_target)
+            if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
+                hand_target[:, :7] = torch.tensor(
+                    sample.left_hand_pos[:7], dtype=torch.float32, device=self.device
+                ).view(1, 7)
+            if sample.right_hand_pos is not None and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES):
+                hand_target[:, 7:14] = torch.tensor(
+                    sample.right_hand_pos[:7], dtype=torch.float32, device=self.device
+                ).view(1, 7)
+            if (
+                self.cfg.use_source_joint_velocity
+                and sample.left_hand_vel is not None
+                and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES)
+            ):
+                hand_velocity[:, :7] = torch.tensor(
+                    sample.left_hand_vel[:7], dtype=torch.float32, device=self.device
+                ).view(1, 7)
+            if (
+                self.cfg.use_source_joint_velocity
+                and sample.right_hand_vel is not None
+                and len(self._right_hand_ids) == len(RIGHT_HAND_JOINT_NAMES)
+            ):
+                hand_velocity[:, 7:14] = torch.tensor(
+                    sample.right_hand_vel[:7], dtype=torch.float32, device=self.device
+                ).view(1, 7)
+            hand_target = self._prepare_joint_position_target(
+                hand_target, self._all_hand_ids, self.cfg.hand_joint_target_max_delta
             )
-            self._asset.set_joint_position_target(joint_pos[:, self._all_hand_ids], joint_ids=self._all_hand_ids)
-            self._asset.set_joint_velocity_target(joint_vel[:, self._all_hand_ids], joint_ids=self._all_hand_ids)
+            if self.cfg.write_hand_joint_state:
+                self._asset.write_joint_state_to_sim(hand_target, hand_velocity, joint_ids=self._all_hand_ids)
+            self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
+            self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
 
-        if self.cfg.root_motion_mode in {"stance", "auto"}:
-            self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
-        if self.cfg.ground_lock and not source_root_applied:
-            self._apply_ground_lock()
+        if self.cfg.write_root_state:
+            if self.cfg.root_motion_mode in {"stance", "auto"}:
+                self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
+            if self.cfg.ground_lock and not source_root_applied:
+                self._apply_ground_lock()
         self._print_root_debug(sample)
 
     def _apply_source_root_state(self, sample: _MirrorSample) -> bool:
@@ -495,9 +508,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
             ).view(1, 3)
 
         self._source_root_is_moving |= self._detect_source_root_motion(self._root_pose)
-        self._asset.write_root_link_pose_to_sim(self._root_pose)
-        self._asset.write_root_link_velocity_to_sim(self._root_velocity)
-        return True
+        if self.cfg.write_root_state:
+            self._asset.write_root_link_pose_to_sim(self._root_pose)
+            self._asset.write_root_link_velocity_to_sim(self._root_velocity)
+            return True
+        return False
 
     def _map_source_root_position(self, source_root_pos: torch.Tensor) -> torch.Tensor:
         mode = str(self.cfg.root_position_mode).lower()
@@ -519,15 +534,38 @@ class MuJoCoG1MirrorAction(ActionTerm):
             self._target_root_pos0 = self._root_pose[:, :3].clone()
         return self._target_root_pos0 + (source_root_pos - self._source_root_pos0)
 
+    def _prepare_joint_position_target(
+        self,
+        target: torch.Tensor,
+        joint_ids: list[int],
+        max_delta: float,
+    ) -> torch.Tensor:
+        target = self._limit_joint_target_delta(target, joint_ids, max_delta)
+        return self._clamp_joint_position_target(target, joint_ids)
+
+    def _limit_joint_target_delta(self, target: torch.Tensor, joint_ids: list[int], max_delta: float) -> torch.Tensor:
+        try:
+            max_delta_value = float(max_delta)
+        except (TypeError, ValueError):
+            return target
+        if max_delta_value <= 0.0 or not math.isfinite(max_delta_value):
+            return target
+        current = self._asset.data.joint_pos[:, joint_ids]
+        return current + torch.clamp(target - current, min=-max_delta_value, max=max_delta_value)
+
+    def _clamp_joint_position_target(self, target: torch.Tensor, joint_ids: list[int]) -> torch.Tensor:
+        limits = self._asset.data.joint_pos_limits[:, joint_ids, :]
+        return torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
+
     def _warn_missing_root_once(self) -> None:
         if self._warned_root_missing:
             return
         if self._root_subscriber is not None and self.cfg.root_zmq_required:
             root_stream = getattr(self._root_subscriber, "description", "dedicated root-state stream")
             print(
-                "[WARN] MuJoCo G1 mirror has body joint packets but no dedicated root packets yet. "
+                "[WARN] MuJoCo G1 reference has body joint packets but no dedicated root packets yet. "
                 f"Expected {root_stream}; "
-                "the robot will walk in place until root_pos_w/root_quat_w arrive."
+                "root reference debug/recovery data will be unavailable until root_pos_w/root_quat_w arrive."
             )
         self._warned_root_missing = True
 
@@ -540,11 +578,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
             return
         self._last_root_debug_time = now
 
-        applied_pos = self._root_pose[0, :3].detach().cpu().numpy()
+        root_pos = self._root_pose[0, :3].detach().cpu().numpy()
+        root_label = "applied_xyz" if self.cfg.write_root_state else "reference_xyz"
         if sample.root_pos_w is None:
             print(
                 "[INFO] MuJoCo G1 root mirror: source=none, "
-                f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}], "
+                f"{root_label}=[{root_pos[0]:.3f}, {root_pos[1]:.3f}, {root_pos[2]:.3f}], "
                 "waiting for g1_root."
             )
             return
@@ -560,7 +599,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"fresh={sample.root_fresh}, mode={self.cfg.root_position_mode}, "
             f"src_xyz=[{src_pos[0]:.3f}, {src_pos[1]:.3f}, {src_pos[2]:.3f}], "
             f"src_delta_xy=[{src_delta_xy[0]:.3f}, {src_delta_xy[1]:.3f}], "
-            f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}]"
+            f"{root_label}=[{root_pos[0]:.3f}, {root_pos[1]:.3f}, {root_pos[2]:.3f}]"
         )
 
     def _apply_controller_gripper_targets(self) -> None:
@@ -678,7 +717,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             else False
         )
         if not fresh and not self._warned_stale:
-            print(f"[WARN] MuJoCo G1 mirror {self._transport.upper()} stream is stale; holding last mirrored pose.")
+            print(f"[WARN] MuJoCo G1 reference {self._transport.upper()} stream is stale; holding last target.")
             self._warned_stale = True
 
         q = self._select_body_q(body_msg)
@@ -1029,7 +1068,7 @@ class G1GripperSyncAction(ActionTerm):
     def _apply_local_actions(self) -> None:
         target = self._compose_target_from_actions(self._processed_actions)
         target = self._clamp_target(target)
-        self._write_hand_target(target)
+        target = self._write_hand_target(target)
         self._publish_target(target)
         self._print_debug("local", target)
 
@@ -1046,7 +1085,7 @@ class G1GripperSyncAction(ActionTerm):
         if target is None:
             return
         target = self._clamp_target(target)
-        self._write_hand_target(target)
+        target = self._write_hand_target(target)
         self._print_debug("remote", target)
 
     def _compose_target_from_actions(self, actions: torch.Tensor) -> torch.Tensor:
@@ -1096,12 +1135,25 @@ class G1GripperSyncAction(ActionTerm):
             limits = self._asset.data.joint_pos_limits[:, self._all_hand_ids, :]
         return torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
 
-    def _write_hand_target(self, target: torch.Tensor) -> None:
+    def _write_hand_target(self, target: torch.Tensor) -> torch.Tensor:
+        target = self._limit_target_delta(target)
+        target = self._clamp_target(target)
         joint_vel = torch.zeros_like(target)
         if self.cfg.write_joint_state:
             self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
         self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
         self._asset.set_joint_velocity_target(joint_vel, joint_ids=self._all_hand_ids)
+        return target
+
+    def _limit_target_delta(self, target: torch.Tensor) -> torch.Tensor:
+        try:
+            max_delta = float(self.cfg.target_max_delta)
+        except (TypeError, ValueError):
+            return target
+        if max_delta <= 0.0 or not math.isfinite(max_delta):
+            return target
+        current = self._asset.data.joint_pos[:, self._all_hand_ids]
+        return current + torch.clamp(target - current, min=-max_delta, max=max_delta)
 
     def _publish_target(self, target: torch.Tensor) -> None:
         if self._publisher is None:
@@ -1158,6 +1210,7 @@ class G1GripperSyncAction(ActionTerm):
         print(
             "[INFO] G1 gripper sync: "
             f"robot_id={self.cfg.robot_id}, mode={self._mode}, source={source}, "
+            f"write_joint_state={self.cfg.write_joint_state}, "
             f"target={np.round(target_np, 3).tolist()}"
         )
 

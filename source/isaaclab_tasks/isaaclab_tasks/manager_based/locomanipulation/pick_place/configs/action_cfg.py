@@ -36,7 +36,7 @@ class AgileBasedLowerBodyActionCfg(ActionTermCfg):
 
 @configclass
 class MuJoCoG1MirrorActionCfg(ActionTermCfg):
-    """Configuration for mirroring MuJoCo/SONIC G1 walking state into Isaac Lab."""
+    """Configuration for applying MuJoCo/SONIC G1 walking references in Isaac Lab."""
 
     class_type: type[ActionTerm] = MuJoCoG1MirrorAction
 
@@ -118,8 +118,32 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     root_position_mode: str = "relative"
     """Root position mapping: ``relative`` applies MuJoCo displacement to the Isaac start pose; ``absolute`` copies it."""
 
+    write_root_state: bool = False
+    """Whether root pose/velocity references should be written directly to simulation state.
+
+    Keep this disabled for physical Isaac Lab tracking. Enable it only for legacy mirror/debug behavior.
+    """
+
     root_debug_interval_s: float = 2.0
     """Seconds between root mirror status prints. Non-positive disables periodic root status prints."""
+
+    write_body_joint_state: bool = False
+    """Whether body joint references should be written directly to simulation state.
+
+    Keep this disabled for physical Isaac Lab tracking. Enable it only for legacy mirror/debug behavior.
+    """
+
+    write_hand_joint_state: bool = False
+    """Whether mirrored hand joint references should be written directly to simulation state."""
+
+    body_joint_target_max_delta: float = 0.08
+    """Maximum body joint position-target change per physics step in radians. Non-positive disables limiting."""
+
+    hand_joint_target_max_delta: float = 0.20
+    """Maximum mirrored hand joint position-target change per physics step in radians. Non-positive disables limiting."""
+
+    use_source_joint_velocity: bool = True
+    """Whether incoming body/hand velocity references should be sent as actuator velocity targets."""
 
     source_root_motion_eps: float = 1.0e-3
     """Source root xy displacement threshold used by ``root_motion_mode='auto'``."""
@@ -172,8 +196,11 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     foot_body_names: list[str] = ["left_ankle_roll_link", "right_ankle_roll_link"]
     """Foot bodies used for stance-root estimation and ground locking."""
 
-    ground_lock: bool = True
-    """Whether to keep the mirrored feet at or above the initial standing clearance."""
+    ground_lock: bool = False
+    """Whether to keep mirrored feet at or above the initial standing clearance.
+
+    This only applies when ``write_root_state`` is enabled.
+    """
 
     ground_height: float = 0.0
     """World z height of the ground."""
@@ -242,8 +269,14 @@ class G1GripperSyncActionCfg(ActionTermCfg):
     controller_gripper_use_soft_limits: bool = True
     """Whether local gripper targets are clamped to soft limits instead of hard joint limits."""
 
-    write_joint_state: bool = True
-    """Whether gripper targets should also be written directly to joint state."""
+    write_joint_state: bool = False
+    """Whether gripper targets should also be written directly to joint state.
+
+    Keep this disabled for physical Isaac Lab grasping. Enable it only for reset/recovery or legacy sync behavior.
+    """
+
+    target_max_delta: float = 0.20
+    """Maximum gripper joint position-target change per physics step in radians. Non-positive disables limiting."""
 
     debug_interval_s: float = 0.0
     """Seconds between debug prints. Non-positive disables periodic prints."""
