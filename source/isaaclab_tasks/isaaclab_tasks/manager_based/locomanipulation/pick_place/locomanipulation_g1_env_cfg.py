@@ -341,6 +341,10 @@ elif _object_sync_role in {"publisher", "subscriber", "none"}:
     ZMQ_SYNC_ROLE = _object_sync_role
 else:
     ZMQ_SYNC_ROLE = "publisher"
+ISAACLAB_SUBSCRIBER_STATE_ONLY = ZMQ_SYNC_ROLE == "subscriber" and _cfg_bool(
+    "ISAACLAB_SUBSCRIBER_STATE_ONLY",
+    True,
+)
 ZMQ_SYNC_ENDPOINT = _cfg_value(
     "ISAACLAB_OBJECT_SYNC_ENDPOINT",
     f"tcp://{_windows_isaaclab_ip(1, '127.0.0.1')}:15555",
@@ -627,6 +631,15 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
     default_sender_ip = "192.168.10.230" if robot_id == 1 else "192.168.10.231"
     default_body_port = 5557 if robot_id == 1 else 5567
     default_root_port = 5558 if robot_id == 1 else 5568
+    body_state_write_joint_names = (
+        [".*"]
+        if ISAACLAB_SUBSCRIBER_STATE_ONLY
+        else _isaac_robot_cfg_str_list(
+            robot_id,
+            "BODY_STATE_WRITE_JOINT_NAMES",
+            G1_BODY_STATE_WRITE_JOINT_NAMES,
+        )
+    )
     return MuJoCoG1MirrorActionCfg(
         asset_name=_robot_name(robot_id),
         transport=_cfg_value("ISAACLAB_G1_TRANSPORT", "zmq"),
@@ -653,9 +666,13 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         root_udp_topic=_isaac_robot_cfg(robot_id, "ROOT_UDP_TOPIC", f"g1_{robot_id}_root"),
         root_udp_rcvbuf=_isaac_robot_cfg_int(robot_id, "ROOT_UDP_RCVBUF", 262144),
         locomotion_sync_mode=sync_mode,
-        write_root_state=_isaac_robot_write_root_state(robot_id),
-        write_body_joint_state=_isaac_robot_write_body_joint_state(robot_id),
-        write_hand_joint_state=_isaac_robot_write_hand_joint_state(robot_id),
+        write_root_state=True if ISAACLAB_SUBSCRIBER_STATE_ONLY else _isaac_robot_write_root_state(robot_id),
+        write_body_joint_state=True
+        if ISAACLAB_SUBSCRIBER_STATE_ONLY
+        else _isaac_robot_write_body_joint_state(robot_id),
+        write_hand_joint_state=True
+        if ISAACLAB_SUBSCRIBER_STATE_ONLY
+        else _isaac_robot_write_hand_joint_state(robot_id),
         use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
         body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
         zero_target_only_body_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_BODY_VELOCITY", False),
@@ -671,11 +688,7 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         root_motion_mode=_isaac_robot_cfg(robot_id, "ROOT_MOTION_MODE", "source"),
         root_zmq_required=_isaac_robot_cfg_bool(robot_id, "ROOT_ZMQ_REQUIRED", True),
         root_position_mode=_isaac_robot_cfg(robot_id, "ROOT_POSITION_MODE", "relative"),
-        body_state_write_joint_names=_isaac_robot_cfg_str_list(
-            robot_id,
-            "BODY_STATE_WRITE_JOINT_NAMES",
-            G1_BODY_STATE_WRITE_JOINT_NAMES,
-        ),
+        body_state_write_joint_names=body_state_write_joint_names,
         mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", False),
         controller_gripper_enabled=_isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
@@ -684,10 +697,18 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         controller_gripper_thumb_2_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_2_ANGLE", 1.8),
         controller_gripper_action_alpha=_cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 1.0),
         controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
-        controller_gripper_write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
+        controller_gripper_write_joint_state=True
+        if ISAACLAB_SUBSCRIBER_STATE_ONLY
+        else _cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
         controller_gripper_target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
         ground_lock=_isaac_robot_cfg_bool(robot_id, "GROUND_LOCK", False),
     )
+
+
+def _gripper_write_joint_state_for_role() -> bool:
+    if ISAACLAB_SUBSCRIBER_STATE_ONLY:
+        return _cfg_bool("ISAACLAB_G1_GRIPPER_SUBSCRIBER_WRITE_JOINT_STATE", True)
+    return _cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False)
 
 
 @configclass
@@ -724,8 +745,9 @@ class ActionsCfg:
         controller_gripper_thumb_2_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_2_ANGLE", 1.8),
         controller_gripper_action_alpha=_cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 1.0),
         controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
-        write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
+        write_joint_state=_gripper_write_joint_state_for_role(),
         target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
+        publish_actual_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_PUBLISH_ACTUAL_JOINT_STATE", True),
         publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
         debug_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_DEBUG_INTERVAL_S", 0.0),
     )
@@ -751,8 +773,9 @@ class ActionsCfg:
         ),
         timeout=_cfg_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
         controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
-        write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
+        write_joint_state=_gripper_write_joint_state_for_role(),
         target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
+        publish_actual_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_PUBLISH_ACTUAL_JOINT_STATE", True),
         publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
         debug_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_DEBUG_INTERVAL_S", 0.0),
     )

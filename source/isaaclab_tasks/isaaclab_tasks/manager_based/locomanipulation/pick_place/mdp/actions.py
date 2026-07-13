@@ -1282,11 +1282,11 @@ class G1GripperSyncAction(ActionTerm):
         if not self._subscriber.fresh and not self._warned_stale:
             print("[WARN] G1 gripper sync stream is stale; holding last gripper pose.")
             self._warned_stale = True
-        target = self._target_from_payload(msg)
+        target, joint_vel = self._state_from_payload(msg)
         if target is None:
             return
         target = self._clamp_target(target)
-        self._write_hand_target(target)
+        self._write_hand_target(target, joint_vel=joint_vel)
         self._print_debug("remote", target)
 
     def _compose_target_from_actions(self, actions: torch.Tensor) -> torch.Tensor:
@@ -1336,8 +1336,9 @@ class G1GripperSyncAction(ActionTerm):
             limits = self._asset.data.joint_pos_limits[:, self._all_hand_ids, :]
         return torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
 
-    def _write_hand_target(self, target: torch.Tensor) -> None:
-        joint_vel = torch.zeros_like(target)
+    def _write_hand_target(self, target: torch.Tensor, joint_vel: torch.Tensor | None = None) -> None:
+        state_joint_vel = torch.zeros_like(target) if joint_vel is None else joint_vel
+        target_joint_vel = torch.zeros_like(target)
         if not self.cfg.write_joint_state:
             target = _limit_joint_position_delta(
                 self._asset.data.joint_pos[:, self._all_hand_ids],
@@ -1345,9 +1346,9 @@ class G1GripperSyncAction(ActionTerm):
                 float(self.cfg.target_max_delta),
             )
         if self.cfg.write_joint_state:
-            self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
+            self._asset.write_joint_state_to_sim(target, state_joint_vel, joint_ids=self._all_hand_ids)
         self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
-        self._asset.set_joint_velocity_target(joint_vel, joint_ids=self._all_hand_ids)
+        self._asset.set_joint_velocity_target(target_joint_vel, joint_ids=self._all_hand_ids)
 
     def _publish_target(self, target: torch.Tensor) -> None:
         if self._publisher is None:
@@ -1358,6 +1359,10 @@ class G1GripperSyncAction(ActionTerm):
             return
         self._last_publish_time = now
         target_np = target[0].detach().cpu().numpy()
+        actual_q = self._asset.data.joint_pos[:, self._all_hand_ids][0].detach().cpu().numpy()
+        actual_dq = self._asset.data.joint_vel[:, self._all_hand_ids][0].detach().cpu().numpy()
+        published_q = actual_q if self.cfg.publish_actual_joint_state else target_np
+        published_dq = actual_dq if self.cfg.publish_actual_joint_state else np.zeros_like(target_np)
         actions_np = (
             self._processed_actions[0].detach().cpu().numpy()
             if self._processed_actions.numel() == 4
@@ -1371,26 +1376,41 @@ class G1GripperSyncAction(ActionTerm):
                 "time": time.time(),
                 "sequence": int(self._sequence),
                 "joint_order": "g1_trihand_7dof_per_hand",
-                "left_hand_q": target_np[:7].astype(float).tolist(),
-                "right_hand_q": target_np[7:14].astype(float).tolist(),
+                "left_hand_q": published_q[:7].astype(float).tolist(),
+                "right_hand_q": published_q[7:14].astype(float).tolist(),
+                "left_hand_dq": published_dq[:7].astype(float).tolist(),
+                "right_hand_dq": published_dq[7:14].astype(float).tolist(),
+                "left_hand_target_q": target_np[:7].astype(float).tolist(),
+                "right_hand_target_q": target_np[7:14].astype(float).tolist(),
                 "raw_openxr_action": actions_np.astype(float).tolist(),
+                "state_source": "actual_joint_state" if self.cfg.publish_actual_joint_state else "command_target",
                 "source": "isaaclab_openxr",
             }
         )
 
-    def _target_from_payload(self, msg: dict[str, Any]) -> torch.Tensor | None:
+    def _state_from_payload(self, msg: dict[str, Any]) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         try:
             left = np.asarray(msg["left_hand_q"], dtype=np.float32).reshape(-1)
             right = np.asarray(msg["right_hand_q"], dtype=np.float32).reshape(-1)
             if left.size < 7 or right.size < 7:
                 raise ValueError("left_hand_q/right_hand_q must each contain at least 7 values")
             values = np.concatenate((left[:7], right[:7]), axis=0)
+            if "left_hand_dq" in msg and "right_hand_dq" in msg:
+                left_vel = np.asarray(msg["left_hand_dq"], dtype=np.float32).reshape(-1)
+                right_vel = np.asarray(msg["right_hand_dq"], dtype=np.float32).reshape(-1)
+                if left_vel.size < 7 or right_vel.size < 7:
+                    raise ValueError("left_hand_dq/right_hand_dq must each contain at least 7 values")
+                velocities = np.concatenate((left_vel[:7], right_vel[:7]), axis=0)
+            else:
+                velocities = np.zeros(14, dtype=np.float32)
         except Exception as exc:
             if not self._warned_bad_payload:
                 print(f"[WARN] G1 gripper sync ignored malformed payload: {exc}")
                 self._warned_bad_payload = True
-            return None
-        return torch.tensor(values, dtype=torch.float32, device=self.device).view(1, 14)
+            return None, None
+        target = torch.tensor(values, dtype=torch.float32, device=self.device).view(1, 14)
+        joint_vel = torch.tensor(velocities, dtype=torch.float32, device=self.device).view(1, 14)
+        return target, joint_vel
 
     def _print_debug(self, source: str, target: torch.Tensor) -> None:
         interval = float(self.cfg.debug_interval_s)

@@ -278,6 +278,9 @@ class G1GripperSyncActionCfg(ActionTermCfg):
     publish_interval_s: float = 0.0
     """Minimum seconds between local gripper publishes. Non-positive publishes every apply step."""
 
+    publish_actual_joint_state: bool = True
+    """Whether to publish measured Isaac Lab hand joint state instead of only the commanded target."""
+
     controller_gripper_finger_close_angle: float = 1.0
     """Maximum index/middle finger close angle in radians at full trigger/grip press."""
 

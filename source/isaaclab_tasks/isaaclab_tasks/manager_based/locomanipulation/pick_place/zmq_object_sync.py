@@ -128,10 +128,14 @@ class ZmqObjectSyncAction(ActionTerm):
             # Assuming env 0 is the one we want to track
             root_pos_w = self._asset.data.root_pos_w[0].tolist()
             root_quat_w = self._asset.data.root_quat_w[0].tolist()
+            root_lin_vel_w = self._asset.data.root_lin_vel_w[0].tolist()
+            root_ang_vel_w = self._asset.data.root_ang_vel_w[0].tolist()
             
             data = {
                 "pos": root_pos_w,
-                "quat": root_quat_w
+                "quat": root_quat_w,
+                "lin_vel": root_lin_vel_w,
+                "ang_vel": root_ang_vel_w,
             }
             try:
                 msg = json.dumps(data).encode('utf-8')
@@ -154,8 +158,14 @@ class ZmqObjectSyncAction(ActionTerm):
                     data = json.loads(last_msg.decode('utf-8'))
                     pos = torch.tensor(data["pos"], device=self.device, dtype=torch.float32).unsqueeze(0).repeat(self.num_envs, 1)
                     quat = torch.tensor(data["quat"], device=self.device, dtype=torch.float32).unsqueeze(0).repeat(self.num_envs, 1)
+                    lin_vel = torch.tensor(
+                        data.get("lin_vel", [0.0, 0.0, 0.0]), device=self.device, dtype=torch.float32
+                    ).unsqueeze(0).repeat(self.num_envs, 1)
+                    ang_vel = torch.tensor(
+                        data.get("ang_vel", [0.0, 0.0, 0.0]), device=self.device, dtype=torch.float32
+                    ).unsqueeze(0).repeat(self.num_envs, 1)
                     
-                    root_pose = torch.cat([pos, quat], dim=-1)
-                    self._asset.write_root_pose_to_sim(root_pose)
+                    root_state = torch.cat([pos, quat, lin_vel, ang_vel], dim=-1)
+                    self._asset.write_root_state_to_sim(root_state)
                 except Exception as e:
                     logger.warning(f"[ZMQ Object Sync] Error applying received pose: {e}")
