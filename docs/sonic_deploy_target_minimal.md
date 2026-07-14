@@ -209,6 +209,8 @@ UNITREE_G1_MODE_MACHINE=5
 
 在固定 root 的 ZMQ 验证模式下，`base_trans_target` 如果没有持续变化，机器人只会原地摆腿。为了便于观察 whole-body target，IsaacLab 默认会在这种情况下根据下半身 reference 的变化合成一个小的可视 root 平移，并在日志里显示 `root_src=synthetic`。如果 deploy 已经提供有效位移，则日志会显示 `root_src=base_trans`，并优先使用 deploy 的 `base_trans_target`。
 
+`base_trans_target` 的相对位移位于 deploy odom 系（机器人初始朝向为其 +X）；IsaacLab 侧会按（锚定 yaw − deploy 初始 yaw）把位移旋转进世界系再应用（2026-07-13 起），因此机器人非恒等朝向出生（如主任务 banyun 工位面向 +Y）时行走方向依然正确。
+
 ## 当前限制
 
 - IsaacLab 还没有生成 DDS LowState CRC；GR00T deploy 需要运行在 `sim` 模式。

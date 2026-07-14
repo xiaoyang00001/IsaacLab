@@ -33,7 +33,10 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import (
+    ZmqObjectSyncActionCfg,
+    ZmqRobotSyncActionCfg,
+)
 from copy import deepcopy
 
 from isaaclab_assets.robots.unitree import G1_29DOF_CFG
@@ -165,6 +168,10 @@ SONIC_G1_FIX_ROOT = not SONIC_G1_PHYSICS_MODE
 SONIC_G1_VISUAL_SERVO_MODE = _env_flag("SONIC_G1_VISUAL_SERVO_MODE", SONIC_G1_FIX_ROOT)
 SONIC_G1_SELF_COLLISIONS = SONIC_G1_PHYSICS_MODE and _env_flag("SONIC_G1_SELF_COLLISIONS", False)
 ENABLE_WALKER_ROBOT = _env_flag("LOCIMANIP_ENABLE_WALKER_ROBOT", False) and SONIC_G1_PHYSICS_MODE
+# banyun 工位机器人开关：默认（1）SONICRobot 顶替 Robot_1 站工位，Robot_1 及其
+# mirror/gripper 动作项随之下线；设 LOCOMANIP_SONIC_REPLACE_ROBOT1=0 恢复原
+# Robot_1（GR00T 43dof 镜像），SONICRobot 退回南侧 8m 行走通道出生点。
+SONIC_REPLACE_ROBOT1 = _env_flag("LOCOMANIP_SONIC_REPLACE_ROBOT1", True)
 print(
     "[locomanip_cfg] "
     f"SONIC_G1_FIX_ROOT={SONIC_G1_FIX_ROOT} "
@@ -172,6 +179,7 @@ print(
     f"SONIC_G1_VISUAL_SERVO_MODE={SONIC_G1_VISUAL_SERVO_MODE} "
     f"SONIC_G1_SELF_COLLISIONS={SONIC_G1_SELF_COLLISIONS} "
     f"ENABLE_WALKER_ROBOT={ENABLE_WALKER_ROBOT} "
+    f"SONIC_REPLACE_ROBOT1={SONIC_REPLACE_ROBOT1} "
     f"legacy_SONIC_G1_FIX_ROOT_env={os.environ.get('SONIC_G1_FIX_ROOT', '<unset>')!r}"
 )
 
@@ -189,6 +197,7 @@ def _find_gr00t_g1_43dof_usd() -> str:
     candidates.extend(
         [
             Path("F:/ISAACWholeBody/GR00T-WholeBodyControl"),
+            Path.home() / "GR00T-WholeBodyControl",
             Path(__file__).resolve().parents[6] / "GR00T-WholeBodyControl",
             Path.cwd() / "GR00T-WholeBodyControl",
         ]
@@ -742,19 +751,34 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # ID 1 keeps the base config pose (banyun 工位，推车旁，面向 +Y)；ID 2 在其右侧 1.5 m（避开 x=-5.4 的推车）。
-    robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot_1",
-    )
+    # banyun 工位（ID 1 基准位姿，推车旁，面向 +Y）默认由 SONICRobot 顶替（见
+    # 下方 sonic_robot）；LOCOMANIP_SONIC_REPLACE_ROBOT1=0 时恢复 Robot_1 镜像
+    # 机器人。Robot_2 保留在工位右侧 1.5 m（避开 x=-5.4 的推车）。
+    if not SONIC_REPLACE_ROBOT1:
+        robot_1 = G1_43DOF_GR00T_CFG.replace(
+            prim_path="/World/envs/env_.*/Robot_1",
+        )
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
     )
 
-    # SONIC deploy 驱动的 G1（29dof，训练同款 PD/armature）。出生点 (-2.0, 11.008)
-    # 在 banyun 工位（y≈19）南侧 8m 的行走通道上，与镜像双机/推车互不干扰。
+    # SONIC deploy 驱动的 G1（29dof，训练同款 PD/armature）。
+    # 默认（LOCOMANIP_SONIC_REPLACE_ROBOT1=1）顶替原 Robot_1 站 banyun 工位
+    # （推车旁，面向 +Y）。Z=0.76 沿用 SONIC 标定出生高度（脚底离地 ~9mm，
+    # 勿抄 43dof 的 0.78，见 SONIC_G1_29DOF_CFG.init_state 注释）。
+    # 开关设 0 时退回南侧 8m 行走通道出生点 (-2.0, 11.008)，与镜像双机/推车互不干扰。
     # 默认固定根+关重力（SONIC_G1_PHYSICS_MODE=1 恢复自由根，闭环物理行走）。
-    sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/SONICRobot")
+    if SONIC_REPLACE_ROBOT1:
+        sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(
+            prim_path="{ENV_REGEX_NS}/SONICRobot",
+            init_state=SONIC_G1_29DOF_CFG.init_state.replace(
+                pos=(-3.8, 19.008, 0.76),
+                rot=(0.7071, 0.0, 0.0, 0.7071),
+            ),
+        )
+    else:
+        sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/SONICRobot")
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
         # 叠放在 cart_box4 顶面：cart_box4 中心 z=0.90，箱子半高 0.075 → 顶面 z=0.975；
@@ -806,32 +830,36 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     # Body/root streams are mirrored independently for both robot IDs.
-    mujoco_g1_mirror_1 = MuJoCoG1MirrorActionCfg(
-        asset_name="robot_1",
-        transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
-        zmq_host=_ubuntu_sender_ip(1, _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
-        zmq_port=_isaac_robot_env_int(1, "ZMQ_PORT", 5557),
-        zmq_topic=_isaac_robot_env(1, "ZMQ_TOPIC", "g1_1_debug"),
-        root_zmq_host=_ubuntu_sender_ip(
-            1,
-            _isaac_robot_env(1, "ROOT_ZMQ_HOST", _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
-        ),
-        root_zmq_port=_isaac_robot_env_int(1, "ROOT_ZMQ_PORT", 5558),
-        root_zmq_topic=_isaac_robot_env(1, "ROOT_ZMQ_TOPIC", "g1_1_root"),
-        udp_bind_host=_isaac_robot_env(1, "UDP_BIND_HOST", "0.0.0.0"),
-        udp_port=_isaac_robot_env_int(1, "UDP_PORT", 5557),
-        udp_topic=_isaac_robot_env(1, "UDP_TOPIC", "g1_1_debug"),
-        udp_rcvbuf=_isaac_robot_env_int(1, "UDP_RCVBUF", 262144),
-        root_udp_bind_host=_isaac_robot_env(1, "ROOT_UDP_BIND_HOST", "0.0.0.0"),
-        root_udp_port=_isaac_robot_env_int(1, "ROOT_UDP_PORT", 5558),
-        root_udp_topic=_isaac_robot_env(1, "ROOT_UDP_TOPIC", "g1_1_root"),
-        root_udp_rcvbuf=_isaac_robot_env_int(1, "ROOT_UDP_RCVBUF", 262144),
-        root_motion_mode="source",
-        root_zmq_required=True,
-        root_position_mode="relative",
-        mirror_hands=False,
-        controller_gripper_enabled=False,
-    )
+    # 默认（LOCOMANIP_SONIC_REPLACE_ROBOT1=1）Robot_1 被 SONICRobot 顶替，其镜像流
+    # 随之下线（工位关节/根驱动改走下方 sonic_wholebody 的 SONIC deploy 链路）；
+    # 开关设 0 时恢复本镜像流驱动 Robot_1。
+    if not SONIC_REPLACE_ROBOT1:
+        mujoco_g1_mirror_1 = MuJoCoG1MirrorActionCfg(
+            asset_name="robot_1",
+            transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
+            zmq_host=_ubuntu_sender_ip(1, _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
+            zmq_port=_isaac_robot_env_int(1, "ZMQ_PORT", 5557),
+            zmq_topic=_isaac_robot_env(1, "ZMQ_TOPIC", "g1_1_debug"),
+            root_zmq_host=_ubuntu_sender_ip(
+                1,
+                _isaac_robot_env(1, "ROOT_ZMQ_HOST", _isaac_robot_env(1, "ZMQ_HOST", "192.168.10.230")),
+            ),
+            root_zmq_port=_isaac_robot_env_int(1, "ROOT_ZMQ_PORT", 5558),
+            root_zmq_topic=_isaac_robot_env(1, "ROOT_ZMQ_TOPIC", "g1_1_root"),
+            udp_bind_host=_isaac_robot_env(1, "UDP_BIND_HOST", "0.0.0.0"),
+            udp_port=_isaac_robot_env_int(1, "UDP_PORT", 5557),
+            udp_topic=_isaac_robot_env(1, "UDP_TOPIC", "g1_1_debug"),
+            udp_rcvbuf=_isaac_robot_env_int(1, "UDP_RCVBUF", 262144),
+            root_udp_bind_host=_isaac_robot_env(1, "ROOT_UDP_BIND_HOST", "0.0.0.0"),
+            root_udp_port=_isaac_robot_env_int(1, "ROOT_UDP_PORT", 5558),
+            root_udp_topic=_isaac_robot_env(1, "ROOT_UDP_TOPIC", "g1_1_root"),
+            root_udp_rcvbuf=_isaac_robot_env_int(1, "ROOT_UDP_RCVBUF", 262144),
+            root_motion_mode="source",
+            root_zmq_required=True,
+            root_position_mode="relative",
+            mirror_hands=False,
+            controller_gripper_enabled=False,
+        )
     mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
         asset_name="robot_2",
         transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
@@ -858,58 +886,63 @@ class ActionsCfg:
         mirror_hands=False,
         controller_gripper_enabled=False,
     )
-    local_gripper = G1GripperSyncActionCfg(
-        asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
-        mode="local_publish",
-        robot_id=ISAACLAB_LOCAL_ROBOT_ID,
-        transport="zmq",
-        zmq_host=_isaac_robot_env(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_HOST",
-            _windows_isaaclab_ip(ISAACLAB_LOCAL_ROBOT_ID, "127.0.0.1"),
-        ),
-        zmq_port=_isaac_robot_env_int(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_PORT",
-            5571 if ISAACLAB_LOCAL_ROBOT_ID == 1 else 5572,
-        ),
-        zmq_topic=_isaac_robot_env(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_TOPIC",
-            f"g1_{ISAACLAB_LOCAL_ROBOT_ID}_gripper",
-        ),
-        timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
-        controller_gripper_finger_close_angle=1.8,
-        controller_gripper_thumb_1_angle=1.1,
-        controller_gripper_thumb_2_angle=1.8,
-        controller_gripper_action_alpha=1.0,
-        controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
-    )
-    remote_gripper = G1GripperSyncActionCfg(
-        asset_name=ISAACLAB_PEER_ROBOT_NAME,
-        mode="remote_subscribe",
-        robot_id=ISAACLAB_PEER_ROBOT_ID,
-        transport="zmq",
-        zmq_host=_isaac_robot_env(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_HOST",
-            _windows_isaaclab_ip(ISAACLAB_PEER_ROBOT_ID, "127.0.0.1"),
-        ),
-        zmq_port=_isaac_robot_env_int(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_PORT",
-            5571 if ISAACLAB_PEER_ROBOT_ID == 1 else 5572,
-        ),
-        zmq_topic=_isaac_robot_env(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_TOPIC",
-            f"g1_{ISAACLAB_PEER_ROBOT_ID}_gripper",
-        ),
-        timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
-        controller_gripper_use_soft_limits=False,
-        write_joint_state=True,
-    )
+    # gripper 同步只对在场的镜像机器人挂载：默认开关下 robot_1 已被 SONIC 29dof
+    # 顶替，既无手指关节也不存在同名实体，挂上即在 asset 解析阶段崩溃；
+    # LOCOMANIP_SONIC_REPLACE_ROBOT1=0 时 robot_1 在场，两项照旧全挂。
+    if ISAACLAB_LOCAL_ROBOT_ID == 2 or not SONIC_REPLACE_ROBOT1:
+        local_gripper = G1GripperSyncActionCfg(
+            asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
+            mode="local_publish",
+            robot_id=ISAACLAB_LOCAL_ROBOT_ID,
+            transport="zmq",
+            zmq_host=_isaac_robot_env(
+                ISAACLAB_LOCAL_ROBOT_ID,
+                "GRIPPER_ZMQ_HOST",
+                _windows_isaaclab_ip(ISAACLAB_LOCAL_ROBOT_ID, "127.0.0.1"),
+            ),
+            zmq_port=_isaac_robot_env_int(
+                ISAACLAB_LOCAL_ROBOT_ID,
+                "GRIPPER_ZMQ_PORT",
+                5571 if ISAACLAB_LOCAL_ROBOT_ID == 1 else 5572,
+            ),
+            zmq_topic=_isaac_robot_env(
+                ISAACLAB_LOCAL_ROBOT_ID,
+                "GRIPPER_ZMQ_TOPIC",
+                f"g1_{ISAACLAB_LOCAL_ROBOT_ID}_gripper",
+            ),
+            timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
+            controller_gripper_finger_close_angle=1.8,
+            controller_gripper_thumb_1_angle=1.1,
+            controller_gripper_thumb_2_angle=1.8,
+            controller_gripper_action_alpha=1.0,
+            controller_gripper_use_soft_limits=False,
+            write_joint_state=True,
+        )
+    if ISAACLAB_PEER_ROBOT_ID == 2 or not SONIC_REPLACE_ROBOT1:
+        remote_gripper = G1GripperSyncActionCfg(
+            asset_name=ISAACLAB_PEER_ROBOT_NAME,
+            mode="remote_subscribe",
+            robot_id=ISAACLAB_PEER_ROBOT_ID,
+            transport="zmq",
+            zmq_host=_isaac_robot_env(
+                ISAACLAB_PEER_ROBOT_ID,
+                "GRIPPER_ZMQ_HOST",
+                _windows_isaaclab_ip(ISAACLAB_PEER_ROBOT_ID, "127.0.0.1"),
+            ),
+            zmq_port=_isaac_robot_env_int(
+                ISAACLAB_PEER_ROBOT_ID,
+                "GRIPPER_ZMQ_PORT",
+                5571 if ISAACLAB_PEER_ROBOT_ID == 1 else 5572,
+            ),
+            zmq_topic=_isaac_robot_env(
+                ISAACLAB_PEER_ROBOT_ID,
+                "GRIPPER_ZMQ_TOPIC",
+                f"g1_{ISAACLAB_PEER_ROBOT_ID}_gripper",
+            ),
+            timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
+            controller_gripper_use_soft_limits=False,
+            write_joint_state=True,
+        )
     object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     pushcart_sync = ZmqObjectSyncActionCfg(asset_name="pushcart", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box1_sync = ZmqObjectSyncActionCfg(asset_name="cart_box1", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
@@ -969,8 +1002,11 @@ class ActionsCfg:
             hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
             # 摔倒自动恢复（对齐 MuJoCo base_sim.check_fall：root 高度 <0.2m 即自动
             # 扶正）。SONIC_DEPLOY_AUTO_RECOVER=0 恢复纯手动（J 键）；settle 后是否
-            # 自动重新解锁由 SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER 控制
-            auto_recover_on_fall=_env_flag("SONIC_DEPLOY_AUTO_RECOVER", True),
+            # 自动重新解锁由 SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER 控制。
+            # 对象同步订阅端（对端镜像机）默认关闭：root 高度来自 sonic_robot_sync
+            # 同步流，对端机器人摔倒会让本地 recover 状态机 50Hz 空转刷屏（其写入
+            # 随即被同步流覆盖，毫无效果）。显式设环境变量仍可强制打开。
+            auto_recover_on_fall=_env_flag("SONIC_DEPLOY_AUTO_RECOVER", ZMQ_SYNC_ROLE != "subscriber"),
             fall_root_height_m=float(os.environ.get("SONIC_DEPLOY_FALL_HEIGHT", "0.2")),
             auto_unlock_after_recover=_env_flag("SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER", True),
             stale_timeout_s=0.5,
@@ -1044,6 +1080,15 @@ class ActionsCfg:
             debug_log_interval=100,
         )
 
+    # SONIC 行走跨机同步：让对端（ISAACLAB_LOCAL_ROBOT_ID=2）也能看到 SONIC
+    # 机器人行走。ID=1（SONIC 物理行走机）沿对象同步同一 PUB socket 发布
+    # sonic_robot 根位姿+关节角（topic=sonic_robot）；ID=2 订阅并运动学跟随。
+    # 必须声明在 sonic_wholebody 之后：订阅端收不到 deploy 包只会锁根站立，
+    # 本 term 同一步内后写覆盖其根位姿/关节目标（见 ZmqRobotSyncAction 注释）。
+    sonic_robot_sync = ZmqRobotSyncActionCfg(
+        asset_name="sonic_robot", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT
+    )
+
 
 @configclass
 class ObservationsCfg:
@@ -1066,9 +1111,18 @@ class TerminationsCfg:
     #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
     # )
 
+    # 默认开关下本机 ID=1 的主角机器人从 robot_1 换成 sonic_robot（29dof 同样有
+    # right_wrist_yaw_link）；ID=2 侧或 LOCOMANIP_SONIC_REPLACE_ROBOT1=0 时照旧
     success = DoneTerm(
         func=manip_mdp.task_done_pick_place,
-        params={"task_link_name": "right_wrist_yaw_link", "robot_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
+        params={
+            "task_link_name": "right_wrist_yaw_link",
+            "robot_cfg": SceneEntityCfg(
+                "sonic_robot"
+                if ISAACLAB_LOCAL_ROBOT_ID == 1 and SONIC_REPLACE_ROBOT1
+                else ISAACLAB_LOCAL_ROBOT_NAME
+            ),
+        },
     )
 
 
@@ -1124,9 +1178,15 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_heap_capacity = 2**26
         self.sim.physx.gpu_temp_buffer_capacity = 2**24
 
-        local_robot_prim = _robot_prim_name(ISAACLAB_LOCAL_ROBOT_ID)
-        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
-        self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
+        if ISAACLAB_LOCAL_ROBOT_ID == 1 and SONIC_REPLACE_ROBOT1:
+            # Robot_1 已由 SONICRobot 顶替。29dof g1.usd 的 head_link 嵌套在
+            # torso_link 下（GR00T 43dof 是根下 head_link，抄错会静默失效）
+            self.xr.anchor_prim_path = "/World/envs/env_0/SONICRobot/torso_link/head_link"
+            self.xr.anchor_rotation_prim_path = "/World/envs/env_0/SONICRobot/pelvis"
+        else:
+            local_robot_prim = _robot_prim_name(ISAACLAB_LOCAL_ROBOT_ID)
+            self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
+            self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
         self.xr.fixed_anchor_height = False
         # Anchor XR to the robot head position, but use the pelvis as the stable robot yaw reference.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
@@ -1149,5 +1209,11 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),
+                # 勿加 "handtracking" 键：无 retargeter 的 OpenXRDevice.advance()
+                # 返回 raw dict，动作维度非零的配置（本机 ID=2，或
+                # LOCOMANIP_SONIC_REPLACE_ROBOT1=0 时 local_gripper 在场）下主循环
+                # action.repeat() 直接 AttributeError。teleop_se3_agent 对缺失设备
+                # 名会自动回退到 motion_controllers（teleop_se3_agent.py:350），
+                # XR 锚点同样生效，且 4 维 gripper retargeter 输出与动作空间匹配。
             }
         )

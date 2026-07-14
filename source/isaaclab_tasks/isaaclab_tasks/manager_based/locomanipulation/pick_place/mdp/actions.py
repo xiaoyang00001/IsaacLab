@@ -1830,9 +1830,31 @@ class SonicDeployTargetAction(ActionTerm):
                 self._base_trans_target[:, :2] - self._previous_base_trans_target[:, :2], dim=-1
             )
             if torch.max(base_target_step).item() > 1.0e-6:
-                self._base_translation_goal_xy = self._root_pose_anchor[:, :2] + (
+                # deploy 端 base_trans_target 位于 deploy odom 系（机器人初始朝向
+                # 为其 +X）。锚定 yaw 非零时（如 banyun 工位面向 +Y 出生）需把
+                # 位移旋进世界系，否则机器人会相对自身朝向"横着走"。yaw 跟随
+                # （下方）本就是增量式，天然与坐标系无关，无需同款处理。
+                delta_xy = (
                     self._base_trans_target[:, :2] - self._initial_base_target_pos[:, :2]
                 ) * float(self.cfg.base_translation_scale)
+                if self._initial_base_target_yaw is None and self._base_quat_target is not None:
+                    self._initial_base_target_yaw = self._yaw_from_quat(self._base_quat_target).clone()
+                yaw_offset = (
+                    self._root_anchor_yaw.clone()
+                    if self._root_anchor_yaw is not None
+                    else torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+                )
+                if self._initial_base_target_yaw is not None:
+                    yaw_offset = yaw_offset - self._initial_base_target_yaw
+                cos_o = torch.cos(yaw_offset)
+                sin_o = torch.sin(yaw_offset)
+                self._base_translation_goal_xy = self._root_pose_anchor[:, :2] + torch.stack(
+                    [
+                        cos_o * delta_xy[:, 0] - sin_o * delta_xy[:, 1],
+                        sin_o * delta_xy[:, 0] + cos_o * delta_xy[:, 1],
+                    ],
+                    dim=-1,
+                )
             self._previous_base_trans_target = self._base_trans_target.clone()
 
             base_desired_xy = self._base_translation_goal_xy
