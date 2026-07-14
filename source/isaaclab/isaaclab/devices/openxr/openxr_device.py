@@ -507,5 +507,6 @@ class OpenXRDevice(DeviceBase):
 class OpenXRDeviceCfg(DeviceCfg):
     """Configuration for OpenXR devices."""
 
+    teleoperation_active_default: bool = False
     xr_cfg: XrCfg | None = None
     class_type: type[DeviceBase] = OpenXRDevice

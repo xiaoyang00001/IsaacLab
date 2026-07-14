@@ -7,17 +7,8 @@ import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
-from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.g1_lower_body_standing import G1LowerBodyStandingRetargeterCfg
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.g1_motion_controller_locomotion import (
-    G1LowerBodyStandingMotionControllerRetargeterCfg,
-)
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_motion_ctrl_retargeter import (
-    G1TriHandUpperBodyMotionControllerRetargeterCfg,
-)
-from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_retargeter import (
-    G1TriHandUpperBodyRetargeterCfg,
-)
+from isaaclab.devices.groot import GrootZmqDeviceCfg
+from isaaclab.devices.openxr import XrCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -27,20 +18,18 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import AgileBasedLowerBodyActionCfg
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.agile_locomotion_observation_cfg import (
-    AgileTeacherPolicyObservationsCfg,
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+    GrootWholeBodyJointTargetActionCfg,
+)
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.groot_joint_cfg import (
+    G1_29DOF_JOINT_NAMES_ISAACLAB_ORDER,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
 
 from isaaclab_assets.robots.unitree import G1_29DOF_CFG
-
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_controller_cfg import (  # isort: skip
-    G1_UPPER_BODY_IK_ACTION_CFG,
-)
 
 
 ##
@@ -95,18 +84,12 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    upper_body_ik = G1_UPPER_BODY_IK_ACTION_CFG
-
-    lower_body_joint_pos = AgileBasedLowerBodyActionCfg(
+    groot_whole_body_joint_target = GrootWholeBodyJointTargetActionCfg(
         asset_name="robot",
-        joint_names=[
-            ".*_hip_.*_joint",
-            ".*_knee_joint",
-            ".*_ankle_.*_joint",
-        ],
-        policy_output_scale=0.25,
-        obs_group_name="lower_body_policy",  # need to be the same name as the on in ObservationCfg
-        policy_path=f"{ISAACLAB_NUCLEUS_DIR}/Policies/Agile/agile_locomotion.pt",
+        joint_names=G1_29DOF_JOINT_NAMES_ISAACLAB_ORDER,
+        preserve_order=True,
+        max_joint_delta_per_step=0.05,
+        clip_to_soft_limits=True,
     )
 
 
@@ -149,7 +132,6 @@ class ObservationsCfg:
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
-    lower_body_policy: AgileTeacherPolicyObservationsCfg = AgileTeacherPolicyObservationsCfg()
 
 
 @configclass
@@ -207,48 +189,23 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 1 / 200  # 200Hz
         self.sim.render_interval = 2
 
-        # Set the URDF and mesh paths for the IK controller
-        urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
-
-        # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
-        self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
-
-        self.xr.anchor_prim_path = "/World/envs/env_0/Robot/pelvis"
+        self.xr.anchor_prim_path = "/World/envs/env_0/Robot/head_link"
         self.xr.fixed_anchor_height = True
-        # Ensure XR anchor rotation follows the robot pelvis (yaw only), with smoothing for comfort
+        # Ensure XR anchor rotation follows the robot head link, with smoothing for comfort.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
 
+        groot_zmq_device = GrootZmqDeviceCfg(
+            host="localhost",
+            port=5557,
+            topic="g1_debug",
+            source_field="last_action",
+            sim_device=self.sim.device,
+            xr_cfg=self.xr,
+        )
         self.teleop_devices = DevicesCfg(
             devices={
-                "handtracking": OpenXRDeviceCfg(
-                    retargeters=[
-                        G1TriHandUpperBodyRetargeterCfg(
-                            enable_visualization=True,
-                            # OpenXR hand tracking has 26 joints per hand
-                            num_open_xr_hand_joints=2 * 26,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                        ),
-                        G1LowerBodyStandingRetargeterCfg(
-                            sim_device=self.sim.device,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
-                "motion_controllers": OpenXRDeviceCfg(
-                    retargeters=[
-                        G1TriHandUpperBodyMotionControllerRetargeterCfg(
-                            enable_visualization=True,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                        ),
-                        G1LowerBodyStandingMotionControllerRetargeterCfg(
-                            sim_device=self.sim.device,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
+                "groot_zmq": groot_zmq_device,
+                # Backward-compatible alias for older launch commands. This no longer uses OpenXR retargeters.
+                "motion_controllers": groot_zmq_device,
             }
         )

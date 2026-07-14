@@ -178,18 +178,22 @@ def main() -> None:
         "RESET": reset_recording_instance,
     }
 
-    # For hand tracking devices, add additional callbacks
-    if args_cli.xr:
-        # Default to inactive for hand tracking
+    configured_device_cfg = None
+    if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:
+        configured_device_cfg = env_cfg.teleop_devices.devices[args_cli.teleop_device]
+
+    if configured_device_cfg is not None:
+        teleoperation_active = configured_device_cfg.teleoperation_active_default
+    elif args_cli.xr:
+        # Default to inactive for XR devices that do not declare their own startup behavior.
         teleoperation_active = False
     else:
-        # Always active for other devices
         teleoperation_active = True
 
     # Create teleop device from config if present, otherwise create manually
     teleop_interface = None
     try:
-        if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:
+        if configured_device_cfg is not None:
             teleop_interface = create_teleop_device(
                 args_cli.teleop_device, env_cfg.teleop_devices.devices, teleoperation_callbacks
             )

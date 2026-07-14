@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,7 +19,13 @@ from isaaclab.utils.io.torchscript import load_torchscript_model
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from .configs.action_cfg import AgileBasedLowerBodyActionCfg
+    from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+        AgileBasedLowerBodyActionCfg,
+        GrootWholeBodyJointTargetActionCfg,
+    )
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgileBasedLowerBodyAction(ActionTerm):
@@ -124,3 +132,88 @@ class AgileBasedLowerBodyAction(ActionTerm):
         """Apply the actions to the environment."""
         # Store the raw actions
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+
+class GrootWholeBodyJointTargetAction(ActionTerm):
+    """Track GROOT 29-DOF whole-body G1 joint targets through IsaacLab position targets."""
+
+    cfg: GrootWholeBodyJointTargetActionCfg
+    """The configuration of the action term."""
+
+    _asset: Articulation
+    """The articulation asset to which the action term is applied."""
+
+    def __init__(self, cfg: GrootWholeBodyJointTargetActionCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+
+        self._joint_ids, self._joint_names = self._asset.find_joints(
+            self.cfg.joint_names, preserve_order=self.cfg.preserve_order
+        )
+        if len(self._joint_ids) != 29:
+            raise ValueError(
+                "GrootWholeBodyJointTargetAction expects exactly 29 G1 body joints, "
+                f"but resolved {len(self._joint_ids)} joints: {self._joint_names}"
+            )
+
+        self._max_joint_delta_per_step = float(self.cfg.max_joint_delta_per_step)
+        self._raw_actions = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
+        self._processed_actions = self._raw_actions.clone()
+
+        logger.info(
+            "Resolved GROOT whole-body action joints in IsaacLab order: %s [%s]",
+            self._joint_names,
+            self._joint_ids,
+        )
+
+    @property
+    def action_dim(self) -> int:
+        """GROOT whole-body target action dimension."""
+        return len(self._joint_ids)
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        """Raw absolute joint targets received from the teleoperation device."""
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        """Joint position targets after per-step delta limiting and joint-limit clipping."""
+        return self._processed_actions
+
+    def process_actions(self, actions: torch.Tensor):
+        """Convert absolute GROOT joint targets into bounded simulation joint targets."""
+        if actions.shape[1] != self.action_dim:
+            raise ValueError(f"Expected {self.action_dim} GROOT joint targets, received {actions.shape[1]}.")
+
+        self._raw_actions[:] = actions.to(self.device)
+
+        current_joint_pos = self._asset.data.joint_pos[:, self._joint_ids]
+        target_joint_pos = torch.where(torch.isfinite(self._raw_actions), self._raw_actions, current_joint_pos)
+        joint_delta = target_joint_pos - current_joint_pos
+
+        if self._max_joint_delta_per_step > 0.0:
+            joint_delta = torch.clamp(
+                joint_delta,
+                min=-self._max_joint_delta_per_step,
+                max=self._max_joint_delta_per_step,
+            )
+
+        processed_actions = current_joint_pos + joint_delta
+
+        if self.cfg.clip_to_soft_limits:
+            joint_limits = self._asset.data.soft_joint_pos_limits[:, self._joint_ids]
+            processed_actions = torch.clamp(processed_actions, joint_limits[..., 0], joint_limits[..., 1])
+
+        self._processed_actions[:] = processed_actions
+
+    def apply_actions(self):
+        """Apply processed joint position targets to the G1 articulation."""
+        self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Reset action buffers to the articulation default joint positions."""
+        if env_ids is None:
+            env_ids = slice(None)
+        default_joint_pos = self._asset.data.default_joint_pos[env_ids][:, self._joint_ids]
+        self._raw_actions[env_ids] = default_joint_pos
+        self._processed_actions[env_ids] = default_joint_pos

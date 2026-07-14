@@ -22,6 +22,7 @@ the peripheral device.
 
 from .device_base import DeviceBase, DeviceCfg, DevicesCfg
 from .gamepad import Se2Gamepad, Se2GamepadCfg, Se3Gamepad, Se3GamepadCfg
+from .groot import GrootZmqDevice, GrootZmqDeviceCfg
 from .haply import HaplyDevice, HaplyDeviceCfg
 from .keyboard import Se2Keyboard, Se2KeyboardCfg, Se3Keyboard, Se3KeyboardCfg
 from .openxr import ManusVive, ManusViveCfg, OpenXRDevice, OpenXRDeviceCfg
