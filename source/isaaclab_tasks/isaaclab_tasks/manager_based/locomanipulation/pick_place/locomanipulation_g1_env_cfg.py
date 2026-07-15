@@ -991,11 +991,23 @@ class ActionsCfg:
             rate_limit_only_while_root_locked=_env_flag(
                 "SONIC_DEPLOY_RATE_LIMIT_ONLY_LOCKED", not SONIC_G1_FIX_ROOT
             ),
+            # 释放曲线保持原速（5 步翻倍）、不封顶：2026-07-15 闭环 A/B 实测
+            # 放缓+封顶把平衡环勒死（摔倒 6→20 次）。放电由下方 drain 排空解决。
             post_unlock_rate_limit_growth_steps=float(
-                os.environ.get("SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_GROWTH_STEPS", "20")
+                os.environ.get("SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_GROWTH_STEPS", "5")
             ),
             post_unlock_rate_limit_max_delta=float(
-                os.environ.get("SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_MAX_DELTA", "0.16")
+                os.environ.get("SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_MAX_DELTA", "0")
+            ),
+            # 解锁前锁根排空目标积压（drain-then-release）。默认关：2026-07-15
+            # 闭环 A/B 实测排空无法收敛（policy 锁根开环振荡数 rad），不优于基线。
+            unlock_drain_backlog=_env_flag("SONIC_DEPLOY_UNLOCK_DRAIN", False),
+            unlock_drain_rate_limit_rad_per_step=float(
+                os.environ.get("SONIC_DEPLOY_UNLOCK_DRAIN_RATE_LIMIT", "0.3")
+            ),
+            unlock_drain_max_steps=int(os.environ.get("SONIC_DEPLOY_UNLOCK_DRAIN_MAX_STEPS", "100")),
+            unlock_drain_backlog_epsilon=float(
+                os.environ.get("SONIC_DEPLOY_UNLOCK_DRAIN_EPSILON", "0.05")
             ),
             stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
             lock_root_z=SONIC_G1_FIX_ROOT,  # 物理模式放 Z 自由，让 PhysX settle 到正确地面高度
@@ -1003,7 +1015,7 @@ class ActionsCfg:
             # 物理模式 unlock 渐变释放（按物理步计数）。SONIC_DEPLOY_UNLOCK_BLEND_STEPS=0
             # 可做"瞬时交接"实验（最接近 MuJoCo eval 的自由根起始状态）
             unlock_blend_steps=int(
-                os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "200")
+                os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "50")
             ),
             hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
             # 摔倒自动恢复（对齐 MuJoCo base_sim.check_fall：root 高度 <0.2m 即自动

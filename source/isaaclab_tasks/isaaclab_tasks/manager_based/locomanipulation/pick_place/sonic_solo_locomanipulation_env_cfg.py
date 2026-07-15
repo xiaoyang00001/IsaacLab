@@ -170,12 +170,18 @@ def build_sonic_xr_cfg() -> XrCfg:
 
 
 def configure_sonic_physx(physx_cfg) -> None:
-    """Tune PhysX defaults for the free-root SONIC closed loop."""
+    """Tune PhysX defaults for the free-root SONIC closed loop.
+
+    ⚠️ 两个旗标默认关闭：2026-07-15 闭环实测（CPU 物理 + stabilize_root 逐子步
+    根位姿写回）开启后 settle 期 root 高度数值发散（0.76 → -324 → -1.2e6 → NaN，
+    一秒内爆炸），机器人从未站起来过。该组合源自 2026-07-06 stash（当年即未实测）。
+    仅供后续在 GPU 物理或去掉逐子步根写回的配置下重新评估时手动开启。
+    """
 
     physx_cfg.enable_external_forces_every_iteration = _main._env_flag(
-        "SONIC_PHYSX_EXTERNAL_FORCES_EVERY_ITERATION", True
+        "SONIC_PHYSX_EXTERNAL_FORCES_EVERY_ITERATION", False
     )
-    min_velocity_iterations = int(os.environ.get("SONIC_PHYSX_MIN_VELOCITY_ITERATIONS", "1"))
+    min_velocity_iterations = int(os.environ.get("SONIC_PHYSX_MIN_VELOCITY_ITERATIONS", "0"))
     physx_cfg.min_velocity_iteration_count = max(
         int(physx_cfg.min_velocity_iteration_count),
         min_velocity_iterations,

@@ -163,19 +163,43 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     ~250 ms. Set True in physics mode: the limiter still smooths the locked-phase
     convergence from default pose to the first deploy targets, then gets out of the way."""
 
-    post_unlock_rate_limit_growth_steps: float = 20.0
+    post_unlock_rate_limit_growth_steps: float = 5.0
     """Env steps per 2x target-rate-limit growth after root unlock.
 
-    A very fast release can dump the locked-phase target backlog into the
-    free-root robot and kick the torso over. This keeps the release gradual
-    while still allowing the closed loop to recover authority.
+    2026-07-15 闭环 A/B 实测：放缓释放（20）叠加 0.16 封顶会把平衡环勒死
+    （钉死占比 38%，摔倒 6→20 次）。积压放电改由 ``unlock_drain_backlog``
+    在锁根期排空解决，释放期保持原速（5 步翻倍，~1s 全开）。
     """
 
-    post_unlock_rate_limit_max_delta: float = 0.16
+    post_unlock_rate_limit_max_delta: float = 0.0
     """Maximum per-step joint-target delta during post-unlock rate-limit release.
 
-    Set <= 0 to disable the cap and eventually remove the limiter completely.
+    <=0 = 不封顶（默认）。2026-07-15 闭环 A/B 实测：0.16 永久封顶虽把放电峰值
+    2.75→0.16 rad，但软 PD 平衡靠大幅快速摆动目标（torque=kp·(target−q)），
+    封顶后 policy 追不上失衡，摔倒反增 3 倍。仅在诊断"放电脉冲"时临时启用。
     """
+
+    unlock_drain_backlog: bool = False
+    """解锁前先在锁根状态下排空目标积压（drain-then-release）。诊断工具，默认关。
+
+    动机（2026-07-15 基线实测）：摔倒自动恢复后的重新解锁会把锁根期积压随释放
+    曲线倾泻（实测单步 2.745 rad），形成摔倒级联。本机制试图在 root 仍锁定时用
+    ``unlock_drain_rate_limit_rad_per_step`` 快速追平目标后再释放。
+    ⚠️ 同日闭环 A/B 实测**无效**：锁根开环下 policy 输出本身以数 rad 振荡
+    （drain 0.3 rad/步 × 2s 后残余仍 1.1~3.6 rad），排空无法收敛，摔倒数与
+    抖动指标不优于基线（8 vs 6 摔）。保留仅供后续配合"policy 静默门控"类方案
+    再评估。"""
+
+    unlock_drain_rate_limit_rad_per_step: float = 0.30
+    """排空阶段的目标限速（rad/env步）。0.30 ≈ 15 rad/s，2.7 rad 积压约 0.2s 排完；
+    锁根状态下该速度安全（关节自身 velocity_limit 20~37 rad/s 兜底）。"""
+
+    unlock_drain_max_steps: int = 100
+    """排空阶段步数上限（env 步）。超时（deploy 目标持续快速移动追不上）也强制
+    进入释放，避免 U 键后无限等待。100 步 = 2s。"""
+
+    unlock_drain_backlog_epsilon: float = 0.05
+    """排空完成判据：max|target − processed| 低于该值（rad）即认为积压已清。"""
 
     auto_recover_on_fall: bool = True
     """摔倒自动恢复，对齐 MuJoCo 参考环境 gear_sonic/utils/mujoco_sim/base_sim.py

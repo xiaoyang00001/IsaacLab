@@ -1381,6 +1381,8 @@ class SonicDeployTargetAction(ActionTerm):
         self._settle_step_counter = 0
         self._unlock_blend_counter = 0
         self._unlock_blend_total = 0
+        self._drain_steps_remaining = 0
+        self._last_raw_target: torch.Tensor | None = None
         self._root_pose_anchor: torch.Tensor | None = None
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
@@ -1729,10 +1731,19 @@ class SonicDeployTargetAction(ActionTerm):
             )
         return target
 
-    def _apply_target_rate_limit(self, target: torch.Tensor) -> torch.Tensor:
+    def _apply_target_rate_limit(
+        self, target: torch.Tensor, max_delta_override: float | None = None
+    ) -> torch.Tensor:
         # Always clamp targets to joint limits first: a saturated/fallen policy can
         # emit 7+ rad targets and the PD would slam joints into their stops.
         target = torch.clamp(target, min=self._target_pos_lower, max=self._target_pos_upper)
+        if max_delta_override is not None:
+            # 排空（drain）等特殊阶段直接指定限速，不走解锁释放曲线、不推进其计数器。
+            delta = torch.clamp(
+                target - self._processed_actions, min=-max_delta_override, max=max_delta_override
+            )
+            self._last_target_step_delta_absmax = torch.max(torch.abs(delta), dim=-1).values
+            return self._processed_actions + delta
         max_delta = float(self.cfg.target_rate_limit_rad_per_step)
         if bool(self.cfg.rate_limit_only_while_root_locked) and (
             self._root_pose_unlocked or self._unlock_blend_total > 0
@@ -1985,6 +1996,23 @@ class SonicDeployTargetAction(ActionTerm):
             return
         if self._unlock_blend_total > 0:
             return  # already blending
+        if self._drain_steps_remaining > 0:
+            return  # already draining
+        drain_steps = int(self.cfg.unlock_drain_max_steps)
+        if bool(self.cfg.unlock_drain_backlog) and drain_steps > 0:
+            # drain-then-release：root 仍锁定，先以快限速把 processed 追到最新
+            # deploy 目标（积压 < epsilon）再开始释放。释放时刻积压 ≈ 0，锁根期
+            # 积压不会作为放电脉冲（基线实测单步 2.745 rad）踹倒自由根。
+            self._drain_steps_remaining = drain_steps
+            self._log_info(
+                f"unlock requested; draining target backlog under locked root first "
+                f"(rate={float(self.cfg.unlock_drain_rate_limit_rad_per_step):.2f} rad/step, "
+                f"max {drain_steps} steps)"
+            )
+            return
+        self._begin_unlock_release()
+
+    def _begin_unlock_release(self) -> None:
         blend = int(self.cfg.unlock_blend_steps)
         if blend > 0 and self._root_pose_anchor is not None:
             # Start blend: gradually release root velocity damping. Deploy targets
@@ -2097,10 +2125,35 @@ class SonicDeployTargetAction(ActionTerm):
             self._drain_latest_packet()
             self._processed_actions = self._apply_target_rate_limit(self._default_joint_pos.clone())
             return
+        if self._drain_steps_remaining > 0:
+            # 解锁前排空阶段：root 仍锁定，用快限速把 processed 追到最新目标。
+            # 无新包的帧继续向最近一次目标收敛（50Hz 双端偶发空帧不该停住排空）。
+            payload = self._drain_latest_packet()
+            if payload is not None:
+                target = self._extract_target(payload)
+                if target is not None:
+                    self._last_raw_target = target.clone()
+            drain_target = (
+                self._last_raw_target if self._last_raw_target is not None else self._default_joint_pos
+            )
+            self._processed_actions = self._apply_target_rate_limit(
+                drain_target.clone(),
+                max_delta_override=float(self.cfg.unlock_drain_rate_limit_rad_per_step),
+            )
+            self._drain_steps_remaining -= 1
+            backlog = float(torch.max(torch.abs(drain_target - self._processed_actions)).item())
+            if backlog <= float(self.cfg.unlock_drain_backlog_epsilon) or self._drain_steps_remaining <= 0:
+                self._drain_steps_remaining = 0
+                self._log_info(
+                    f"unlock drain complete (residual backlog {backlog:.3f} rad); releasing root"
+                )
+                self._begin_unlock_release()
+            return
         payload = self._drain_latest_packet()
         if payload is not None:
             target = self._extract_target(payload)
             if target is not None:
+                self._last_raw_target = target.clone()
                 self._processed_actions = self._apply_target_rate_limit(target)
                 if self.cfg.clip is not None:
                     self._processed_actions = torch.clamp(
@@ -2169,6 +2222,8 @@ class SonicDeployTargetAction(ActionTerm):
             self._auto_unlock_after_settle = False
             self._unlock_blend_counter = 0
             self._unlock_blend_total = 0
+            self._drain_steps_remaining = 0
+            self._last_raw_target = None
             self._settle_step_counter = 0
             self._post_unlock_steps = 0
             self._base_trans_target = None
@@ -2194,6 +2249,8 @@ class SonicDeployTargetAction(ActionTerm):
         self._auto_unlock_after_settle = False
         self._unlock_blend_counter = 0
         self._unlock_blend_total = 0
+        self._drain_steps_remaining = 0
+        self._last_raw_target = None
         self._settle_step_counter = 0
         self._post_unlock_steps = 0
         self._base_trans_target = None
