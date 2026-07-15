@@ -391,7 +391,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             ("target_only_pose_source", self._target_only_pose_source),
             ("hand_pose_source", self._hand_pose_source),
         ):
-            if source_value not in {"measured", "target", "auto"}:
+            if source_value not in {"measured", "target", "action", "auto"}:
                 raise ValueError(f"Unsupported {source_name}={source_value!r}")
         if self._write_root_state and not self._write_body_joint_state:
             print(
@@ -1048,6 +1048,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def _select_body_q(self, msg: dict[str, Any], pose_source: str | None = None) -> np.ndarray | None:
         pose_source = str(pose_source or self.cfg.zmq_pose_source).lower()
+        if pose_source == "action":
+            action = self._first_array(msg, ("last_action", "body_q_command", "joint_pos_command"))
+            return action if action is not None else self._first_array(
+                msg, ("body_q_target", "body_q_measured", "body_q")
+            )
         if pose_source == "target":
             target = self._first_array(msg, ("body_q_target", "joint_pos", "q", "dof_pos"))
             return target if target is not None else self._first_array(msg, ("body_q_measured", "body_q"))
@@ -1060,6 +1065,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def _select_body_dq(self, msg: dict[str, Any], pose_source: str | None = None) -> np.ndarray | None:
         pose_source = str(pose_source or self.cfg.zmq_pose_source).lower()
+        if pose_source == "action":
+            return self._first_array(msg, ("body_dq_command", "joint_vel_command", "body_dq_target"))
         if pose_source == "target":
             target = self._first_array(msg, ("body_dq_target", "joint_vel", "dq", "dof_vel"))
             return target if target is not None else self._first_array(msg, ("body_dq_measured", "body_dq"))

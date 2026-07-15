@@ -74,8 +74,9 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     target_only_pose_source: str | None = None
     """Pose source for joints driven through actuator targets instead of state writes.
 
-    ``None`` preserves the legacy behavior and uses :attr:`zmq_pose_source`. Set this to
-    ``"target"`` to drive physical Isaac Lab arms from GR00T/WBC targets.
+    ``None`` preserves the legacy behavior and uses :attr:`zmq_pose_source`. Use
+    ``"target"`` for reference-motion joint targets, or ``"action"`` for the final
+    scaled WBC motor position command published as ``last_action``.
     """
 
     hand_pose_source: str | None = None
