@@ -204,9 +204,18 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     auto_recover_on_fall: bool = True
     """摔倒自动恢复，对齐 MuJoCo 参考环境 gear_sonic/utils/mujoco_sim/base_sim.py
     的 check_fall()：每步检测 root 高度，低于 ``fall_root_height_m`` 即自动调
-    recover_standing()。MuJoCo 侧是 mj_resetData 全量回出生位；这里保留 XY+yaw
-    原地扶正（XR 第一视角视点连续），并按 ``auto_unlock_after_recover`` 决定
-    settle 后是否自动重新解锁。设 False 恢复纯手动（J 键）。"""
+    recover_standing()，恢复位置由 ``recover_in_place`` 决定，并按
+    ``auto_unlock_after_recover`` 决定 settle 后是否自动重新解锁。
+    设 False 恢复纯手动（J 键）。"""
+
+    recover_in_place: bool = False
+    """recover_standing() 的恢复位置。False（默认，对齐 MuJoCo mj_resetData 语义）：
+    root 回出生点位姿（default_root_state 的位置与朝向），清掉整场运行累积的
+    odom/yaw 漂移——deploy 的航位推算与参考流以初始位姿为锚，摔倒处扶正会把
+    位置/朝向偏差原封不动带回闭环，是"恢复后立即再摔"的一环。True：保留摔倒处
+    XY 与 yaw 原地扶正（XR 第一视角视点连续、不丢行走进度，2026-07-06 版行为）。
+    注意 MuJoCo 的 mj_resetData 连场景道具一起全量复位，这里只复位机器人本体；
+    要全场景重摆用 R 键（reset_scene_to_default）。"""
 
     fall_root_height_m: float = 0.2
     """摔倒判定阈值：root（pelvis）相对 env origin 的高度低于该值视为摔倒。
