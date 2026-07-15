@@ -271,25 +271,6 @@ G1_BODY_STATE_WRITE_JOINT_NAMES = [
 ]
 """Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
-# Match GR00T/MuJoCo's per-joint motor limits and reflected armatures. The
-# training-environment gains derived from a 10 Hz natural frequency are not
-# used directly here: this task receives position targets without MuJoCo/WBC
-# torque feed-forward or gravity compensation, so it needs stronger position
-# servo gains to hold the 43-DoF USD arms and dexterous hands against gravity.
-G1_ARMATURE_5020 = 0.003609725
-G1_ARMATURE_4010 = 0.00425
-
-# Position-servo gains for the current target-only Isaac arm path. These are
-# deliberately between the insufficient GR00T training gains (~14/1) and the
-# previous overly rigid uniform gains (700/32).
-G1_ARM_SHOULDER_ELBOW_STIFFNESS = 120.0
-G1_ARM_SHOULDER_ELBOW_DAMPING = 8.0
-G1_ARM_WRIST_ROLL_STIFFNESS = 80.0
-G1_ARM_WRIST_ROLL_DAMPING = 5.0
-G1_ARM_WRIST_PITCH_YAW_STIFFNESS = 40.0
-G1_ARM_WRIST_PITCH_YAW_DAMPING = 3.0
-
-
 def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
     if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", True):
         return None
@@ -434,45 +415,11 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_elbow_joint",
                 ".*_wrist_.*_joint",
             ],
-            effort_limit_sim={
-                ".*_shoulder_pitch_joint": 25.0,
-                ".*_shoulder_roll_joint": 25.0,
-                ".*_shoulder_yaw_joint": 25.0,
-                ".*_elbow_joint": 25.0,
-                ".*_wrist_roll_joint": 25.0,
-                ".*_wrist_pitch_joint": 5.0,
-                ".*_wrist_yaw_joint": 5.0,
-            },
-            velocity_limit_sim={
-                ".*_shoulder_pitch_joint": 37.0,
-                ".*_shoulder_roll_joint": 37.0,
-                ".*_shoulder_yaw_joint": 37.0,
-                ".*_elbow_joint": 37.0,
-                ".*_wrist_roll_joint": 37.0,
-                ".*_wrist_pitch_joint": 22.0,
-                ".*_wrist_yaw_joint": 22.0,
-            },
-            stiffness={
-                ".*_shoulder_.*_joint": G1_ARM_SHOULDER_ELBOW_STIFFNESS,
-                ".*_elbow_joint": G1_ARM_SHOULDER_ELBOW_STIFFNESS,
-                ".*_wrist_roll_joint": G1_ARM_WRIST_ROLL_STIFFNESS,
-                ".*_wrist_pitch_joint": G1_ARM_WRIST_PITCH_YAW_STIFFNESS,
-                ".*_wrist_yaw_joint": G1_ARM_WRIST_PITCH_YAW_STIFFNESS,
-            },
-            damping={
-                ".*_shoulder_.*_joint": G1_ARM_SHOULDER_ELBOW_DAMPING,
-                ".*_elbow_joint": G1_ARM_SHOULDER_ELBOW_DAMPING,
-                ".*_wrist_roll_joint": G1_ARM_WRIST_ROLL_DAMPING,
-                ".*_wrist_pitch_joint": G1_ARM_WRIST_PITCH_YAW_DAMPING,
-                ".*_wrist_yaw_joint": G1_ARM_WRIST_PITCH_YAW_DAMPING,
-            },
-            armature={
-                ".*_shoulder_.*_joint": G1_ARMATURE_5020,
-                ".*_elbow_joint": G1_ARMATURE_5020,
-                ".*_wrist_roll_joint": G1_ARMATURE_5020,
-                ".*_wrist_pitch_joint": G1_ARMATURE_4010,
-                ".*_wrist_yaw_joint": G1_ARMATURE_4010,
-            },
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_ARM_EFFORT_LIMIT", 80.0),
+            velocity_limit_sim=_cfg_float("ISAACLAB_G1_ARM_VELOCITY_LIMIT", 12.0),
+            stiffness=_cfg_float("ISAACLAB_G1_ARM_STIFFNESS", 600.0),
+            damping=_cfg_float("ISAACLAB_G1_ARM_DAMPING", 30.0),
+            armature=_cfg_float("ISAACLAB_G1_ARM_ARMATURE", 0.01),
         ),
         "hands": ImplicitActuatorCfg(
             joint_names_expr=[
