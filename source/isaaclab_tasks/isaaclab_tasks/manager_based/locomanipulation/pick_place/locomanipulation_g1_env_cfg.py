@@ -1035,6 +1035,9 @@ class ActionsCfg:
             auto_recover_on_fall=_env_flag("SONIC_DEPLOY_AUTO_RECOVER", ZMQ_SYNC_ROLE != "subscriber"),
             fall_root_height_m=float(os.environ.get("SONIC_DEPLOY_FALL_HEIGHT", "0.2")),
             auto_unlock_after_recover=_env_flag("SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER", True),
+            # 恢复位置默认对齐 MuJoCo mj_resetData（回出生点位姿，清 odom/yaw 漂移）；
+            # SONIC_DEPLOY_RECOVER_IN_PLACE=1 切回原地扶正（XR 视点连续，07-06 版行为）
+            recover_in_place=_env_flag("SONIC_DEPLOY_RECOVER_IN_PLACE", False),
             stale_timeout_s=0.5,
             fallback_to_last_action=True,
             fallback_to_body_q_target=True,

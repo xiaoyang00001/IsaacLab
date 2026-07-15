@@ -1997,14 +1997,17 @@ class SonicDeployTargetAction(ActionTerm):
             self._log_info("root pose unlocked by operator (instant)")
 
     def recover_standing(self) -> None:
-        """摔倒后原地恢复站立：机器人本体回直立默认姿态，重走锁根启动序列。
+        """摔倒后恢复站立：机器人本体回直立默认姿态，重走锁根启动序列。
 
         SonicSolo/SonicFullscene 场景没有恢复机器人本体的 reset 事件，
         env.reset()（R 键）若不带 reset_scene_to_default 只会复位本 term 的
         状态机——摔倒的机器人会在原地被重新锁根，站不起来。本方法直接写机器人
-        状态：保留当前 XY 与 yaw（XR 第一视角视点连续、不丢行走进度），root 回
-        默认高度、roll/pitch 归零，关节回默认站姿、速度清零；随后 reset() 重走
-        启动状态机（重新锁根 → settle）。deploy 侧无需重启：状态发布持续，
+        状态后 reset() 重走启动状态机（重新锁根 → settle）。
+
+        恢复位置按 ``cfg.recover_in_place``（默认 False = 对齐 MuJoCo
+        mj_resetData：root 回出生点位姿，清掉累积的 odom/yaw 漂移；True = 保留
+        当前 XY 与 yaw 原地扶正，XR 视点连续但漂移带回闭环）。两种模式下 root
+        高度、roll/pitch、关节、速度均回默认。deploy 侧无需重启：状态发布持续，
         settle 期间 deploy 目标被 drain，物理模式解锁前 policy 已重新看到约 1s
         的站立状态流（与冷启动序列一致）。
 
@@ -2014,10 +2017,14 @@ class SonicDeployTargetAction(ActionTerm):
         （从未解锁过）永远走手动门控。
         """
         was_unlocked = self._root_pose_unlocked or self._unlock_blend_total > 0
+        recover_in_place = bool(getattr(self.cfg, "recover_in_place", False))
         default_root_state = self._asset.data.default_root_state.clone()
         root_pos = default_root_state[:, 0:3] + self._env.scene.env_origins
-        root_pos[:, 0:2] = self._asset.data.root_pos_w[:, 0:2]
-        root_quat = self._quat_from_yaw(self._yaw_from_quat(self._asset.data.root_quat_w))
+        if recover_in_place:
+            root_pos[:, 0:2] = self._asset.data.root_pos_w[:, 0:2]
+            root_quat = self._quat_from_yaw(self._yaw_from_quat(self._asset.data.root_quat_w))
+        else:
+            root_quat = default_root_state[:, 3:7]
         self._asset.write_root_pose_to_sim(torch.cat([root_pos, root_quat], dim=-1))
         self._asset.write_root_velocity_to_sim(self._root_velocity_zero)
         self._asset.write_joint_state_to_sim(
@@ -2036,8 +2043,13 @@ class SonicDeployTargetAction(ActionTerm):
             if pending_auto_unlock
             else "press U/START to unlock"
         )
+        place_text = (
+            "root uprighted in place (kept XY+yaw)"
+            if recover_in_place
+            else "root returned to spawn pose (MuJoCo mj_resetData semantics)"
+        )
         self._log_info(
-            "recover standing: root uprighted in place (kept XY+yaw), joints reset to default; "
+            f"recover standing: {place_text}, joints reset to default; "
             f"root re-locked and settle restarted — {unlock_text}"
         )
 
@@ -2046,7 +2058,7 @@ class SonicDeployTargetAction(ActionTerm):
 
         MuJoCo 侧每个 sim step 检测 ``qpos[2] < 0.2``，命中即 mj_resetData 自动
         回初始状态、policy 继续跑，无需人工干预。这里在每个 env step（50Hz）做
-        同阈值检测，命中调 recover_standing()（原地扶正而非回出生点）。
+        同阈值检测，命中调 recover_standing()（恢复位置见 cfg.recover_in_place）。
         """
         if not bool(self.cfg.auto_recover_on_fall):
             return
