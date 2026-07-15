@@ -553,6 +553,41 @@ SONIC_G1_29DOF_CFG.actuators = {
         },
     ),
 }
+# ---------------------------------------------------------------------------
+# MuJoCo 已验证 plant 对齐开关（2026-07-15 四路源码取证，KB sim2sim 清单第①项）。
+# 取证结论：kp/kd 与 deploy policy_parameters.hpp 逐关节完全一致；deploy LowCmd
+# 的 dq_target/tau_ff 三态恒 0（g1_deploy_onnx_ref.cpp:3129-3132）——"丢 dq/tau"
+# 是伪缺口。真实差异只有下面三处，逐项可开关，A/B 用抖动 harness 验收；
+# 默认全关 = 原行为。
+#
+# 2026-07-15 闭环 A/B 实测判定（8 轮，健康段隔离指标，方差带判据）：
+# - 三开关全开（parity-all ×3 轮）：稳定性/抖动全指标趋势向好（healthy
+#   0.877~0.947 vs 基线 0.803~0.901、tilt_hf 0.593~0.829 vs 0.749~0.842），
+#   但 3v2 未完全分离——正向趋势，未过方差检验，暂不改默认。
+# - 仅 NO_ARMATURE（×2）：手臂高频恶化 2v2 分离（0.940/1.136 vs 基线
+#   0.727/0.852）——转子惯量是天然低通，单独拿掉让 policy 抖动透传，勿单开。
+# - 仅 TORQUE_PARITY（×1）：中性偏负（6 摔）。
+# 结论：要开就整包开（plant 参数彼此补偿，半套比不对齐糟），判定升级需要
+# 更低方差的协议（BVH 相位锁定/加长时窗/MuJoCo 对拍）。
+# ---------------------------------------------------------------------------
+# ① 髋 pitch/roll 力矩上限：被验证的 MuJoCo plant 钳在 ±88（g1_29dof.xml
+#    actuatorfrcrange 与 g1_29dof_gear_wbc.yaml motor_effort_limit_list 双源一致；
+#    电机换代 7520_14→7520_22 后 hpp 升到 139，但验证 plant 从未跟进）。
+#    Isaac 139 = 髋部纠偏力矩比验证 plant 大 1.6×，policy 过纠偏嫌疑。
+if _env_flag("SONIC_G1_MUJOCO_TORQUE_PARITY", False):
+    SONIC_G1_29DOF_CFG.actuators["legs"].effort_limit_sim[".*_hip_roll_joint"] = 88.0
+    SONIC_G1_29DOF_CFG.actuators["legs"].effort_limit_sim[".*_hip_pitch_joint"] = 88.0
+# ② armature：MuJoCo joint 无 armature/damping（XML 无 <default> 段，默认 0）；
+#    Isaac 带 0.0036~0.025 的转子惯量，关节加速响应比验证 plant 慢。
+if _env_flag("SONIC_G1_MUJOCO_NO_ARMATURE", False):
+    for _sonic_act in SONIC_G1_29DOF_CFG.actuators.values():
+        _sonic_act.armature = 0.0
+# ③ 关节速度钳位：MuJoCo 不钳关节速度；Isaac velocity_limit_sim 20~37 rad/s
+#    会截断软 PD policy 的快甩纠偏。
+if _env_flag("SONIC_G1_MUJOCO_NO_VEL_LIMIT", False):
+    for _sonic_act in SONIC_G1_29DOF_CFG.actuators.values():
+        _sonic_act.velocity_limit_sim = 1.0e3
+
 if SONIC_G1_VISUAL_SERVO_MODE:
     SONIC_G1_29DOF_CFG.actuators = deepcopy(G1_29DOF_CFG.actuators)
 
