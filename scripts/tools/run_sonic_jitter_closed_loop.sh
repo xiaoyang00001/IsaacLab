@@ -6,6 +6,9 @@
 # 例:
 #   scripts/tools/run_sonic_jitter_closed_loop.sh baseline
 #   scripts/tools/run_sonic_jitter_closed_loop.sh fixed /home/nolo/RAYNOS_Motion1.bvh
+#   JITTER_GUI=1 scripts/tools/run_sonic_jitter_closed_loop.sh watch -- --free_seconds 60 --hold_seconds 120
+#     （带 UI 观察：打开 Isaac 窗口并自动对准机器人；--hold_seconds 让测完后窗口
+#       继续实时推进 N 秒供肉眼观察，Ctrl+C 或关窗结束）
 #
 # 产物: /tmp/sonic_jitter/<label>.npz + isaac_<label>.log
 # 对比: python3 scripts/tools/sonic_jitter_report.py /tmp/sonic_jitter/a.npz /tmp/sonic_jitter/b.npz
@@ -16,9 +19,13 @@
 
 set -uo pipefail
 
-LABEL="${1:?用法: $0 <label> [bvh_file]}"
-BVH="${2:-/home/nolo/RAYNOS_Motion1.bvh}"
-shift; [[ $# -gt 0 ]] && shift
+LABEL="${1:?用法: $0 <label> [bvh_file] [-- runner 参数]}"
+shift
+if [[ -n "${1:-}" && "${1:-}" != "--" ]]; then
+    BVH="$1"; shift
+else
+    BVH="/home/nolo/RAYNOS_Motion1.bvh"
+fi
 [[ "${1:-}" == "--" ]] && shift
 RUNNER_EXTRA_ARGS=("$@")
 
@@ -30,6 +37,15 @@ CONDA_ENV_PREFIX="$HOME/miniconda3/envs/env_isaaclab"
 ISAAC_LOG="${OUT_DIR}/isaac_${LABEL}.log"
 OUT_NPZ="${OUT_DIR}/${LABEL}.npz"
 TOTAL_TIMEOUT_S=900
+
+# JITTER_GUI=1 = 带 Isaac 窗口跑（观察模式）。headless 去掉；DISPLAY 兜底 :0；
+# 首启 shader 编译 + 用户加长观察时间，总超时放宽。
+HEADLESS_ARGS=(--headless)
+if [[ "${JITTER_GUI:-0}" == "1" ]]; then
+    HEADLESS_ARGS=()
+    export DISPLAY="${DISPLAY:-:0}"
+    TOTAL_TIMEOUT_S=2400
+fi
 
 mkdir -p "$OUT_DIR"
 [[ -f "$BVH" ]] || { echo "✗ BVH 不存在: $BVH" >&2; exit 2; }
@@ -78,7 +94,7 @@ log "启动 IsaacLab runner → $ISAAC_LOG"
     export UNITREE_DDS_DOMAIN_ID=0
 
     exec ./isaaclab.sh -p scripts/tools/sonic_jitter_verify.py \
-        --headless --device cpu \
+        "${HEADLESS_ARGS[@]}" --device cpu \
         --out "$OUT_NPZ" \
         --kit_args "--/app/vsync=false --/app/runLoops/main/rateLimitEnabled=false" \
         "${RUNNER_EXTRA_ARGS[@]}"

@@ -65,6 +65,11 @@ parser.add_argument(
     "--warmup_packets", type=int, default=25,
     help="Deploy packets to consume before the locked recording phase starts (~0.5s at 50Hz).",
 )
+parser.add_argument(
+    "--hold_seconds", type=float, default=0.0,
+    help="After measurement, keep stepping in realtime for N seconds without recording "
+    "(GUI observation; close the window or Ctrl+C to end early).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -161,6 +166,17 @@ def main() -> int:
     joint_names = list(term._joint_names)
     env_origin_z = float(unwrapped.scene.env_origins[0, 2].item())
     step_dt = float(unwrapped.step_dt)
+
+    if unwrapped.sim.has_gui():
+        # 观察模式：把 GUI 相机摆到机器人斜前方（出生朝向 +X），对准躯干。
+        try:
+            root = asset.data.root_pos_w[0].detach().cpu().tolist()
+            eye = (root[0] + 2.6, root[1] - 2.0, root[2] + 0.9)
+            target = (root[0], root[1], root[2] + 0.15)
+            unwrapped.sim.set_camera_view(eye, target)
+            _log(f"GUI camera placed eye=({eye[0]:+.2f},{eye[1]:+.2f},{eye[2]:+.2f})")
+        except Exception as exc:
+            _log(f"GUI camera placement skipped: {exc}")
     _log(
         f"env ready; step_dt={step_dt:.4f}s joints={len(joint_ids)} "
         f"settle_steps={int(term.cfg.startup_settle_steps)} "
@@ -212,19 +228,35 @@ def main() -> int:
     # ---- 阶段 1：锁根跟随 ----
     locked_steps = max(1, int(round(args_cli.locked_seconds / step_dt)))
     for _ in range(locked_steps):
+        if not simulation_app.is_running():
+            break
         paced_step()
         recorder.record(term, asset, joint_ids, env_origin_z, phase=0)
 
     unlocked = False
-    if not args_cli.no_unlock:
+    if not args_cli.no_unlock and simulation_app.is_running():
         # ---- 阶段 2：程序化解锁 → 自由根闭环 ----
         _log("unlocking root pose (programmatic U)")
         term.unlock_root_pose()
         unlocked = True
         free_steps = max(1, int(round(args_cli.free_seconds / step_dt)))
         for _ in range(free_steps):
+            if not simulation_app.is_running():
+                break
             paced_step()
             recorder.record(term, asset, joint_ids, env_origin_z, phase=1)
+
+    if args_cli.hold_seconds > 0 and simulation_app.is_running():
+        # ---- 阶段 3（可选，GUI 观察）：继续实时推进但不记录 ----
+        _log(f"measurement done; holding {args_cli.hold_seconds:.0f}s for observation (Ctrl+C to end)")
+        hold_steps = int(round(args_cli.hold_seconds / step_dt))
+        try:
+            for _ in range(hold_steps):
+                if not simulation_app.is_running():
+                    break
+                paced_step()
+        except KeyboardInterrupt:
+            _log("observation interrupted by user")
 
     # ---- 汇总 ----
     wall = np.asarray(wall_dts[10:], dtype=np.float64)  # 掐头：首步含 JIT/加载
