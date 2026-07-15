@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SONIC 闭环抖动验证编排器：一条命令跑通 IsaacLab + proxy + deploy(BVH v1 流) 并出抖动指标。
+# SONIC 闭环抖动验证编排器：一条命令跑通 IsaacLab + proxy + deploy 并出抖动指标。
 #
 # 用法:
 #   scripts/tools/run_sonic_jitter_closed_loop.sh <label> [bvh_file] [-- 额外 runner 参数]
@@ -9,6 +9,10 @@
 #   JITTER_GUI=1 scripts/tools/run_sonic_jitter_closed_loop.sh watch -- --free_seconds 60 --hold_seconds 120
 #     （带 UI 观察：打开 Isaac 窗口并自动对准机器人；--hold_seconds 让测完后窗口
 #       继续实时推进 N 秒供肉眼观察，Ctrl+C 或关窗结束）
+#   JITTER_INPUT=keyboard scripts/tools/run_sonic_jitter_closed_loop.sh stand_a
+#     （无 BVH 输入端：deploy 走 --input-type keyboard，闭环建立后自动发 Enter
+#       启用 Planner，保持 IDLE 静态站立 —— 站立稳定性专用协议，默认
+#       locked 30s + free 120s。运动键一概不发。）
 #
 # 产物: /tmp/sonic_jitter/<label>.npz + isaac_<label>.log
 # 对比: python3 scripts/tools/sonic_jitter_report.py /tmp/sonic_jitter/a.npz /tmp/sonic_jitter/b.npz
@@ -33,6 +37,16 @@ fi
 [[ "${1:-}" == "--" ]] && shift
 RUNNER_EXTRA_ARGS=("$@")
 
+# JITTER_INPUT=keyboard：无 BVH 输入端的站立稳定性协议（deploy 键盘 Planner IDLE）。
+JITTER_INPUT="${JITTER_INPUT:-bvh}"
+case "$JITTER_INPUT" in bvh|keyboard) ;; *) echo "✗ JITTER_INPUT 只支持 bvh|keyboard" >&2; exit 2 ;; esac
+if [[ "$JITTER_INPUT" == "keyboard" ]]; then
+    # 锁根拉长到 30s：Enter 启用 Planner 落在锁根期内（planner 首次初始化最多 5s），
+    # 保证自由根测量段从头到尾都是 Planner IDLE 站立。
+    [[ " ${RUNNER_EXTRA_ARGS[*]:-} " == *" --locked_seconds"* ]] || RUNNER_EXTRA_ARGS+=(--locked_seconds 30)
+    [[ " ${RUNNER_EXTRA_ARGS[*]:-} " == *" --free_seconds"* ]] || RUNNER_EXTRA_ARGS+=(--free_seconds 120)
+fi
+
 SESSION="sonic_jitter"
 OUT_DIR="/tmp/sonic_jitter"
 ISAACLAB_ROOT="/home/nolo/xiaoyang_IssacLab/IsaacLab"
@@ -52,7 +66,9 @@ if [[ "${JITTER_GUI:-0}" == "1" ]]; then
 fi
 
 mkdir -p "$OUT_DIR"
-[[ -f "$BVH" ]] || { echo "✗ BVH 不存在: $BVH" >&2; exit 2; }
+if [[ "$JITTER_INPUT" == "bvh" ]]; then
+    [[ -f "$BVH" ]] || { echo "✗ BVH 不存在: $BVH" >&2; exit 2; }
+fi
 
 log() { printf '[jitter-orch %(%H:%M:%S)T] %s\n' -1 "$*"; }
 
@@ -127,14 +143,37 @@ wait_for_log() { # wait_for_log <file> <pattern> <timeout_s> <desc>
 
 wait_for_log "$ISAAC_LOG" "waiting for deploy packets" 600 "IsaacLab 就绪（5560 状态发布中）"
 
-# ---------- 2. 启动 sony 三窗口（input/proxy/deploy） ----------
-log "启动 sony 闭环三端 (session=$SESSION, bvh=$(basename "$BVH"))"
 LAUNCH_STAMP=$(date +%s)
-(
-    cd "$SONY_REPO"
-    SESSION="$SESSION" POSE_PROTOCOL_VERSION=1 \
-        ./scripts/launch_sonic_json_isaaclab_closed_loop.sh --no-isaaclab --replace "$BVH"
-) || { log "✗ sony launcher 失败"; exit 1; }
+PROXY_LOG=""
+DEPLOY_LOG=""
+if [[ "$JITTER_INPUT" == "keyboard" ]]; then
+    # ---------- 2K. 自建 proxy + deploy(keyboard) 两窗口（无 BVH 输入端） ----------
+    # sony launcher 把 --input-type zmq_manager 写死，键盘模式绕开它、
+    # 按 launch_sonic_local_isaaclab_closed_loop.py 的 _proxy_command/_deploy_command
+    # 原样复刻命令（参数默认值与 BVH 模式完全一致，仅 input-type 不同）。
+    PROXY_LOG="${OUT_DIR}/proxy_${LABEL}.log"
+    DEPLOY_LOG="${OUT_DIR}/deploy_${LABEL}.log"
+    rm -f "$PROXY_LOG" "$DEPLOY_LOG"
+    PROXY_BIN="${SONY_REPO}/gear_sonic_deploy/build/tools/sonic_unitree_lowstate_cpp_proxy"
+    [[ -x "$PROXY_BIN" ]] || PROXY_BIN="${SONY_REPO}/gear_sonic_deploy/prebuilt/linux-x86_64/sonic_unitree_lowstate_cpp_proxy"
+    [[ -x "$PROXY_BIN" ]] || { log "✗ 找不到 proxy 二进制（build/tools 与 prebuilt 均无）"; exit 1; }
+
+    log "启动 proxy + deploy(--input-type keyboard) (session=$SESSION)"
+    tmux new-session -d -s "$SESSION" -n proxy \
+        "cd '$SONY_REPO' && export DDS_INTERFACE=lo SDK='${SONY_REPO}/gear_sonic_deploy/thirdparty/unitree_sdk2' && export LD_LIBRARY_PATH=\"\$SDK/thirdparty/lib/\$(uname -m):\$SDK/lib/\$(uname -m):\${LD_LIBRARY_PATH:-}\" && '$PROXY_BIN' --interface \"\$DDS_INTERFACE\" --domain-id 0 --lowstate-hz 500.0 --follow-alpha 0.35 --isaac-state-endpoint tcp://127.0.0.1:5560 --isaac-state-topic sonic_state |& tee '$PROXY_LOG'; exec bash" \
+        || { log "✗ tmux proxy 窗口启动失败"; exit 1; }
+    tmux new-window -t "$SESSION" -n deploy \
+        "cd '${SONY_REPO}/gear_sonic_deploy' && export DDS_INTERFACE=lo && source scripts/setup_env.sh && just run g1_deploy_onnx_ref \"\$DDS_INTERFACE\" policy/release/model_decoder.onnx reference/example --obs-config policy/release/observation_config.yaml --encoder-file policy/release/model_encoder.onnx --planner-file planner/target_vel/V2/planner_sonic.onnx --input-type keyboard --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check |& tee '$DEPLOY_LOG'; exec bash" \
+        || { log "✗ tmux deploy 窗口启动失败"; exit 1; }
+else
+    # ---------- 2. 启动 sony 三窗口（input/proxy/deploy） ----------
+    log "启动 sony 闭环三端 (session=$SESSION, bvh=$(basename "$BVH"))"
+    (
+        cd "$SONY_REPO"
+        SESSION="$SESSION" POSE_PROTOCOL_VERSION=1 \
+            ./scripts/launch_sonic_json_isaaclab_closed_loop.sh --no-isaaclab --replace "$BVH"
+    ) || { log "✗ sony launcher 失败"; exit 1; }
+fi
 
 newest_log() { # newest_log <name>：launch 之后新建的 /tmp/sonic_local_<name>_*.log
     local f
@@ -144,7 +183,6 @@ newest_log() { # newest_log <name>：launch 之后新建的 /tmp/sonic_local_<na
 
 # ---------- 3. 等 proxy src=isaac（lowstate 链路健康） ----------
 waited=0
-PROXY_LOG=""
 while :; do
     [[ -z "$PROXY_LOG" ]] && PROXY_LOG=$(newest_log proxy)
     if [[ -n "$PROXY_LOG" ]] && grep -q "src=isaac" "$PROXY_LOG" 2>/dev/null; then
@@ -170,11 +208,37 @@ until grep -q "deploy targets flowing" "$ISAAC_LOG" 2>/dev/null; do
     fi
     if (( waited >= 240 )); then
         log "✗ deploy 目标 240s 未进入 IsaacLab；deploy 窗口尾部："
-        DEPLOY_LOG=$(newest_log deploy); [[ -n "$DEPLOY_LOG" ]] && tail -25 "$DEPLOY_LOG"
+        [[ -z "$DEPLOY_LOG" ]] && DEPLOY_LOG=$(newest_log deploy)
+        [[ -n "$DEPLOY_LOG" ]] && tail -25 "$DEPLOY_LOG"
         exit 1
     fi
 done
 log "✓ 闭环建立，进入测量阶段（锁根跟随 → 解锁自由根）"
+
+if [[ "$JITTER_INPUT" == "keyboard" ]]; then
+    # ---------- 4K. 锁根期内启用 Planner（IDLE 静态站立） ----------
+    # Enter 是开关键（再按一次切回默认键表），不能像 ']' 那样盲目重发：
+    # 发一次后按秒轮询日志最多 12s（planner 首次初始化官方口径 ≤5s），没见回显才重发。
+    log "发送 Enter 启用 Planner（保持 IDLE 站立，不发运动键）"
+    waited=0
+    until grep -q "Planner enabled" "$DEPLOY_LOG" 2>/dev/null; do
+        if grep -q "Planner not loaded" "$DEPLOY_LOG" 2>/dev/null; then
+            log "✗ deploy 报 Planner not loaded（--planner-file 缺失或路径错）"; exit 1
+        fi
+        tmux send-keys -t "${SESSION}:deploy" Enter 2>/dev/null || true
+        for _ in $(seq 12); do
+            sleep 1
+            grep -q "Planner enabled" "$DEPLOY_LOG" 2>/dev/null && break
+        done
+        waited=$((waited + 12))
+        if (( waited >= 60 )); then
+            log "✗ 60s 未见 Planner enabled；deploy 日志尾部："
+            tail -20 "$DEPLOY_LOG"
+            exit 1
+        fi
+    done
+    log "✓ Planner enabled（IDLE 站立协议就绪）"
+fi
 
 # ---------- 5. 等 runner 完成 ----------
 waited=0
