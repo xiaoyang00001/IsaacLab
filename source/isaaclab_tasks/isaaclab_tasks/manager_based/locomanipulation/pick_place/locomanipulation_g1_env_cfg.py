@@ -271,16 +271,23 @@ G1_BODY_STATE_WRITE_JOINT_NAMES = [
 ]
 """Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
-# Match the actuator model used by GR00T's G1 training configuration:
-# gear_sonic/envs/manager_env/robots/g1.py.
+# Match GR00T/MuJoCo's per-joint motor limits and reflected armatures. The
+# training-environment gains derived from a 10 Hz natural frequency are not
+# used directly here: this task receives position targets without MuJoCo/WBC
+# torque feed-forward or gravity compensation, so it needs stronger position
+# servo gains to hold the 43-DoF USD arms and dexterous hands against gravity.
 G1_ARMATURE_5020 = 0.003609725
 G1_ARMATURE_4010 = 0.00425
-G1_ARM_NATURAL_FREQ = 10.0 * 2.0 * 3.1415926535
-G1_ARM_DAMPING_RATIO = 2.0
-G1_STIFFNESS_5020 = G1_ARMATURE_5020 * G1_ARM_NATURAL_FREQ**2
-G1_STIFFNESS_4010 = G1_ARMATURE_4010 * G1_ARM_NATURAL_FREQ**2
-G1_DAMPING_5020 = 2.0 * G1_ARM_DAMPING_RATIO * G1_ARMATURE_5020 * G1_ARM_NATURAL_FREQ
-G1_DAMPING_4010 = 2.0 * G1_ARM_DAMPING_RATIO * G1_ARMATURE_4010 * G1_ARM_NATURAL_FREQ
+
+# Position-servo gains for the current target-only Isaac arm path. These are
+# deliberately between the insufficient GR00T training gains (~14/1) and the
+# previous overly rigid uniform gains (700/32).
+G1_ARM_SHOULDER_ELBOW_STIFFNESS = 120.0
+G1_ARM_SHOULDER_ELBOW_DAMPING = 8.0
+G1_ARM_WRIST_ROLL_STIFFNESS = 80.0
+G1_ARM_WRIST_ROLL_DAMPING = 5.0
+G1_ARM_WRIST_PITCH_YAW_STIFFNESS = 40.0
+G1_ARM_WRIST_PITCH_YAW_DAMPING = 3.0
 
 
 def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
@@ -446,18 +453,18 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_wrist_yaw_joint": 22.0,
             },
             stiffness={
-                ".*_shoulder_.*_joint": G1_STIFFNESS_5020,
-                ".*_elbow_joint": G1_STIFFNESS_5020,
-                ".*_wrist_roll_joint": G1_STIFFNESS_5020,
-                ".*_wrist_pitch_joint": G1_STIFFNESS_4010,
-                ".*_wrist_yaw_joint": G1_STIFFNESS_4010,
+                ".*_shoulder_.*_joint": G1_ARM_SHOULDER_ELBOW_STIFFNESS,
+                ".*_elbow_joint": G1_ARM_SHOULDER_ELBOW_STIFFNESS,
+                ".*_wrist_roll_joint": G1_ARM_WRIST_ROLL_STIFFNESS,
+                ".*_wrist_pitch_joint": G1_ARM_WRIST_PITCH_YAW_STIFFNESS,
+                ".*_wrist_yaw_joint": G1_ARM_WRIST_PITCH_YAW_STIFFNESS,
             },
             damping={
-                ".*_shoulder_.*_joint": G1_DAMPING_5020,
-                ".*_elbow_joint": G1_DAMPING_5020,
-                ".*_wrist_roll_joint": G1_DAMPING_5020,
-                ".*_wrist_pitch_joint": G1_DAMPING_4010,
-                ".*_wrist_yaw_joint": G1_DAMPING_4010,
+                ".*_shoulder_.*_joint": G1_ARM_SHOULDER_ELBOW_DAMPING,
+                ".*_elbow_joint": G1_ARM_SHOULDER_ELBOW_DAMPING,
+                ".*_wrist_roll_joint": G1_ARM_WRIST_ROLL_DAMPING,
+                ".*_wrist_pitch_joint": G1_ARM_WRIST_PITCH_YAW_DAMPING,
+                ".*_wrist_yaw_joint": G1_ARM_WRIST_PITCH_YAW_DAMPING,
             },
             armature={
                 ".*_shoulder_.*_joint": G1_ARMATURE_5020,
