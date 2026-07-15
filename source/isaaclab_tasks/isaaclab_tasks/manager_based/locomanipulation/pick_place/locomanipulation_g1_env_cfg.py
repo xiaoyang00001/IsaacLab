@@ -208,7 +208,10 @@ def _robot_name(robot_id: int) -> str:
 
 
 GRASP_BOX_USD_PATH = Path(__file__).resolve().parent / "assets/grasp_box.usda"
-GRASP_BOX_INITIAL_POS = (0.0, 0.5, 0.8216)
+# The packing-table asset top was at world z=0.6996 when the table was spawned
+# at z=-0.3. The table now spawns at z=0, so its top is at z=0.9996. Place the
+# 0.24 m tall box 2 mm above that surface.
+GRASP_BOX_INITIAL_POS = (0.0, 0.5, 1.1216)
 
 
 def _grasp_box_cfg(prim_name: str) -> RigidObjectCfg:
