@@ -18,6 +18,10 @@
 # deploy 在无 lowstate 时进 CONTROL 会输出 NaN last_action（v3 必现，v1 也别赌）。
 
 set -uo pipefail
+# 作业控制：让后台 runner 子 shell 自成进程组（组长 pid = $!），cleanup 才能
+# kill -- -PID 整组回收。非交互 shell 默认关闭作业控制，后台任务与脚本同组，
+# 只杀 $! 会把 isaaclab.sh 之下的 python 泄漏成孤儿（抱死 5560 端口，实测踩过）。
+set -m
 
 LABEL="${1:?用法: $0 <label> [bvh_file] [-- runner 参数]}"
 shift
@@ -64,10 +68,12 @@ RUNNER_PID=""
 cleanup() {
     local status=$?
     if [[ -n "$RUNNER_PID" ]] && kill -0 "$RUNNER_PID" 2>/dev/null; then
-        log "清理: 终止 IsaacLab runner (pid $RUNNER_PID)"
-        kill "$RUNNER_PID" 2>/dev/null
+        log "清理: 终止 IsaacLab runner 进程组 (pgid $RUNNER_PID)"
+        # RUNNER_PID 是 setsid 出来的组长：负号杀整组，确保 isaaclab.sh 之下的
+        # python 子进程一并退出（只杀组长会泄漏 python 抱死 5560 端口）。
+        kill -- -"$RUNNER_PID" 2>/dev/null
         sleep 5
-        kill -9 "$RUNNER_PID" 2>/dev/null || true
+        kill -9 -- -"$RUNNER_PID" 2>/dev/null || true
     fi
     tmux kill-session -t "$SESSION" 2>/dev/null || true
     exit $status
@@ -99,7 +105,7 @@ log "启动 IsaacLab runner → $ISAAC_LOG"
         --kit_args "--/app/vsync=false --/app/runLoops/main/rateLimitEnabled=false" \
         "${RUNNER_EXTRA_ARGS[@]}"
 ) &> "$ISAAC_LOG" &
-RUNNER_PID=$!
+RUNNER_PID=$!   # set -m 下 = 该后台作业的进程组长
 
 wait_for_log() { # wait_for_log <file> <pattern> <timeout_s> <desc>
     local file="$1" pattern="$2" timeout="$3" desc="$4" waited=0

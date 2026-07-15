@@ -142,6 +142,26 @@ def _phase_report(data: dict, phase: int) -> dict:
         "fall_frac": float(fallen.mean()),
     }
 
+    # 健康段隔离：抖动指标与摔倒次数强相关（摔倒/恢复段抬高一切高频量），
+    # 剔除 tilt≥20° 或 z≤0.6 的失稳段及其前后 0.5s，才是"正常闭环时抖不抖"。
+    # 摔倒运气用 fall/healthy_frac 单独衡量，两者不再互相污染。
+    unstable = (tilt >= 20.0) | (root_z <= 0.6)
+    padded = np.convolve(unstable.astype(int), np.ones(51), "same") > 0
+    healthy = ~padded
+    report["healthy"] = {"frac": float(healthy.mean()), "steps": int(healthy.sum())}
+    if healthy.sum() >= 100:
+        for group, idx in groups.items():
+            if len(idx) == 0:
+                continue
+            qg = q[:, idx].astype(np.float64)
+            tgt = target[:, idx].astype(np.float64)
+            hf = (qg - _moving_average(qg, 5))[healthy]
+            hf_t = (tgt - _moving_average(tgt, 5))[healthy]
+            report["healthy"][f"{group}_hf_rms_deg"] = float(np.sqrt(np.mean(hf**2)) * RAD2DEG)
+            report["healthy"][f"{group}_target_hf_rms_deg"] = float(np.sqrt(np.mean(hf_t**2)) * RAD2DEG)
+        tilt_hf = (tilt - _moving_average(tilt, 5))[healthy]
+        report["healthy"]["tilt_hf_rms_deg"] = float(np.sqrt(np.mean(tilt_hf**2)))
+
     if len(wall_t) > 3:
         dts = np.diff(wall_t)
         hz = 1.0 / np.clip(dts, 1e-6, None)
@@ -200,6 +220,11 @@ def print_single(report: dict) -> None:
 def print_compare(a: dict, b: dict) -> None:
     print(f"\n=== A/B 对比 ===\nA(基线) = {a['path']}\nB(修复) = {b['path']}")
     key_metrics = [
+        ("free.healthy.frac", "自由根·健康段占比（高=好）", None),
+        ("free.healthy.arms_hf_rms_deg", "健康段·手臂高频抖幅 RMS(deg)", True),
+        ("free.healthy.waist_hf_rms_deg", "健康段·腰高频抖幅 RMS(deg)", True),
+        ("free.healthy.legs_hf_rms_deg", "健康段·腿高频抖幅 RMS(deg)", True),
+        ("free.healthy.tilt_hf_rms_deg", "健康段·倾角高频 RMS(deg)", True),
         ("free.arms.hf_rms_deg", "自由根·手臂高频抖幅 RMS(deg)", True),
         ("free.arms.hf_p95_deg", "自由根·手臂高频抖幅 P95(deg)", True),
         ("free.arms.target_hf_rms_deg", "自由根·目标侧高频(deg)（源头对照）", True),
