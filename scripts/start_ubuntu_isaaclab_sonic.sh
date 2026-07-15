@@ -58,6 +58,13 @@ Options:
   --xr                       Source CloudXR env, ensure OpenXR runtime, then pass
                              --xr and --teleop_device handtracking to IsaacLab.
   --xr-view first|third      SONIC_XR_VIEW. Default: first.
+  --xr-runtime steamvr|cloudxr
+                             OpenXR runtime used by --xr. Default: steamvr.
+                             steamvr: Isaac Sim -> SteamVR -> NOLO driver -> PICO
+                                      (SteamVR must already be running; see below)
+                             cloudxr: Isaac Sim -> CloudXR runtime -> WebXR/WebRTC
+                                      (auto-starts the runtime unless --no-cloudxr-autostart)
+                             The CloudXR flags below only apply to --xr-runtime cloudxr.
   --cloudxr-install-dir PATH CloudXR install directory. Default: ~/.cloudxr.
   --cloudxr-env PATH         CloudXR env file sourced before IsaacLab when --xr is set.
                              Default: <cloudxr-install-dir>/run/cloudxr.env.
@@ -279,6 +286,33 @@ prepare_cloudxr_for_xr() {
     log "TELEOP_PROXY_HOST: ${TELEOP_PROXY_HOST}, TELEOP_STREAM_SERVER_IP: ${TELEOP_STREAM_SERVER_IP}"
 }
 
+# SteamVR 作为 OpenXR runtime（默认通路）：
+#   Isaac Sim -> SteamVR -> NOLO driver -> PICO 无线串流
+# Kit 只在进程启动时读一次 XR_RUNTIME_JSON，且该环境变量优先级高于
+# ~/.config/openxr/1/active_runtime.json。SteamVR 必须已在运行——vrclient.so
+# 要连 vrserver，没起来就建不了 OpenXR 会话（--xr 视口黑屏）。
+# KB: NVIDIA/CloudXR-OpenXR/NOLO-XRLink-SteamVR-driver部署实战.md
+prepare_steamvr_for_xr() {
+    local manifest="${STEAMVR_XR_JSON:-${HOME}/.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json}"
+
+    [[ -f "${manifest}" ]] || die "SteamVR OpenXR manifest not found: ${manifest} (SteamVR installed?)"
+    export XR_RUNTIME_JSON="${manifest}"
+
+    if ! pgrep -x vrserver >/dev/null 2>&1; then
+        if (( dry_run )); then
+            log "SteamVR: not running (dry-run; start it before IsaacLab)"
+        else
+            die "SteamVR (vrserver) is not running; --xr would black-screen. Start it with:
+    env -u http_proxy -u https_proxy -u all_proxy DISPLAY=:0 setsid /usr/games/steam steam://run/250820
+  (must go through steam:// so it runs inside the sniper container; bare vrstartup crashes)"
+        fi
+    else
+        log "SteamVR runtime: ready (vrserver pid $(pgrep -x vrserver | head -1))"
+    fi
+
+    log "XR_RUNTIME_JSON: ${XR_RUNTIME_JSON}"
+}
+
 deploy_ip=""
 local_ip=""
 machine_a_ip=""
@@ -300,6 +334,7 @@ stabilize_root="1"
 auto_recover="1"
 target_rate_limit="0.04"
 xr_view="first"
+xr_runtime="steamvr"
 cloudxr_install_dir="${HOME}/.cloudxr"
 cloudxr_env=""
 cloudxr_python="$(default_cloudxr_python)"
@@ -424,6 +459,11 @@ while [[ $# -gt 0 ]]; do
             xr_view="$2"
             shift 2
             ;;
+        --xr-runtime)
+            need_value "$1" "${2-}"
+            xr_runtime="$2"
+            shift 2
+            ;;
         --cloudxr-install-dir)
             need_value "$1" "${2-}"
             cloudxr_install_dir="$2"
@@ -515,7 +555,11 @@ isaaclab_sh="${isaaclab_root}/isaaclab.sh"
 [[ -x "${isaaclab_sh}" ]] || die "isaaclab.sh is not executable: ${isaaclab_sh}"
 
 if (( xr )); then
-    prepare_cloudxr_for_xr
+    case "${xr_runtime}" in
+        steamvr) prepare_steamvr_for_xr ;;
+        cloudxr) prepare_cloudxr_for_xr ;;
+        *)       die "--xr-runtime must be steamvr or cloudxr (got: ${xr_runtime})" ;;
+    esac
 fi
 
 export ISAACLAB_MACHINE_A_IP="${machine_a_ip}"
