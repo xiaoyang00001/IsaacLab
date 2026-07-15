@@ -570,31 +570,35 @@ SONIC_G1_29DOF_CFG.actuators = {
 # 的 dq_target/tau_ff 三态恒 0（g1_deploy_onnx_ref.cpp:3129-3132）——"丢 dq/tau"
 # 是伪缺口。真实差异只有下面三处。
 #
-# 2026-07-15 闭环 A/B 判定（12 轮，健康段隔离指标，方差带判据）：
-# - 30s 短窗 ×8：整包开 3 轮趋势向好未分离（BVH 循环 18.5s，30s 窗只盖 1.6 圈，
-#   相位方差淹没效应）；⚠️单开 NO_ARMATURE 手臂高频恶化 2v2 分离（转子惯量是
-#   天然低通，单独拿掉让 policy 抖动透传）；单开 TORQUE_PARITY 中性偏负。
-# - 120s 长窗 ×4（6.5 圈，相位平均）：整包开 vs 基线四抖动指标全部 2v2 分离——
-#   手臂高频 −16.7%（0.685/0.721 vs 0.739/0.949）、腰 −18.3%（1.107/1.117 vs
-#   1.230/1.491）、腿 −6.6%、tilt −4.8%，且轮间离散度大幅收窄；摔倒未分离。
-# 结论：**整包对齐默认开启**（上身抖动实质改善，plant 参数彼此补偿勿单开单关；
-# 设 SONIC_G1_MUJOCO_*=0 可逐项回退到旧行为做对照）。
+# 2026-07-15 闭环 A/B 判定（12 轮 BVH + 4 轮键盘站立，健康段隔离指标，方差带判据）：
+# - BVH 120s 长窗 ×4：整包开 vs 基线四抖动指标 2v2 分离（手臂高频 −16.7%、
+#   腰 −18.3%）——但该结论**不迁移到站立**，见下。
+#   30s 短窗 ×8 补充：⚠️单开 NO_ARMATURE 手臂高频恶化 2v2 分离（转子惯量是
+#   天然低通）；单开 TORQUE_PARITY 中性偏负——拆包依然禁止。
+# - **键盘 Planner IDLE 站立 120s ×4（JITTER_INPUT=keyboard，无 BVH 输入）翻案**：
+#   整包开站不住——xy 漂移 {6.0, 13.4}m vs 关 {0.19, 0.48}m（差 12~70 倍）、
+#   tilt 均值 {2.88, 3.32}° vs {1.05, 1.63}°，两指标 2v2 完全分离；站立下手臂
+#   高频反而更差（0.16~0.24 vs 0.08~0.15）。机器人靠不停踏步纠偏缓慢游走，
+#   与用户实测"容易摔、没感到消抖"一致。BVH 轮的"改善"是跟随目标主导的
+#   测量偏置，不是平衡质量变好。
+# 结论：**整包对齐默认关闭**（2026-07-15 站立协议判定为稳定性回归并回退；
+# 设 SONIC_G1_MUJOCO_*=1 可逐项开启复现取证/对照实验）。
 # ---------------------------------------------------------------------------
 # ① 髋 pitch/roll 力矩上限：被验证的 MuJoCo plant 钳在 ±88（g1_29dof.xml
 #    actuatorfrcrange 与 g1_29dof_gear_wbc.yaml motor_effort_limit_list 双源一致；
 #    电机换代 7520_14→7520_22 后 hpp 升到 139，但验证 plant 从未跟进）。
 #    Isaac 139 = 髋部纠偏力矩比验证 plant 大 1.6×，policy 过纠偏嫌疑。
-if _env_flag("SONIC_G1_MUJOCO_TORQUE_PARITY", True):
+if _env_flag("SONIC_G1_MUJOCO_TORQUE_PARITY", False):
     SONIC_G1_29DOF_CFG.actuators["legs"].effort_limit_sim[".*_hip_roll_joint"] = 88.0
     SONIC_G1_29DOF_CFG.actuators["legs"].effort_limit_sim[".*_hip_pitch_joint"] = 88.0
 # ② armature：MuJoCo joint 无 armature/damping（XML 无 <default> 段，默认 0）；
 #    Isaac 带 0.0036~0.025 的转子惯量，关节加速响应比验证 plant 慢。
-if _env_flag("SONIC_G1_MUJOCO_NO_ARMATURE", True):
+if _env_flag("SONIC_G1_MUJOCO_NO_ARMATURE", False):
     for _sonic_act in SONIC_G1_29DOF_CFG.actuators.values():
         _sonic_act.armature = 0.0
 # ③ 关节速度钳位：MuJoCo 不钳关节速度；Isaac velocity_limit_sim 20~37 rad/s
 #    会截断软 PD policy 的快甩纠偏。
-if _env_flag("SONIC_G1_MUJOCO_NO_VEL_LIMIT", True):
+if _env_flag("SONIC_G1_MUJOCO_NO_VEL_LIMIT", False):
     for _sonic_act in SONIC_G1_29DOF_CFG.actuators.values():
         _sonic_act.velocity_limit_sim = 1.0e3
 
