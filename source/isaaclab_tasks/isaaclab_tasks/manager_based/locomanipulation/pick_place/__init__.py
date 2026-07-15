@@ -9,7 +9,14 @@
 import gymnasium as gym
 import os
 
-from . import agents, fixed_base_upper_body_ik_g1_env_cfg, locomanipulation_g1_env_cfg
+from . import agents, fixed_base_upper_body_ik_g1_env_cfg, groot_wbc_closed_loop_env_cfg, locomanipulation_g1_env_cfg
+
+gym.register(
+    id="Isaac-G1-GR00T-WBC-ClosedLoop-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={"env_cfg_entry_point": groot_wbc_closed_loop_env_cfg.GrootWbcClosedLoopEnvCfg},
+    disable_env_checker=True,
+)
 
 gym.register(
     id="Isaac-PickPlace-Locomanipulation-G1-Abs-v0",
