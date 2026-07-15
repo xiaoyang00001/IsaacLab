@@ -1741,14 +1741,19 @@ class SonicDeployTargetAction(ActionTerm):
             # deploy has no slew limiter), but an instant bypass discharges the
             # backlog accumulated under the locked-phase limit in one step (observed
             # 1.8 rad snap that kicked the robot over at realtime). Release the limit
-            # exponentially instead: double the allowed step every 5 env steps,
-            # starting at unlock (blend included), fully open after ~1 s.
+            # exponentially instead: double the allowed step over a configurable
+            # number of env steps, starting at unlock (blend included). Keep an
+            # optional cap so the locked-phase backlog cannot kick the free root.
             self._post_unlock_steps += 1
             # Cap the exponent: the counter keeps running for the rest of the episode
             # and float pow overflows at 2**1024 (OverflowError ~102 s after unlock).
-            exponent = min(float(self._post_unlock_steps) / 5.0, 64.0)
+            growth_steps = max(float(self.cfg.post_unlock_rate_limit_growth_steps), 1.0)
+            exponent = min(float(self._post_unlock_steps) / growth_steps, 64.0)
             max_delta = max_delta * (2.0 ** exponent)
-            if max_delta >= 50.0:
+            max_release_delta = float(self.cfg.post_unlock_rate_limit_max_delta)
+            if max_release_delta > 0.0:
+                max_delta = min(max_delta, max_release_delta)
+            elif max_delta >= 50.0:
                 max_delta = 0.0
         if max_delta <= 0.0:
             self._last_target_step_delta_absmax = torch.max(

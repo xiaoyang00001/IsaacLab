@@ -169,6 +169,19 @@ def build_sonic_xr_cfg() -> XrCfg:
     )
 
 
+def configure_sonic_physx(physx_cfg) -> None:
+    """Tune PhysX defaults for the free-root SONIC closed loop."""
+
+    physx_cfg.enable_external_forces_every_iteration = _main._env_flag(
+        "SONIC_PHYSX_EXTERNAL_FORCES_EVERY_ITERATION", True
+    )
+    min_velocity_iterations = int(os.environ.get("SONIC_PHYSX_MIN_VELOCITY_ITERATIONS", "1"))
+    physx_cfg.min_velocity_iteration_count = max(
+        int(physx_cfg.min_velocity_iteration_count),
+        min_velocity_iterations,
+    )
+
+
 @configclass
 class SonicSoloSceneCfg(InteractiveSceneCfg):
     """极简场景：1 台 SONIC G1 + 地面 + 天光。"""
@@ -276,6 +289,7 @@ class SonicSoloLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 3600.0
         self.sim.dt = 1 / 200
         self.sim.render_interval = 4  # 每 env 步渲染一次（时序均匀），勿设 >decimation
+        configure_sonic_physx(self.sim.physx)
 
         # XR 视角锚点：按 SONIC_XR_VIEW 环境变量选 first（头部第一视角，默认）
         # 或 third（pelvis 第三视角），配方细节与真机标定注意事项见

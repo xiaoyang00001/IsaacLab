@@ -163,6 +163,20 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     ~250 ms. Set True in physics mode: the limiter still smooths the locked-phase
     convergence from default pose to the first deploy targets, then gets out of the way."""
 
+    post_unlock_rate_limit_growth_steps: float = 20.0
+    """Env steps per 2x target-rate-limit growth after root unlock.
+
+    A very fast release can dump the locked-phase target backlog into the
+    free-root robot and kick the torso over. This keeps the release gradual
+    while still allowing the closed loop to recover authority.
+    """
+
+    post_unlock_rate_limit_max_delta: float = 0.16
+    """Maximum per-step joint-target delta during post-unlock rate-limit release.
+
+    Set <= 0 to disable the cap and eventually remove the limiter completely.
+    """
+
     auto_recover_on_fall: bool = True
     """摔倒自动恢复，对齐 MuJoCo 参考环境 gear_sonic/utils/mujoco_sim/base_sim.py
     的 check_fall()：每步检测 root 高度，低于 ``fall_root_height_m`` 即自动调

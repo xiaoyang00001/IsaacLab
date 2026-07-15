@@ -57,6 +57,7 @@ from .sonic_solo_locomanipulation_env_cfg import (
     SonicSoloObservationsCfg,
     SonicSoloTerminationsCfg,
     build_sonic_xr_cfg,
+    configure_sonic_physx,
 )
 
 # 传送带按需加载（带体物理 + 流水箱子 + 箱子对齐/驱动事件）。
@@ -342,6 +343,7 @@ class SonicFullsceneLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 3600.0
         self.sim.dt = 1 / 200
         self.sim.render_interval = 4  # 每 env 步渲染一次（时序均匀），勿设 >decimation
+        configure_sonic_physx(self.sim.physx)
 
         # XR 视角锚点：与 SonicSolo 共用 build_sonic_xr_cfg（sonic_robot 在两个
         # 场景里是同一个 SONIC_G1_29DOF_CFG，prim_path 同为

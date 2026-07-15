@@ -991,13 +991,19 @@ class ActionsCfg:
             rate_limit_only_while_root_locked=_env_flag(
                 "SONIC_DEPLOY_RATE_LIMIT_ONLY_LOCKED", not SONIC_G1_FIX_ROOT
             ),
+            post_unlock_rate_limit_growth_steps=float(
+                os.environ.get("SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_GROWTH_STEPS", "20")
+            ),
+            post_unlock_rate_limit_max_delta=float(
+                os.environ.get("SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_MAX_DELTA", "0.16")
+            ),
             stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
             lock_root_z=SONIC_G1_FIX_ROOT,  # 物理模式放 Z 自由，让 PhysX settle 到正确地面高度
             startup_settle_steps=0 if SONIC_G1_FIX_ROOT else 50,  # 物理模式先 settle 再跟 deploy target
             # 物理模式 unlock 渐变释放（按物理步计数）。SONIC_DEPLOY_UNLOCK_BLEND_STEPS=0
             # 可做"瞬时交接"实验（最接近 MuJoCo eval 的自由根起始状态）
             unlock_blend_steps=int(
-                os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "50")
+                os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "200")
             ),
             hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
             # 摔倒自动恢复（对齐 MuJoCo base_sim.check_fall：root 高度 <0.2m 即自动
