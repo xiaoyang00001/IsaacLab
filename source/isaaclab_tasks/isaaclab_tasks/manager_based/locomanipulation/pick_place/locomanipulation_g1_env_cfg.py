@@ -6,29 +6,19 @@
 import re
 from pathlib import Path
 
-import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
-from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
 
-from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
-    G1GripperSyncActionCfg,
-    MuJoCoG1MirrorActionCfg,
-)
-from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import MuJoCoG1MirrorActionCfg
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 _ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -241,29 +231,13 @@ def _ubuntu_sender_ip(robot_id: int, default: str) -> str:
     return _cfg_value(f"UBUNTU_ROBOT_{robot_id}_SENDER_IP", _cfg_value(f"G1_{robot_id}_SENDER_IP", default))
 
 
-def _windows_isaaclab_ip(robot_id: int, default: str) -> str:
-    return _cfg_value(
-        f"WINDOWS_ROBOT_{robot_id}_ISAACLAB_IP",
-        _cfg_value(f"ISAACLAB_G1_{robot_id}_HOST_IP", default),
-    )
-
-
 def _robot_name(robot_id: int) -> str:
     return f"robot_{robot_id}"
 
 
-def _robot_prim_name(robot_id: int) -> str:
-    return f"Robot_{robot_id}"
-
-
-def _peer_robot_id(robot_id: int) -> int:
-    return 2 if robot_id == 1 else 1
-
-
 def _grasp_object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
-    if ZMQ_SYNC_ROLE == "subscriber":
-        return sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
     return sim_utils.RigidBodyPropertiesCfg(
+        kinematic_enabled=False,
         disable_gravity=False,
         linear_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_LINEAR_DAMPING", 0.05),
         angular_damping=_cfg_float("ISAACLAB_GRASP_OBJECT_ANGULAR_DAMPING", 5.0),
@@ -283,7 +257,7 @@ GRASP_BOX_SIZE = (
 )
 GRASP_BOX_X = _cfg_float("ISAACLAB_GRASP_BOX_X", 0)
 GRASP_BOX_Y = _cfg_float("ISAACLAB_GRASP_BOX_Y", 0)
-GRASP_BOX_GROUND_Z = _cfg_float("ISAACLAB_GRASP_BOX_GROUND_Z", 0.0)
+PACKING_TABLE_TOP_Z = _cfg_float("ISAACLAB_PACKING_TABLE_TOP_Z", 0.6996)
 GRASP_BOX_VERTICAL_GAP = _cfg_float("ISAACLAB_GRASP_BOX_VERTICAL_GAP", 0.002)
 
 
@@ -291,7 +265,10 @@ def _grasp_box_position(stack_index: int) -> list[float]:
     return [
         GRASP_BOX_X,
         GRASP_BOX_Y,
-        GRASP_BOX_GROUND_Z + 0.5 * GRASP_BOX_SIZE[2] + stack_index * (GRASP_BOX_SIZE[2] + GRASP_BOX_VERTICAL_GAP),
+        PACKING_TABLE_TOP_Z
+        + 0.5 * GRASP_BOX_SIZE[2]
+        + GRASP_BOX_VERTICAL_GAP
+        + stack_index * (GRASP_BOX_SIZE[2] + GRASP_BOX_VERTICAL_GAP),
     ]
 
 
@@ -329,22 +306,6 @@ def _grasp_box_cfg(prim_name: str, stack_index: int) -> RigidObjectCfg:
         ),
     )
 
-
-ISAACLAB_LOCAL_ROBOT_ID = 2 if _cfg_int("ISAACLAB_LOCAL_ROBOT_ID", 1) == 2 else 1
-ISAACLAB_PEER_ROBOT_ID = _peer_robot_id(ISAACLAB_LOCAL_ROBOT_ID)
-ISAACLAB_LOCAL_ROBOT_NAME = _robot_name(ISAACLAB_LOCAL_ROBOT_ID)
-ISAACLAB_PEER_ROBOT_NAME = _robot_name(ISAACLAB_PEER_ROBOT_ID)
-_object_sync_role = _cfg_value("ISAACLAB_OBJECT_SYNC_ROLE", "auto").strip().lower()
-if _object_sync_role == "auto":
-    ZMQ_SYNC_ROLE = "publisher" if ISAACLAB_LOCAL_ROBOT_ID == 1 else "subscriber"
-elif _object_sync_role in {"publisher", "subscriber", "none"}:
-    ZMQ_SYNC_ROLE = _object_sync_role
-else:
-    ZMQ_SYNC_ROLE = "publisher"
-ZMQ_SYNC_ENDPOINT = _cfg_value(
-    "ISAACLAB_OBJECT_SYNC_ENDPOINT",
-    f"tcp://{_windows_isaaclab_ip(1, '127.0.0.1')}:15555",
-)
 
 ##
 # Scene definition
@@ -557,6 +518,8 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
         ),
     },
 )
+
+
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """Scene configuration for locomanipulation environment with G1 robot.
@@ -576,15 +539,6 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    object = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-0.35, 0.45, 0.6996], rot=[1, 0, 0, 0]),
-        spawn=UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
-            scale=(0.75, 0.75, 0.75),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-        ),
-    )
     # 本地仓库背景
     # background = AssetBaseCfg(
     #     prim_path="/World/envs/env_.*/Background",
@@ -593,21 +547,12 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
     #     ),
     # )
-    # Humanoid robots from the GR00T sim2sim viewer asset.
-    # ID 1 stays at the simulation origin; ID 2 is shifted on +Y to avoid overlap.
+    # Single humanoid from the GR00T sim2sim viewer asset.
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 0.0, 0.78)),
     )
-    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 1.5, 0.78)),
-    )
     test_box = _grasp_box_cfg("TestBox", 0)
-    test_box_2 = _grasp_box_cfg("TestBox_2", 1)
-    test_box_3 = _grasp_box_cfg("TestBox_3", 2)
-    test_box_4 = _grasp_box_cfg("TestBox_4", 3)
-    test_box_5 = _grasp_box_cfg("TestBox_5", 4)
 
     # Ground plane
     ground = AssetBaseCfg(
@@ -634,6 +579,9 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         zmq_port=_isaac_robot_cfg_int(robot_id, "ZMQ_PORT", default_body_port),
         zmq_topic=_isaac_robot_cfg(robot_id, "ZMQ_TOPIC", f"g1_{robot_id}_debug"),
         zmq_pose_source=_isaac_robot_cfg(robot_id, "POSE_SOURCE", "target"),
+        state_write_pose_source=_isaac_robot_cfg(robot_id, "STATE_WRITE_POSE_SOURCE", "measured"),
+        target_only_pose_source=_isaac_robot_cfg(robot_id, "TARGET_ONLY_POSE_SOURCE", "target"),
+        hand_pose_source=_isaac_robot_cfg(robot_id, "HAND_POSE_SOURCE", "target"),
         root_zmq_host=_ubuntu_sender_ip(
             robot_id,
             _isaac_robot_cfg(
@@ -676,7 +624,7 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
             "BODY_STATE_WRITE_JOINT_NAMES",
             G1_BODY_STATE_WRITE_JOINT_NAMES,
         ),
-        mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", False),
+        mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", True),
         controller_gripper_enabled=_isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
         controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
@@ -692,75 +640,9 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
 
 @configclass
 class ActionsCfg:
-    """Action specifications for the MDP."""
+    """Single-G1 GR00T/MuJoCo mirror with physical Isaac Lab arms and hands."""
 
-    # Body/root streams are mirrored independently for both robot IDs.
     mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
-    mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
-    local_gripper = G1GripperSyncActionCfg(
-        asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
-        mode="local_publish",
-        robot_id=ISAACLAB_LOCAL_ROBOT_ID,
-        transport=_cfg_value("ISAACLAB_G1_GRIPPER_TRANSPORT", "zmq"),
-        zmq_host=_isaac_robot_cfg(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_HOST",
-            _windows_isaaclab_ip(ISAACLAB_LOCAL_ROBOT_ID, "127.0.0.1"),
-        ),
-        zmq_port=_isaac_robot_cfg_int(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_PORT",
-            5571 if ISAACLAB_LOCAL_ROBOT_ID == 1 else 5572,
-        ),
-        zmq_topic=_isaac_robot_cfg(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_TOPIC",
-            f"g1_{ISAACLAB_LOCAL_ROBOT_ID}_gripper",
-        ),
-        timeout=_cfg_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
-        controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
-        controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
-        controller_gripper_thumb_1_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_1_ANGLE", 1.1),
-        controller_gripper_thumb_2_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_2_ANGLE", 1.8),
-        controller_gripper_action_alpha=_cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 1.0),
-        controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
-        write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
-        target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
-        publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
-        debug_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_DEBUG_INTERVAL_S", 0.0),
-    )
-    remote_gripper = G1GripperSyncActionCfg(
-        asset_name=ISAACLAB_PEER_ROBOT_NAME,
-        mode="remote_subscribe",
-        robot_id=ISAACLAB_PEER_ROBOT_ID,
-        transport=_cfg_value("ISAACLAB_G1_GRIPPER_TRANSPORT", "zmq"),
-        zmq_host=_isaac_robot_cfg(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_HOST",
-            _windows_isaaclab_ip(ISAACLAB_PEER_ROBOT_ID, "127.0.0.1"),
-        ),
-        zmq_port=_isaac_robot_cfg_int(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_PORT",
-            5571 if ISAACLAB_PEER_ROBOT_ID == 1 else 5572,
-        ),
-        zmq_topic=_isaac_robot_cfg(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_TOPIC",
-            f"g1_{ISAACLAB_PEER_ROBOT_ID}_gripper",
-        ),
-        timeout=_cfg_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
-        controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
-        write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
-        target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
-        publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
-        debug_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_DEBUG_INTERVAL_S", 0.0),
-    )
-    object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_2 = ZmqObjectSyncActionCfg(asset_name="test_box_2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_3 = ZmqObjectSyncActionCfg(asset_name="test_box_3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_4 = ZmqObjectSyncActionCfg(asset_name="test_box_4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_5 = ZmqObjectSyncActionCfg(asset_name="test_box_5", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
 
 
 @configclass
@@ -771,20 +653,10 @@ class ObservationsCfg:
     so no ``policy`` observation group is registered.
     """
 
+
 @configclass
 class TerminationsCfg:
-    """Termination terms for the MDP."""
-
-    # time_out = DoneTerm(func=locomanip_mdp.time_out, time_out=True)
-
-    # object_dropping = DoneTerm(
-    #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
-    # )
-
-    # success = DoneTerm(
-    #     func=manip_mdp.task_done_pick_place,
-    #     params={"task_link_name": "right_wrist_yaw_link", "robot_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
-    # )
+    """No automatic episode termination for the live single-G1 test scene."""
 
 
 ##
@@ -839,9 +711,8 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_heap_capacity = 2**24
         self.sim.physx.gpu_temp_buffer_capacity = 2**22
 
-        local_robot_prim = _robot_prim_name(ISAACLAB_LOCAL_ROBOT_ID)
-        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
-        self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
+        self.xr.anchor_prim_path = "/World/envs/env_0/Robot_1/head_link"
+        self.xr.anchor_rotation_prim_path = "/World/envs/env_0/Robot_1/pelvis"
         self.xr.fixed_anchor_height = False
         # Anchor XR to the robot head position, but use the pelvis as the stable robot yaw reference.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
@@ -855,12 +726,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.teleop_devices = DevicesCfg(
             devices={
                 "motion_controllers": OpenXRDeviceCfg(
-                    retargeters=[
-                        G1GripperMotionControllerRetargeterCfg(
-                            sim_device=teleop_device,
-                            use_right_b_button=False,
-                        ),
-                    ],
+                    retargeters=[],
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),
