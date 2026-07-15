@@ -16,6 +16,7 @@ from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -172,6 +173,15 @@ ENABLE_WALKER_ROBOT = _env_flag("LOCIMANIP_ENABLE_WALKER_ROBOT", False) and SONI
 # mirror/gripper 动作项随之下线；设 LOCOMANIP_SONIC_REPLACE_ROBOT1=0 恢复原
 # Robot_1（GR00T 43dof 镜像），SONICRobot 退回南侧 8m 行走通道出生点。
 SONIC_REPLACE_ROBOT1 = _env_flag("LOCOMANIP_SONIC_REPLACE_ROBOT1", True)
+# 对端镜像机开关：LOCOMANIP_ENABLE_ROBOT2=0 时 Robot_2（43dof）连同其镜像流/
+# 夹爪同步整链下线。每台 G1 articulation 约腰斩 env_hz（PhysX 关节解算与它动不动
+# 无关），SONIC 闭环单机调试给不出实时余量时先关它；默认 1 保持双机遥操行为不变。
+ENABLE_ROBOT2 = _env_flag("LOCOMANIP_ENABLE_ROBOT2", True)
+
+
+def _robot_asset_present(robot_id: int) -> bool:
+    """镜像机器人实体是否在场（robot_1 被 SONIC 顶替 / robot_2 被开关下线时缺席）。"""
+    return ENABLE_ROBOT2 if robot_id == 2 else not SONIC_REPLACE_ROBOT1
 print(
     "[locomanip_cfg] "
     f"SONIC_G1_FIX_ROOT={SONIC_G1_FIX_ROOT} "
@@ -180,6 +190,7 @@ print(
     f"SONIC_G1_SELF_COLLISIONS={SONIC_G1_SELF_COLLISIONS} "
     f"ENABLE_WALKER_ROBOT={ENABLE_WALKER_ROBOT} "
     f"SONIC_REPLACE_ROBOT1={SONIC_REPLACE_ROBOT1} "
+    f"ENABLE_ROBOT2={ENABLE_ROBOT2} "
     f"legacy_SONIC_G1_FIX_ROOT_env={os.environ.get('SONIC_G1_FIX_ROOT', '<unset>')!r}"
 )
 
@@ -758,10 +769,13 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         robot_1 = G1_43DOF_GR00T_CFG.replace(
             prim_path="/World/envs/env_.*/Robot_1",
         )
-    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
-    )
+    # LOCOMANIP_ENABLE_ROBOT2=0 时对端镜像机下线（SONIC 闭环单机调试省一台 G1 的
+    # PhysX 解算，见模块顶部开关注释）
+    if ENABLE_ROBOT2:
+        robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+            prim_path="/World/envs/env_.*/Robot_2",
+            init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
+        )
 
     # SONIC deploy 驱动的 G1（29dof，训练同款 PD/armature）。
     # 默认（LOCOMANIP_SONIC_REPLACE_ROBOT1=1）顶替原 Robot_1 站 banyun 工位
@@ -806,9 +820,19 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
 
     # Ground plane
+    # 高摩擦地面 μ=1.0/combine=max，对齐 MuJoCo deploy 参考环境（与 SonicSolo/
+    # SonicFullscene 一致）。默认 GroundPlaneCfg 是 μ=0.5/average，SONIC 物理
+    # 行走时脚底摩擦减半，蹬地/侧移打滑。
     ground = AssetBaseCfg(
         prim_path="/World/GroundPlane",
-        spawn=GroundPlaneCfg(),
+        spawn=GroundPlaneCfg(
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+                friction_combine_mode="max",
+            ),
+        ),
     )
 
     # Lights
@@ -860,36 +884,38 @@ class ActionsCfg:
             mirror_hands=False,
             controller_gripper_enabled=False,
         )
-    mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
-        asset_name="robot_2",
-        transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
-        zmq_host=_ubuntu_sender_ip(2, _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
-        zmq_port=_isaac_robot_env_int(2, "ZMQ_PORT", 5567),
-        zmq_topic=_isaac_robot_env(2, "ZMQ_TOPIC", "g1_2_debug"),
-        root_zmq_host=_ubuntu_sender_ip(
-            2,
-            _isaac_robot_env(2, "ROOT_ZMQ_HOST", _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
-        ),
-        root_zmq_port=_isaac_robot_env_int(2, "ROOT_ZMQ_PORT", 5568),
-        root_zmq_topic=_isaac_robot_env(2, "ROOT_ZMQ_TOPIC", "g1_2_root"),
-        udp_bind_host=_isaac_robot_env(2, "UDP_BIND_HOST", "0.0.0.0"),
-        udp_port=_isaac_robot_env_int(2, "UDP_PORT", 5567),
-        udp_topic=_isaac_robot_env(2, "UDP_TOPIC", "g1_2_debug"),
-        udp_rcvbuf=_isaac_robot_env_int(2, "UDP_RCVBUF", 262144),
-        root_udp_bind_host=_isaac_robot_env(2, "ROOT_UDP_BIND_HOST", "0.0.0.0"),
-        root_udp_port=_isaac_robot_env_int(2, "ROOT_UDP_PORT", 5568),
-        root_udp_topic=_isaac_robot_env(2, "ROOT_UDP_TOPIC", "g1_2_root"),
-        root_udp_rcvbuf=_isaac_robot_env_int(2, "ROOT_UDP_RCVBUF", 262144),
-        root_motion_mode="source",
-        root_zmq_required=True,
-        root_position_mode="relative",
-        mirror_hands=False,
-        controller_gripper_enabled=False,
-    )
-    # gripper 同步只对在场的镜像机器人挂载：默认开关下 robot_1 已被 SONIC 29dof
-    # 顶替，既无手指关节也不存在同名实体，挂上即在 asset 解析阶段崩溃；
-    # LOCOMANIP_SONIC_REPLACE_ROBOT1=0 时 robot_1 在场，两项照旧全挂。
-    if ISAACLAB_LOCAL_ROBOT_ID == 2 or not SONIC_REPLACE_ROBOT1:
+    # Robot_2 的镜像流随开关一并下线（实体不在场时挂载即在 asset 解析阶段崩溃）
+    if ENABLE_ROBOT2:
+        mujoco_g1_mirror_2 = MuJoCoG1MirrorActionCfg(
+            asset_name="robot_2",
+            transport=os.environ.get("ISAACLAB_G1_TRANSPORT", "zmq"),
+            zmq_host=_ubuntu_sender_ip(2, _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
+            zmq_port=_isaac_robot_env_int(2, "ZMQ_PORT", 5567),
+            zmq_topic=_isaac_robot_env(2, "ZMQ_TOPIC", "g1_2_debug"),
+            root_zmq_host=_ubuntu_sender_ip(
+                2,
+                _isaac_robot_env(2, "ROOT_ZMQ_HOST", _isaac_robot_env(2, "ZMQ_HOST", "192.168.10.231")),
+            ),
+            root_zmq_port=_isaac_robot_env_int(2, "ROOT_ZMQ_PORT", 5568),
+            root_zmq_topic=_isaac_robot_env(2, "ROOT_ZMQ_TOPIC", "g1_2_root"),
+            udp_bind_host=_isaac_robot_env(2, "UDP_BIND_HOST", "0.0.0.0"),
+            udp_port=_isaac_robot_env_int(2, "UDP_PORT", 5567),
+            udp_topic=_isaac_robot_env(2, "UDP_TOPIC", "g1_2_debug"),
+            udp_rcvbuf=_isaac_robot_env_int(2, "UDP_RCVBUF", 262144),
+            root_udp_bind_host=_isaac_robot_env(2, "ROOT_UDP_BIND_HOST", "0.0.0.0"),
+            root_udp_port=_isaac_robot_env_int(2, "ROOT_UDP_PORT", 5568),
+            root_udp_topic=_isaac_robot_env(2, "ROOT_UDP_TOPIC", "g1_2_root"),
+            root_udp_rcvbuf=_isaac_robot_env_int(2, "ROOT_UDP_RCVBUF", 262144),
+            root_motion_mode="source",
+            root_zmq_required=True,
+            root_position_mode="relative",
+            mirror_hands=False,
+            controller_gripper_enabled=False,
+        )
+    # gripper 同步只对在场的镜像机器人挂载：robot_1 被 SONIC 顶替、或 robot_2 被
+    # LOCOMANIP_ENABLE_ROBOT2=0 下线时，实体缺席，挂上即在 asset 解析阶段崩溃；
+    # 在场判定统一走 _robot_asset_present。
+    if _robot_asset_present(ISAACLAB_LOCAL_ROBOT_ID):
         local_gripper = G1GripperSyncActionCfg(
             asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
             mode="local_publish",
@@ -918,7 +944,7 @@ class ActionsCfg:
             controller_gripper_use_soft_limits=False,
             write_joint_state=True,
         )
-    if ISAACLAB_PEER_ROBOT_ID == 2 or not SONIC_REPLACE_ROBOT1:
+    if _robot_asset_present(ISAACLAB_PEER_ROBOT_ID):
         remote_gripper = G1GripperSyncActionCfg(
             asset_name=ISAACLAB_PEER_ROBOT_NAME,
             mode="remote_subscribe",
@@ -1112,16 +1138,46 @@ class TerminationsCfg:
     # )
 
     # 默认开关下本机 ID=1 的主角机器人从 robot_1 换成 sonic_robot（29dof 同样有
-    # right_wrist_yaw_link）；ID=2 侧或 LOCOMANIP_SONIC_REPLACE_ROBOT1=0 时照旧
+    # right_wrist_yaw_link）；本机镜像机器人缺席（被 SONIC 顶替或被
+    # LOCOMANIP_ENABLE_ROBOT2=0 下线）时同样回退 sonic_robot，避免解析崩溃
     success = DoneTerm(
         func=manip_mdp.task_done_pick_place,
         params={
             "task_link_name": "right_wrist_yaw_link",
             "robot_cfg": SceneEntityCfg(
-                "sonic_robot"
-                if ISAACLAB_LOCAL_ROBOT_ID == 1 and SONIC_REPLACE_ROBOT1
-                else ISAACLAB_LOCAL_ROBOT_NAME
+                ISAACLAB_LOCAL_ROBOT_NAME
+                if _robot_asset_present(ISAACLAB_LOCAL_ROBOT_ID)
+                else "sonic_robot"
             ),
+        },
+    )
+
+
+@configclass
+class EventsCfg:
+    """事件配置：默认场景复位 + 仓库地砖摩擦补绑。"""
+
+    # 基类默认 events=DefaultEventManagerCfg() 仅含此项；本类顶替默认后必须
+    # 自带，否则 env.reset() 不再恢复实体姿态（Articulation.reset() 只清
+    # buffer 不写位姿，见 SonicSolo 同名注释）。
+    reset_scene_to_default = EventTerm(func=base_mdp.reset_scene_to_default, mode="reset")
+
+    # warehouse-simple6_v48.usd 的 SM_floor* 地砖有碰撞体但未绑物理材质
+    # （PhysX 默认 μ=0.5/average），与 μ=1.0/max 的 GroundPlane 在 z=0 共面
+    # 叠放；SONIC 工位 (-3.8, 19.008) 脚下正是 SM_floor32——接触分配到哪块
+    # 摩擦就跟谁，蹬地/侧移随机打滑。prestartup 按名字补绑对齐（配方同
+    # SonicFullscene 的 bind_warehouse_floor_friction，那边地板是
+    # CollisionPlane/CollisionMesh 两条固定路径，这边是 24 块引用地砖故按名匹配）。
+    bind_warehouse_floor_friction = EventTerm(
+        func=locomanip_mdp.bind_floor_physics_material,
+        mode="prestartup",
+        params={
+            "prim_path_templates": (),
+            "prim_name_regex": r"^SM_floor\d",
+            "static_friction": 1.0,
+            "dynamic_friction": 1.0,
+            "restitution": 0.0,
+            "friction_combine_mode": "max",
         },
     )
 
@@ -1142,12 +1198,17 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
     """
 
     # Scene settings
-    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
+    # replicate_physics=False：EventsCfg 的 prestartup 地砖摩擦补绑要写 USD，
+    # 框架要求关闭场景复制（teleop 恒 num_envs=1，无复制收益，同 SonicSolo）。
+    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(
+        num_envs=1, env_spacing=2.5, replicate_physics=False
+    )
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands = None
     terminations: TerminationsCfg = TerminationsCfg()
+    events: EventsCfg = EventsCfg()
 
     # Unused managers
     rewards = None
@@ -1166,7 +1227,10 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 20.0
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
-        self.sim.render_interval = 2
+        # 每 env 步渲染一次（=50Hz，同 SonicSolo，勿设 >decimation）。原值 2 是
+        # 100Hz 渲染目标，XR 下渲染整个 warehouse 直接把 env_hz 拖离 SONIC
+        # 闭环要求的墙钟 50Hz 实时线。
+        self.sim.render_interval = 4
         # The default Isaac Lab GPU PhysX buffers target large batched training scenes.
         # This task is a single-env XR mirror, so smaller buffers avoid VRAM exhaustion on 8 GB GPUs.
         self.sim.physx.gpu_max_rigid_contact_count = 2**22
@@ -1178,9 +1242,10 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_heap_capacity = 2**26
         self.sim.physx.gpu_temp_buffer_capacity = 2**24
 
-        if ISAACLAB_LOCAL_ROBOT_ID == 1 and SONIC_REPLACE_ROBOT1:
-            # Robot_1 已由 SONICRobot 顶替。29dof g1.usd 的 head_link 嵌套在
-            # torso_link 下（GR00T 43dof 是根下 head_link，抄错会静默失效）
+        if not _robot_asset_present(ISAACLAB_LOCAL_ROBOT_ID):
+            # 本机镜像机器人缺席（Robot_1 被 SONICRobot 顶替，或 Robot_2 被
+            # LOCOMANIP_ENABLE_ROBOT2=0 下线）→ 锚到 SONICRobot。29dof g1.usd 的
+            # head_link 嵌套在 torso_link 下（GR00T 43dof 是根下 head_link，抄错会静默失效）
             self.xr.anchor_prim_path = "/World/envs/env_0/SONICRobot/torso_link/head_link"
             self.xr.anchor_rotation_prim_path = "/World/envs/env_0/SONICRobot/pelvis"
         else:

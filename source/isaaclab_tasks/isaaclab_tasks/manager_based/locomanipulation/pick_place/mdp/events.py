@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from typing import TYPE_CHECKING
 
 import torch
@@ -1257,6 +1258,8 @@ def bind_floor_physics_material(
         "/World/envs/env_{}/Background/GroundPlane/CollisionPlane",
         "/World/envs/env_{}/Background/GroundPlane/CollisionMesh",
     ),
+    prim_name_regex: str | None = None,
+    search_root_template: str = "/World/envs/env_{}/Background",
     material_prim_path: str = "/World/PhysicsMaterials/SonicFloorMaterial",
     static_friction: float = 1.0,
     dynamic_friction: float = 1.0,
@@ -1270,6 +1273,11 @@ def bind_floor_physics_material(
     μ=1.0/max 的 GroundPlane 在 z=0 完全共面——脚底接触分配到哪块碰撞体，摩擦就跟谁，
     蹬地/侧移工况会随机打滑（闭环七条件之一即显式 μ=1.0，solo 场景无此叠层问题）。
     prestartup 一次性补绑，使所有共面地板摩擦一致。
+
+    地板 prim 两种指定方式（可并用）：``prim_path_templates`` 逐条路径（warehouse.usd
+    只有两块碰撞体）；``prim_name_regex`` 在 ``search_root_template`` 子树内按名字匹配
+    （warehouse-simple6 系列是 24 块 ``SM_floor*`` 引用地砖，路径随版本变动，按名匹配
+    不脆）。绑定经 apply_nested 下探到引用内部的实际碰撞体。
     """
     stage = get_current_stage()
     if stage is None:
@@ -1287,9 +1295,30 @@ def bind_floor_physics_material(
     if not stage.GetPrimAtPath(material_prim_path).IsValid():
         material_cfg.func(material_prim_path, material_cfg)
 
+    name_pattern = re.compile(prim_name_regex) if prim_name_regex else None
+
     for env_id in env_ids.tolist():
-        for template in prim_path_templates:
-            prim_path = template.format(env_id)
+        prim_paths = [template.format(env_id) for template in prim_path_templates]
+        if name_pattern is not None:
+            search_root = stage.GetPrimAtPath(search_root_template.format(env_id))
+            if search_root and search_root.IsValid():
+                matched = [
+                    prim.GetPath().pathString
+                    for prim in Usd.PrimRange(search_root)
+                    if name_pattern.match(prim.GetName())
+                ]
+                if not matched:
+                    _diag_print(
+                        f"[locomanip_event] bind_floor_physics_material: no prim matches "
+                        f"{prim_name_regex!r} under {search_root.GetPath()}"
+                    )
+                prim_paths.extend(matched)
+            else:
+                _diag_print(
+                    "[locomanip_event] bind_floor_physics_material: search root not found: "
+                    f"{search_root_template.format(env_id)}"
+                )
+        for prim_path in prim_paths:
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
                 _diag_print(f"[locomanip_event] bind_floor_physics_material: prim not found: {prim_path}")
