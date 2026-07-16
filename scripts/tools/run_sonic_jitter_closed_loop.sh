@@ -282,9 +282,20 @@ log "运行目录: $RUN_DIR"
 log "manifest: $MANIFEST_JSON"
 
 # ---------- 前置检查：不打别人的进程 ----------
-if pgrep -f "g1_deploy_onnx_ref" >/dev/null 2>&1; then
+# 不用 pgrep -f：当矩阵 CLI 自身携带 --deploy-bin .../g1_deploy_onnx_ref*
+# 时会把父进程命令行误判成 deploy。只检查 /proc/<pid>/exe 的真实可执行文件。
+EXTERNAL_DEPLOY_PIDS=()
+for process_exe in /proc/[0-9]*/exe; do
+    process_target="$(readlink -f -- "$process_exe" 2>/dev/null || true)"
+    [[ -n "$process_target" ]] || continue
+    if [[ "$(basename -- "$process_target")" == g1_deploy_onnx_ref* ]]; then
+        process_pid="${process_exe#/proc/}"
+        EXTERNAL_DEPLOY_PIDS+=("${process_pid%/exe}")
+    fi
+done
+if (( ${#EXTERNAL_DEPLOY_PIDS[@]} > 0 )); then
     echo "✗ 检测到本编排器之外的 g1_deploy_onnx_ref 进程在跑，拒绝启动（避免误杀/端口冲突）" >&2
-    pgrep -af "g1_deploy_onnx_ref" >&2
+    ps -o pid=,etime=,cmd= -p "$(IFS=,; echo "${EXTERNAL_DEPLOY_PIDS[*]}")" >&2 || true
     exit 2
 fi
 if tmux has-session -t "=$SESSION" 2>/dev/null; then
