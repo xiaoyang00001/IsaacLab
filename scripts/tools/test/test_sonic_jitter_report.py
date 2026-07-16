@@ -234,6 +234,31 @@ class TestSonicJitterReport(unittest.TestCase):
         self.assertEqual(coverage["packet_coverage"], 1.0)
         self.assertEqual(coverage["max_packet_jump"], 2)
 
+    def test_latest_only_conflation_is_diagnostic_not_invalid_when_stream_is_fresh(self):
+        length = 200
+        source = np.arange(length, dtype=np.int64)
+        received = np.arange(length, dtype=np.int64) - (
+            np.arange(length, dtype=np.int64) // 20
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "conflated_latest.npz"
+            synthetic_npz(
+                path,
+                length=length,
+                packets=received,
+                packet_count=received,
+                valid_target_count=received,
+                source_index=source,
+                target_age_s=np.full(length, 0.020, dtype=np.float64),
+            )
+            coverage = report.load_report(path)["free"]["coverage"]
+
+        self.assertFalse(coverage["invalid"])
+        self.assertGreater(coverage["packet_coverage"], 0.90)
+        self.assertLess(coverage["packet_coverage"], 0.98)
+        self.assertLessEqual(coverage["max_update_gap_s"], 0.041)
+
     def test_run_level_paired_effect(self):
         a = [
             {"free": {"healthy": {"arms_hf_rms_deg": 2.0}}},

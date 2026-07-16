@@ -64,7 +64,10 @@ GROUPS = {
 
 DEFAULT_GATE = {
     "min_update_coverage": 0.80,
-    "min_packet_coverage": 0.98,
+    # The receiver intentionally uses ZMQ CONFLATE/latest-only semantics. Small
+    # source-index jumps are a throughput/fidelity measurement, not a broken run,
+    # as long as fresh updates, max gap, and target age remain healthy.
+    "min_packet_coverage": 0.80,
     "max_update_gap_s": 0.10,
     "max_target_age_s": 0.10,
     "max_stale_fraction": 0.02,

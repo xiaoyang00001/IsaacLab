@@ -597,7 +597,9 @@ def build_summary(results_path: pathlib.Path) -> dict:
             and design_validation["position_balanced"]
             and all_candidates_complete
         )
-        if complete_balanced and all_statistically_confirmed:
+        if len(candidate_summaries) < 2:
+            confidence = "single_candidate_only"
+        elif complete_balanced and all_statistically_confirmed:
             confidence = "confirmed"
         elif complete_balanced and expected_per_candidate >= 4 and all_directional:
             confidence = "balanced_directional_evidence"
