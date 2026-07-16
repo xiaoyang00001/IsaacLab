@@ -2221,8 +2221,50 @@ class SonicDeployTargetAction(ActionTerm):
             )
 
     def apply_actions(self):
+        if self._substep_consume_ready():
+            # 子步消费（200Hz）：deploy tick 与 env step 异步，包可能落在子步之间；
+            # 稳态直通条件下即时吃掉，砍掉 0~20ms 的相位抽签（#8 回灌延迟治理）。
+            payload = self._drain_latest_packet()
+            if payload is not None:
+                target = self._extract_target(payload)
+                if target is not None:
+                    self._last_raw_target = target.clone()
+                    target = torch.clamp(target, min=self._target_pos_lower, max=self._target_pos_upper)
+                    if self.cfg.clip is not None:
+                        target = torch.clamp(target, min=self._clip[:, :, 0], max=self._clip[:, :, 1])
+                    delta = torch.max(torch.abs(target - self._processed_actions), dim=-1).values
+                    # step_delta 语义保持"每 env 步内应用增量的 absmax"：子步更新取 max 累积。
+                    self._last_target_step_delta_absmax = torch.maximum(
+                        self._last_target_step_delta_absmax, delta
+                    )
+                    self._processed_actions = target
         self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
         self._stabilize_root_pose()
+
+    def _substep_consume_ready(self) -> bool:
+        """子步消费仅在稳态直通下启用：任何仍受限速/过渡语义约束的阶段都退回 50Hz 消费。"""
+        if not bool(getattr(self.cfg, "substep_consume", False)):
+            return False
+        if not self._root_pose_unlocked or self._unlock_blend_total > 0:
+            return False
+        if self._drain_steps_remaining > 0 or bool(self.cfg.hold_after_unlock):
+            return False
+        if self._settle_step_counter < int(self.cfg.startup_settle_steps):
+            return False
+        return self._steady_rate_limit_unbounded()
+
+    def _steady_rate_limit_unbounded(self) -> bool:
+        """复算 _apply_target_rate_limit 的稳态判定（不推进计数器）：True=限速已放开直通。"""
+        base = float(self.cfg.target_rate_limit_rad_per_step)
+        if not bool(self.cfg.rate_limit_only_while_root_locked):
+            return base <= 0.0
+        if float(self.cfg.post_unlock_rate_limit_max_delta) > 0.0:
+            return False
+        if base <= 0.0:
+            return True
+        growth_steps = max(float(self.cfg.post_unlock_rate_limit_growth_steps), 1.0)
+        exponent = min(float(self._post_unlock_steps) / growth_steps, 64.0)
+        return base * (2.0**exponent) >= 50.0
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:

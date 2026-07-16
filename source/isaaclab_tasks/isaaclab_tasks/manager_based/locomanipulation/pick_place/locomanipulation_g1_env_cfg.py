@@ -1063,6 +1063,9 @@ class ActionsCfg:
             post_unlock_rate_limit_max_delta=float(
                 os.environ.get("SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_MAX_DELTA", "0")
             ),
+            # 子步消费（200Hz 捞 deploy 包，#8 回灌延迟治理）：稳态直通下砍掉
+            # 动作通路 0~20ms 相位抽签。默认关，站立协议 A/B 验证后再转正。
+            substep_consume=_env_flag("SONIC_DEPLOY_SUBSTEP_CONSUME", False),
             # 解锁前锁根排空目标积压（drain-then-release）。默认关：2026-07-15
             # 闭环 A/B 实测排空无法收敛（policy 锁根开环振荡数 rad），不优于基线。
             unlock_drain_backlog=_env_flag("SONIC_DEPLOY_UNLOCK_DRAIN", False),

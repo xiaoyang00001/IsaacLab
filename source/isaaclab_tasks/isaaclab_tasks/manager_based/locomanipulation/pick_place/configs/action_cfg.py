@@ -179,6 +179,17 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     封顶后 policy 追不上失衡，摔倒反增 3 倍。仅在诊断"放电脉冲"时临时启用。
     """
 
+    substep_consume: bool = False
+    """稳态自由根下在物理子步（200Hz）也捞取 deploy 目标包并即时更新目标。
+
+    动机（2026-07-16 对拍#8 取证）：deploy tick 与 env step 是两个异步 50Hz 环，
+    process_actions 每 env 步只取一次包 → 动作通路 0~20ms 相位抽签；双录互相关
+    实测回灌环路延迟 ~45ms（MuJoCo 全链 ~3-5ms），Isaac 站立在踝/髋出现 3.4Hz
+    延迟诱发共振（显著度 500+ vs MuJoCo 40-70）。子步消费把动作消费粒度提到
+    200Hz，平均砍 ~8ms 且消除相位抖动。
+    仅在"稳态直通"条件下生效（root 已解锁、blend 完成、无排空、限速已放开到
+    直通），锁根/settle/drain 等阶段语义完全不变。默认关，A/B 验证后再转正。"""
+
     unlock_drain_backlog: bool = False
     """解锁前先在锁根状态下排空目标积压（drain-then-release）。诊断工具，默认关。
 
