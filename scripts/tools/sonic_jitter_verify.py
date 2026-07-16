@@ -150,6 +150,15 @@ parser.add_argument(
     help="Optional run manifest JSON object; loaded verbatim into meta['run_manifest'].",
 )
 parser.add_argument(
+    "--runtime_manifest",
+    type=str,
+    default="",
+    help=(
+        "Optional runtime component sidecar. It is created after proxy/deploy startup "
+        "and loaded when the NPZ metadata is finalized."
+    ),
+)
+parser.add_argument(
     "--status_file",
     "--status-file",
     dest="status_file",
@@ -192,6 +201,34 @@ if args_cli.run_manifest:
         parser.error(
             f"--run_manifest must contain a JSON object, got {type(_RUN_MANIFEST).__name__}"
         )
+_RUNTIME_MANIFEST_PATH = (
+    os.path.abspath(os.path.expanduser(args_cli.runtime_manifest))
+    if args_cli.runtime_manifest
+    else ""
+)
+
+
+def _load_runtime_manifest() -> dict:
+    if not _RUNTIME_MANIFEST_PATH:
+        return {}
+    try:
+        with open(_RUNTIME_MANIFEST_PATH, encoding="utf-8") as runtime_file:
+            payload = json.load(runtime_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "schema_version": 1,
+            "valid": False,
+            "reasons": [f"runtime_manifest_unreadable={exc}"],
+        }
+    if not isinstance(payload, dict):
+        return {
+            "schema_version": 1,
+            "valid": False,
+            "reasons": [
+                f"runtime_manifest_not_object={type(payload).__name__}"
+            ],
+        }
+    return payload
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -481,6 +518,8 @@ def main() -> int:
             "target_gate": target_gate,
             "run_manifest_path": _RUN_MANIFEST_PATH,
             "run_manifest": _RUN_MANIFEST,
+            "runtime_manifest_path": _RUNTIME_MANIFEST_PATH,
+            "runtime_components": _load_runtime_manifest(),
             "gr00t_43dof_import_asset": gr00t_43dof_import_asset,
             "scene_robot_asset": scene_robot_asset,
             "argv": list(sys.argv),

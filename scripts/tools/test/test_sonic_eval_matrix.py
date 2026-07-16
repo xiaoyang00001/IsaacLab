@@ -8,14 +8,18 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from scripts.tools import run_sonic_eval_matrix as matrix
 from scripts.tools import sonic_eval_matrix_report as matrix_report
+from scripts.tools import sonic_run_manifest as run_manifest
 
 
 class TestSonicEvalMatrix(unittest.TestCase):
@@ -373,12 +377,214 @@ class TestSonicEvalMatrix(unittest.TestCase):
             self.assertEqual(snapshot_a, snapshot_b)
             self.assertEqual(snapshot_a.read_bytes(), b"same deploy binary")
             self.assertEqual(snapshot_a.stat().st_mode & 0o222, 0)
+            self.assertTrue(snapshot_a.name.startswith("g1_deploy_onnx_ref-"))
             self.assertEqual(
                 definitions["a"]["deploy_binary_source"]["realpath"],
                 str(source_a.resolve()),
             )
             snapshot_a.chmod(0o755)
             snapshot_a.parent.chmod(0o755)
+
+    @staticmethod
+    def _component_contract_args(*, input_mode: str, protocol: int) -> SimpleNamespace:
+        sony = Path("/tmp/test-sony")
+        deploy = Path("/tmp/test-deploy")
+        return SimpleNamespace(
+            sony_repo=str(sony),
+            deploy_root=str(deploy),
+            teleop_python=str(sony / ".venv_teleop/bin/python"),
+            input=input_mode,
+            pose_protocol=protocol,
+            mocap_manager=str(sony / "gear_sonic/scripts/mocap_manager_server.py"),
+            proxy_bin=str(sony / "gear_sonic_deploy/build/tools/proxy"),
+            deploy_bin="/tmp/matrix/inputs/deploy/g1_deploy_onnx_ref-deadbeef",
+            deploy_fastrtps_profile=str(
+                deploy / "src/g1/g1_deploy_onnx_ref/config/fastrtps_profile.xml"
+            ),
+            decoder=str(sony / "gear_sonic_deploy/policy/release/model_decoder.onnx"),
+            obs_config=str(
+                sony / "gear_sonic_deploy/policy/release/observation_config.yaml"
+            ),
+            encoder=str(sony / "gear_sonic_deploy/policy/release/model_encoder.onnx"),
+            planner=str(
+                sony / "gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx"
+            ),
+            bvh_sender=str(sony / "gear_sonic/scripts/bvh_stream_sender.py"),
+            bvh="/tmp/motion.bvh" if input_mode == "bvh" else None,
+            run_dir="/tmp/test-run",
+        )
+
+    def test_direct_component_contracts_pin_v3_and_keyboard_recipes(self):
+        v3 = run_manifest.component_contracts(
+            self._component_contract_args(input_mode="bvh", protocol=3)
+        )
+        self.assertEqual(v3["launch_mode"], "direct_orchestrated")
+        self.assertEqual(
+            v3["launch_order"], ["input", "proxy", "deploy", "bvh_sender"]
+        )
+        self.assertEqual(
+            v3["pose_contract"],
+            {"protocol": 3, "source": "sony_pico", "encoder": "smpl"},
+        )
+        input_argv = v3["components"]["input"]["argv"]
+        sender_argv = v3["components"]["bvh_sender"]["argv"]
+        deploy_argv = v3["components"]["deploy"]["argv"]
+        self.assertEqual(input_argv[input_argv.index("--source") + 1], "sony_pico")
+        self.assertEqual(
+            input_argv[input_argv.index("--pose-encoder-mode") + 1], "smpl"
+        )
+        self.assertEqual(sender_argv[sender_argv.index("--format") + 1], "msgpack")
+        self.assertIn("--loop", sender_argv)
+        self.assertEqual(
+            deploy_argv[deploy_argv.index("--input-type") + 1], "zmq_manager"
+        )
+        all_argv = " ".join(
+            item
+            for details in v3["components"].values()
+            for item in details["argv"]
+        )
+        self.assertNotIn("launch_sonic_", all_argv)
+        self.assertNotIn("just run", all_argv)
+
+        v1 = run_manifest.component_contracts(
+            self._component_contract_args(input_mode="bvh", protocol=1)
+        )
+        v1_input = v1["components"]["input"]["argv"]
+        self.assertEqual(v1_input[v1_input.index("--source") + 1], "bvh_stream")
+        self.assertEqual(
+            v1_input[
+                v1_input.index("--bvh-stream-bonedata-coordinate-frame") + 1
+            ],
+            "left_handed_yup",
+        )
+        self.assertEqual(
+            v1_input[v1_input.index("--bvh-stream-bonedata-rotation-mode") + 1],
+            "input",
+        )
+        self.assertEqual(
+            v1_input[v1_input.index("--pose-encoder-mode") + 1], "g1"
+        )
+
+        keyboard = run_manifest.component_contracts(
+            self._component_contract_args(input_mode="keyboard", protocol=1)
+        )
+        self.assertEqual(keyboard["launch_order"], ["proxy", "deploy"])
+        self.assertFalse(keyboard["components"]["input"]["enabled"])
+        self.assertFalse(keyboard["components"]["bvh_sender"]["enabled"])
+        keyboard_deploy = keyboard["components"]["deploy"]["argv"]
+        self.assertEqual(
+            keyboard_deploy[keyboard_deploy.index("--input-type") + 1], "keyboard"
+        )
+
+    def test_runtime_capture_uses_actual_tmux_pane_process(self):
+        if subprocess.run(
+            ["tmux", "-V"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode != 0:
+            self.skipTest("tmux is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sleep_binary = Path("/usr/bin/sleep").resolve()
+            session = f"sonic_manifest_test_{os.getpid()}"
+            manifest_path = root / "manifest.json"
+            runtime_path = root / "runtime.json"
+            process_log = root / "sleep.log"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "artifacts": {
+                            "sleep_binary": run_manifest.file_info(str(sleep_binary))
+                        },
+                        "component_contract": {
+                            "components": {
+                                "input": {
+                                    "enabled": True,
+                                    "window": "input",
+                                    "cwd": str(root),
+                                    "argv": [str(sleep_binary), "30"],
+                                    "executable_artifact": "sleep_binary",
+                                    "environment_prefixes": {
+                                        "PYTHONPATH": [str(root)]
+                                    },
+                                    "environment_equals": {
+                                        "PYTHONUNBUFFERED": "1"
+                                    },
+                                },
+                                "bvh_sender": {
+                                    "enabled": True,
+                                    "window": "bvh_sender",
+                                    "cwd": str(root),
+                                    "argv": [str(sleep_binary), "30"],
+                                    "executable_artifact": "sleep_binary",
+                                    "environment_prefixes": {
+                                        "PYTHONPATH": [str(root)]
+                                    },
+                                    "environment_equals": {
+                                        "PYTHONUNBUFFERED": "1"
+                                    },
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command = (
+                f"cd '{root}' && export PYTHONUNBUFFERED=1 "
+                f"PYTHONPATH='{root}' && exec '{sleep_binary}' 30 "
+                f"> >(tee '{process_log}') 2>&1"
+            )
+            try:
+                subprocess.run(
+                    ["tmux", "new-session", "-d", "-s", session, "-n", "input", command],
+                    check=True,
+                )
+                subprocess.run(
+                    [
+                        "tmux",
+                        "new-window",
+                        "-t",
+                        f"={session}",
+                        "-n",
+                        "bvh_sender",
+                        command,
+                    ],
+                    check=True,
+                )
+                run_manifest.capture_runtime(
+                    SimpleNamespace(
+                        manifest=str(manifest_path),
+                        output=str(runtime_path),
+                        session=session,
+                        wait_s=5.0,
+                    )
+                )
+                captured = json.loads(runtime_path.read_text(encoding="utf-8"))
+                self.assertTrue(captured["valid"], captured["reasons"])
+                self.assertEqual(
+                    set(captured["components"]), {"input", "bvh_sender"}
+                )
+                self.assertEqual(
+                    captured["components"]["input"]["executable"]["realpath"],
+                    str(sleep_binary),
+                )
+                self.assertEqual(
+                    captured["components"]["input"]["argv"],
+                    [str(sleep_binary), "30"],
+                )
+                self.assertEqual(
+                    captured["artifacts"]["sleep_binary"]["sha256"],
+                    run_manifest.file_info(str(sleep_binary))["sha256"],
+                )
+            finally:
+                subprocess.run(
+                    ["tmux", "kill-session", "-t", f"={session}"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
     @staticmethod
     def _runtime_bundle(name: str) -> dict:

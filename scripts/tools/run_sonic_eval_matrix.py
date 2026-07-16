@@ -41,6 +41,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import re
 import shutil
 import signal
@@ -224,7 +225,7 @@ def _snapshot_deploy_binaries(
                 "deploy binary changed while constructing matrix: "
                 f"{source} {source_info['sha256']} -> {current_info['sha256']}"
             )
-        destination = snapshot_dir / f"deploy-{source_info['sha256']}"
+        destination = snapshot_dir / f"g1_deploy_onnx_ref-{source_info['sha256']}"
         if not destination.exists():
             temporary = destination.with_name(
                 f".{destination.name}.tmp-{os.getpid()}"
@@ -514,12 +515,19 @@ def main() -> int:
     shared_paths = {
         "planner_model": planner_path,
         "proxy_binary": proxy_path,
-        "external_launcher": (
-            sony_repo / "scripts/launch_sonic_local_isaaclab_closed_loop.py"
+        "proxy_libddsc": (
+            sony_repo
+            / "gear_sonic_deploy/thirdparty/unitree_sdk2/thirdparty/lib"
+            / platform.machine()
+            / "libddsc.so.0"
         ).resolve(),
-        "external_wrapper": (
-            sony_repo / "scripts/launch_sonic_json_isaaclab_closed_loop.sh"
+        "proxy_libddscxx": (
+            sony_repo
+            / "gear_sonic_deploy/thirdparty/unitree_sdk2/thirdparty/lib"
+            / platform.machine()
+            / "libddscxx.so.0"
         ).resolve(),
+        "teleop_python": (sony_repo / ".venv_teleop/bin/python").resolve(),
         "mocap_manager": (
             sony_repo / "gear_sonic/scripts/mocap_manager_server.py"
         ).resolve(),
@@ -543,13 +551,39 @@ def main() -> int:
     for name in names:
         deploy_bin_path = deploy_bin_overrides.get(name, default_deploy_bin)
         deploy_root = deploy_root_overrides.get(name, default_deploy_root)
-        setup_env = deploy_root / "scripts/setup_env.sh"
+        fastrtps_profile = (
+            deploy_root
+            / "src/g1/g1_deploy_onnx_ref/config/fastrtps_profile.xml"
+        )
+        runtime_library_paths = {
+            "deploy_libddsc": (
+                deploy_root
+                / "thirdparty/unitree_sdk2/thirdparty/lib"
+                / platform.machine()
+                / "libddsc.so.0"
+            ).resolve(),
+            "deploy_libddscxx": (
+                deploy_root
+                / "thirdparty/unitree_sdk2/thirdparty/lib"
+                / platform.machine()
+                / "libddscxx.so.0"
+            ).resolve(),
+        }
         if not deploy_bin_path.is_file() or not os.access(deploy_bin_path, os.X_OK):
             raise SystemExit(f"deploy binary for {name!r} is not executable: {deploy_bin_path}")
         if not deploy_root.is_dir():
             raise SystemExit(f"deploy root for {name!r} is not a directory: {deploy_root}")
-        if not setup_env.is_file():
-            raise SystemExit(f"deploy setup_env for {name!r} does not exist: {setup_env}")
+        if not fastrtps_profile.is_file():
+            raise SystemExit(
+                f"deploy FastRTPS profile for {name!r} does not exist: "
+                f"{fastrtps_profile}"
+            )
+        for artifact_name, artifact_path in runtime_library_paths.items():
+            if not artifact_path.is_file():
+                raise SystemExit(
+                    f"deploy runtime artifact {artifact_name!r} for {name!r} "
+                    f"does not exist: {artifact_path}"
+                )
         policy_dir = pathlib.Path(CANDIDATES[name].policy_dir)
         policy_root = (
             policy_dir.resolve()
@@ -579,7 +613,11 @@ def main() -> int:
                 "root": str(deploy_root),
                 "realpath": str(deploy_root.resolve()),
                 "repository": _git_snapshot(deploy_root),
-                "setup_env": _file_fingerprint(setup_env),
+                "fastrtps_profile": _file_fingerprint(fastrtps_profile),
+                "runtime_libraries": {
+                    artifact_name: _file_fingerprint(artifact_path)
+                    for artifact_name, artifact_path in runtime_library_paths.items()
+                },
             },
         }
 
@@ -600,7 +638,17 @@ def main() -> int:
             definition["deploy_binary"]["realpath"],
             definition["deploy_binary"]["sha256"],
             definition["deploy_runtime"]["realpath"],
-            definition["deploy_runtime"]["setup_env"]["sha256"],
+            definition["deploy_runtime"]["fastrtps_profile"]["sha256"],
+            tuple(
+                (
+                    artifact_name,
+                    artifact["realpath"],
+                    artifact["sha256"],
+                )
+                for artifact_name, artifact in sorted(
+                    definition["deploy_runtime"]["runtime_libraries"].items()
+                )
+            ),
         )
         for definition in candidate_definitions.values()
     }
@@ -631,6 +679,101 @@ def main() -> int:
             if not args.dry_run
             else "dry-run only; source binary paths shown without creating snapshots"
         ),
+        "runtime_launch_mode": "direct_orchestrated",
+        "component_contract": {
+            "launch_order": (
+                ["input", "proxy", "deploy", "bvh_sender"]
+                if args.scenario == "v3_bvh"
+                else ["proxy", "deploy"]
+            ),
+            "external_launcher_allowed": False,
+            "ports": {
+                "mocap_zmq": 5556,
+                "deploy_debug": 5557,
+                "isaac_state": 5560,
+                "bvh_udp": 12352 if args.scenario == "v3_bvh" else None,
+            },
+            "topics": {
+                "mocap": "pose" if args.scenario == "v3_bvh" else None,
+                "deploy_debug": "g1_debug",
+                "isaac_state": "sonic_state",
+            },
+            "pose": (
+                {"protocol": 3, "source": "sony_pico", "encoder": "smpl"}
+                if args.scenario == "v3_bvh"
+                else {"protocol": 1, "source": None, "encoder": None}
+            ),
+            "input": (
+                {
+                    "source": "sony_pico",
+                    "bvh_stream_host": "0.0.0.0",
+                    "bvh_stream_port": 12352,
+                    "position_scale": 1.0,
+                    "input_quat_order": "xyzw",
+                    "bonedata_basis": "zflip",
+                    "smpl_joints_source": "pico_fk",
+                    "control_mode": "pose",
+                    "pose_window_size": 80,
+                    "pose_encoder_mode": "smpl",
+                    "pose_protocol_version": 3,
+                    "zmq_port": 5556,
+                    "log_interval_s": 1.0,
+                }
+                if args.scenario == "v3_bvh"
+                else {"enabled": False}
+            ),
+            "sender": (
+                {
+                    "bvh_artifact": "bvh",
+                    "host": "127.0.0.1",
+                    "port": 12352,
+                    "fps": 50,
+                    "unit_scale": 0.01,
+                    "format": "msgpack",
+                    "loop": True,
+                    "log_interval_s": 1.0,
+                }
+                if args.scenario == "v3_bvh"
+                else {"enabled": False}
+            ),
+            "proxy": {
+                "interface": "lo",
+                "domain_id": 0,
+                "lowstate_hz": 500.0,
+                "follow_alpha": 0.35,
+                "isaac_state_endpoint": "tcp://127.0.0.1:5560",
+                "isaac_state_topic": "sonic_state",
+            },
+            "deploy": {
+                "interface_argument": "lo",
+                "decoder_artifact": "decoder_model",
+                "motion_data": "reference/example",
+                "observation_config_artifact": "observation_config",
+                "encoder_artifact": "encoder_model",
+                "planner_artifact": "planner_model",
+                "input_type": (
+                    "zmq_manager" if args.scenario == "v3_bvh" else "keyboard"
+                ),
+                "zmq_host": "localhost" if args.scenario == "v3_bvh" else None,
+                "zmq_port": 5556 if args.scenario == "v3_bvh" else None,
+                "zmq_topic": "pose" if args.scenario == "v3_bvh" else None,
+                "output_type": "all",
+                "debug_port": 5557,
+                "debug_topic": "g1_debug",
+                "disable_crc_check": True,
+                "environment": {
+                    "DDS_INTERFACE": "lo",
+                    "ROS_LOCALHOST_ONLY": "1",
+                    "FASTRTPS_DEFAULT_PROFILES_FILE": (
+                        "deploy_fastrtps_profile"
+                    ),
+                    "LD_LIBRARY_PATH_PREFIX": [
+                        "deploy_libddsc.parent",
+                        "deploy_root/thirdparty/unitree_sdk2/lib/<arch>",
+                    ],
+                },
+            },
+        },
         "stop_after_fall_grace_s": args.stop_after_fall_grace_s,
         "unlock_alignment": {
             "enabled": args.scenario == "v3_bvh" and args.unlock_source_index >= 0,
@@ -747,6 +890,22 @@ def main() -> int:
             candidate_definition["deploy_binary"]["sha256"]
         )
         env["DEPLOY_ROOT_OVERRIDE"] = str(deploy_root)
+        env["DEPLOY_FASTRTPS_PROFILE_SHA256_EXPECTED"] = str(
+            candidate_definition["deploy_runtime"]["fastrtps_profile"]["sha256"]
+        )
+        runtime_libraries = candidate_definition["deploy_runtime"]["runtime_libraries"]
+        env["DEPLOY_LIBDDSC_SHA256_EXPECTED"] = str(
+            runtime_libraries["deploy_libddsc"]["sha256"]
+        )
+        env["DEPLOY_LIBDDSCXX_SHA256_EXPECTED"] = str(
+            runtime_libraries["deploy_libddscxx"]["sha256"]
+        )
+        env["PROXY_LIBDDSC_SHA256_EXPECTED"] = str(
+            shared_artifacts["proxy_libddsc"]["sha256"]
+        )
+        env["PROXY_LIBDDSCXX_SHA256_EXPECTED"] = str(
+            shared_artifacts["proxy_libddscxx"]["sha256"]
+        )
 
         print(
             f"\n[matrix] {sequence}/{len(order)} block={block} candidate={name} "

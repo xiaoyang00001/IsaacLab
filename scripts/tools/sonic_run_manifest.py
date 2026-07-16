@@ -19,6 +19,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,11 @@ ENVIRONMENT_KEYS = {
     "JITTER_POSE_PROTOCOL",
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
+    "DEPLOY_LIBDDSC_SHA256_EXPECTED",
+    "DEPLOY_LIBDDSCXX_SHA256_EXPECTED",
+    "DEPLOY_FASTRTPS_PROFILE_SHA256_EXPECTED",
+    "PROXY_LIBDDSC_SHA256_EXPECTED",
+    "PROXY_LIBDDSCXX_SHA256_EXPECTED",
     "PYTHONPATH",
     "SONY_REPO",
     "UNITREE_DDS_DOMAIN_ID",
@@ -210,6 +216,238 @@ def print_import_paths(root: str) -> None:
         print(f"[jitter-import] {package_name}={details['origin']}", flush=True)
 
 
+def component_contracts(args: argparse.Namespace) -> dict[str, Any]:
+    sony_repo = Path(args.sony_repo).expanduser().resolve()
+    deploy_root = Path(args.deploy_root).expanduser().resolve()
+    teleop_python = str(Path(args.teleop_python).expanduser())
+    runtime_arch = platform.machine()
+    proxy_dds_dir = str(
+        sony_repo
+        / "gear_sonic_deploy"
+        / "thirdparty/unitree_sdk2/thirdparty/lib"
+        / runtime_arch
+    )
+    proxy_sdk_dir = str(
+        sony_repo
+        / "gear_sonic_deploy"
+        / "thirdparty/unitree_sdk2/lib"
+        / runtime_arch
+    )
+    deploy_dds_dir = str(
+        deploy_root / "thirdparty/unitree_sdk2/thirdparty/lib" / runtime_arch
+    )
+    deploy_sdk_dir = str(deploy_root / "thirdparty/unitree_sdk2/lib" / runtime_arch)
+
+    input_enabled = args.input == "bvh"
+    if args.pose_protocol == 3:
+        input_source_args = [
+            "--source",
+            "sony_pico",
+            "--bvh-stream-host",
+            "0.0.0.0",
+            "--bvh-stream-port",
+            "12352",
+            "--bvh-stream-bonedata-position-scale",
+            "1.0",
+            "--bvh-stream-bonedata-input-quat-order",
+            "xyzw",
+            "--sony-pico-bonedata-basis",
+            "zflip",
+            "--sony-pico-smpl-joints-source",
+            "pico_fk",
+            "--pose-encoder-mode",
+            "smpl",
+        ]
+        input_source = "sony_pico"
+        pose_encoder = "smpl"
+    else:
+        input_source_args = [
+            "--source",
+            "bvh_stream",
+            "--bvh-stream-host",
+            "0.0.0.0",
+            "--bvh-stream-port",
+            "12352",
+            "--bvh-stream-bonedata-coordinate-frame",
+            "left_handed_yup",
+            "--bvh-stream-bonedata-position-scale",
+            "1.0",
+            "--bvh-stream-bonedata-input-quat-order",
+            "xyzw",
+            "--bvh-stream-bonedata-rotation-mode",
+            "input",
+            "--pose-encoder-mode",
+            "g1",
+        ]
+        input_source = "bvh_stream"
+        pose_encoder = "g1"
+
+    input_argv = [
+        teleop_python,
+        "-u",
+        str(Path(args.mocap_manager).expanduser()),
+        *input_source_args,
+        "--control-mode",
+        "pose",
+        "--pose-window-size",
+        "80",
+        "--pose-protocol-version",
+        str(args.pose_protocol),
+        "--zmq-port",
+        "5556",
+        "--log-interval-s",
+        "1.0",
+    ]
+    proxy_argv = [
+        str(Path(args.proxy_bin).expanduser()),
+        "--interface",
+        "lo",
+        "--domain-id",
+        "0",
+        "--lowstate-hz",
+        "500.0",
+        "--follow-alpha",
+        "0.35",
+        "--isaac-state-endpoint",
+        "tcp://127.0.0.1:5560",
+        "--isaac-state-topic",
+        "sonic_state",
+    ]
+    deploy_argv = [
+        str(Path(args.deploy_bin).expanduser()),
+        "lo",
+        str(Path(args.decoder).expanduser()),
+        "reference/example",
+        "--obs-config",
+        str(Path(args.obs_config).expanduser()),
+        "--encoder-file",
+        str(Path(args.encoder).expanduser()),
+        "--planner-file",
+        str(Path(args.planner).expanduser()),
+        "--input-type",
+        "zmq_manager" if input_enabled else "keyboard",
+    ]
+    if input_enabled:
+        deploy_argv.extend(
+            [
+                "--zmq-host",
+                "localhost",
+                "--zmq-port",
+                "5556",
+                "--zmq-topic",
+                "pose",
+            ]
+        )
+    deploy_argv.extend(
+        [
+            "--output-type",
+            "all",
+            "--zmq-out-port",
+            "5557",
+            "--zmq-out-topic",
+            "g1_debug",
+            "--disable-crc-check",
+        ]
+    )
+    sender_argv = [
+        teleop_python,
+        "-u",
+        str(Path(args.bvh_sender).expanduser()),
+        "--bvh-file",
+        str(Path(args.bvh).expanduser()) if args.bvh else "",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "12352",
+        "--fps",
+        "50",
+        "--unit-scale",
+        "0.01",
+        "--format",
+        "msgpack",
+        "--loop",
+        "--log-interval-s",
+        "1.0",
+    ]
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    components = {
+        "input": {
+            "enabled": input_enabled,
+            "window": "input",
+            "cwd": str(sony_repo),
+            "argv": input_argv if input_enabled else [],
+            "executable_artifact": "teleop_python",
+            "script_artifact": "mocap_manager",
+            "environment_prefixes": {
+                "PYTHONPATH": [str(sony_repo)],
+            },
+            "environment_equals": {"PYTHONUNBUFFERED": "1"},
+            "environment_absent": ["LD_PRELOAD"],
+            "log": str(run_dir / "input.log"),
+        },
+        "proxy": {
+            "enabled": True,
+            "window": "proxy",
+            "cwd": str(sony_repo),
+            "argv": proxy_argv,
+            "executable_artifact": "proxy_binary",
+            "environment_prefixes": {
+                "LD_LIBRARY_PATH": [proxy_dds_dir, proxy_sdk_dir],
+            },
+            "environment_equals": {"DDS_INTERFACE": "lo"},
+            "environment_absent": ["LD_PRELOAD"],
+            "log": str(run_dir / "proxy.log"),
+        },
+        "deploy": {
+            "enabled": True,
+            "window": "deploy",
+            "cwd": str(deploy_root),
+            "argv": deploy_argv,
+            "executable_artifact": "deploy_binary",
+            "environment_prefixes": {
+                "LD_LIBRARY_PATH": [deploy_dds_dir, deploy_sdk_dir],
+            },
+            "environment_equals": {
+                "DDS_INTERFACE": "lo",
+                "FASTRTPS_DEFAULT_PROFILES_FILE": str(
+                    Path(args.deploy_fastrtps_profile).expanduser()
+                ),
+                "ROS_LOCALHOST_ONLY": "1",
+            },
+            "environment_absent": ["LD_PRELOAD"],
+            "log": str(run_dir / "deploy.log"),
+        },
+        "bvh_sender": {
+            "enabled": input_enabled,
+            "window": "bvh_sender",
+            "cwd": str(sony_repo),
+            "argv": sender_argv if input_enabled else [],
+            "executable_artifact": "teleop_python",
+            "script_artifact": "bvh_sender",
+            "environment_prefixes": {
+                "PYTHONPATH": [str(sony_repo)],
+            },
+            "environment_equals": {"PYTHONUNBUFFERED": "1"},
+            "environment_absent": ["LD_PRELOAD"],
+            "log": str(run_dir / "bvh_sender.log"),
+        },
+    }
+    return {
+        "launch_mode": "direct_orchestrated",
+        "launch_order": (
+            ["input", "proxy", "deploy", "bvh_sender"]
+            if input_enabled
+            else ["proxy", "deploy"]
+        ),
+        "pose_contract": {
+            "protocol": args.pose_protocol,
+            "source": input_source if input_enabled else None,
+            "encoder": pose_encoder if input_enabled else None,
+        },
+        "components": components,
+    }
+
+
 def create_manifest(args: argparse.Namespace) -> None:
     root = Path(args.isaaclab_root).expanduser().resolve()
     now_utc = dt.datetime.now(dt.timezone.utc)
@@ -217,8 +455,9 @@ def create_manifest(args: argparse.Namespace) -> None:
     imports = import_paths(str(root))
     command_argv = args.command_arg or []
 
+    contracts = component_contracts(args)
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": {
             "utc": now_utc.isoformat(),
             "local": now_local.isoformat(),
@@ -241,6 +480,8 @@ def create_manifest(args: argparse.Namespace) -> None:
             **({"seed": args.seed} if args.seed is not None else {}),
             "gui": args.gui,
             "session": args.session,
+            "launch_mode": contracts["launch_mode"],
+            "runtime_sidecar": str(Path(args.runtime_sidecar).resolve()),
             "outputs": {
                 "npz": str(Path(args.out_npz).resolve()),
                 "isaac_log": str(Path(args.isaac_log).resolve()),
@@ -278,11 +519,14 @@ def create_manifest(args: argparse.Namespace) -> None:
             "planner_model": file_info(args.planner),
             "gr00t_43dof_import_asset": file_info(args.gr00t_43dof_usd),
             "proxy_binary": file_info(args.proxy_bin),
+            "proxy_libddsc": file_info(args.proxy_libddsc),
+            "proxy_libddscxx": file_info(args.proxy_libddscxx),
             "deploy_binary": file_info(args.deploy_bin),
-            "deploy_setup_env": file_info(args.deploy_setup_env),
+            "deploy_fastrtps_profile": file_info(args.deploy_fastrtps_profile),
+            "deploy_libddsc": file_info(args.deploy_libddsc),
+            "deploy_libddscxx": file_info(args.deploy_libddscxx),
             "deploy_source": file_info(args.deploy_source),
-            "external_launcher": file_info(args.external_launcher),
-            "external_wrapper": file_info(args.external_wrapper),
+            "teleop_python": file_info(args.teleop_python),
             "mocap_manager": file_info(args.mocap_manager),
             "bvh_sender": file_info(args.bvh_sender),
             "orchestrator": file_info(str(root / "scripts/tools/run_sonic_jitter_closed_loop.sh")),
@@ -312,6 +556,7 @@ def create_manifest(args: argparse.Namespace) -> None:
                 )
             ),
         },
+        "component_contract": contracts,
         "imports": imports,
         "python_path": list(sys.path),
     }
@@ -329,6 +574,314 @@ def create_manifest(args: argparse.Namespace) -> None:
     print(f"[jitter-manifest] wrote {output.resolve()}", flush=True)
     for package_name, details in imports.items():
         print(f"[jitter-manifest] import {package_name}={details['origin']}", flush=True)
+
+
+def _read_proc_environment(pid: int) -> dict[str, str]:
+    raw = Path(f"/proc/{pid}/environ").read_bytes()
+    values: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        key_text = key.decode("utf-8", errors="replace")
+        if key_text in {
+            "DDS_INTERFACE",
+            "FASTRTPS_DEFAULT_PROFILES_FILE",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "PYTHONPATH",
+            "PYTHONUNBUFFERED",
+            "ROS_LOCALHOST_ONLY",
+        }:
+            values[key_text] = value.decode("utf-8", errors="replace")
+    return values
+
+
+def _read_proc_argv(pid: int) -> list[str]:
+    return [
+        item.decode("utf-8", errors="replace")
+        for item in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        if item
+    ]
+
+
+def _mapped_files(pid: int) -> set[str]:
+    mapped: set[str] = set()
+    for line in Path(f"/proc/{pid}/maps").read_text(
+        encoding="utf-8", errors="replace"
+    ).splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) < 6 or not fields[5].startswith("/"):
+            continue
+        try:
+            mapped.add(str(Path(fields[5]).resolve(strict=True)))
+        except OSError:
+            continue
+    return mapped
+
+
+def _dynamic_libraries(
+    executable: str, environment: dict[str, str], pid: int
+) -> dict[str, dict[str, Any]]:
+    env = os.environ.copy()
+    env.pop("LD_PRELOAD", None)
+    if "LD_LIBRARY_PATH" in environment:
+        env["LD_LIBRARY_PATH"] = environment["LD_LIBRARY_PATH"]
+    result = subprocess.run(
+        ["ldd", executable],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    mapped_files = _mapped_files(pid)
+    libraries: dict[str, dict[str, Any]] = {}
+    for line in result.stdout.splitlines():
+        fields = line.strip().split()
+        if len(fields) >= 3 and fields[1] == "=>" and fields[2] != "not":
+            realpath = str(Path(fields[2]).resolve())
+            details: dict[str, Any] = {
+                "realpath": realpath,
+                "loaded_in_process": realpath in mapped_files,
+            }
+            if fields[0] in {"libddsc.so.0", "libddscxx.so.0"}:
+                details.update(file_info(realpath) or {})
+            libraries[fields[0]] = details
+    return dict(sorted(libraries.items()))
+
+
+def capture_runtime(args: argparse.Namespace) -> None:
+    manifest_path = Path(args.manifest).expanduser().resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    contracts = manifest.get("component_contract", {}).get("components", {})
+    expected = {
+        details["window"]: (name, details)
+        for name, details in contracts.items()
+        if isinstance(details, dict) and details.get("enabled") is True
+    }
+    reasons: list[str] = []
+    observed: dict[str, int] = {}
+    result: subprocess.CompletedProcess[str] | None = None
+    deadline = time.monotonic() + max(0.0, float(args.wait_s))
+    artifacts = manifest.get("artifacts", {})
+    while True:
+        result = subprocess.run(
+            [
+                "tmux",
+                "list-panes",
+                "-s",
+                "-t",
+                f"={args.session}",
+                "-F",
+                "#{window_name}\t#{pane_pid}",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        observed = {}
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                window, separator, raw_pid = line.partition("\t")
+                if not separator:
+                    continue
+                try:
+                    observed[window] = int(raw_pid)
+                except ValueError:
+                    continue
+        ready = set(observed) == set(expected)
+        if ready:
+            for window, (_, contract) in expected.items():
+                artifact_name = contract.get("executable_artifact")
+                expected_executable = (
+                    artifacts.get(artifact_name, {}).get("realpath")
+                    if isinstance(artifacts.get(artifact_name), dict)
+                    else None
+                )
+                try:
+                    actual_executable = str(
+                        Path(f"/proc/{observed[window]}/exe").resolve(strict=True)
+                    )
+                except OSError:
+                    ready = False
+                    break
+                if actual_executable != expected_executable:
+                    ready = False
+                    break
+        if ready or time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+
+    assert result is not None
+    if result.returncode != 0:
+        reasons.append(f"tmux_list_panes_failed={result.stderr.strip()!r}")
+    else:
+        for line in result.stdout.splitlines():
+            window, separator, raw_pid = line.partition("\t")
+            if not separator:
+                reasons.append(f"invalid_tmux_pane_row={line!r}")
+                continue
+            try:
+                observed[window] = int(raw_pid)
+            except ValueError:
+                reasons.append(f"invalid_tmux_pane_pid={line!r}")
+    if set(observed) != set(expected):
+        reasons.append(
+            "component_window_set_mismatch="
+            f"expected:{sorted(expected)},actual:{sorted(observed)}"
+        )
+
+    runtime_artifacts: dict[str, Any] = {}
+    for artifact_name, expected_artifact in artifacts.items():
+        if not isinstance(expected_artifact, dict) or not expected_artifact.get(
+            "realpath"
+        ):
+            continue
+        try:
+            actual_artifact = file_info(expected_artifact["realpath"])
+        except OSError as exc:
+            reasons.append(f"{artifact_name}_runtime_artifact_unreadable={exc}")
+            continue
+        runtime_artifacts[artifact_name] = actual_artifact
+        if actual_artifact.get("realpath") != expected_artifact.get("realpath"):
+            reasons.append(
+                f"{artifact_name}_runtime_path_mismatch="
+                f"{actual_artifact.get('realpath')!r}"
+            )
+        if actual_artifact.get("sha256") != expected_artifact.get("sha256"):
+            reasons.append(
+                f"{artifact_name}_runtime_hash_mismatch="
+                f"{actual_artifact.get('sha256')!r}"
+            )
+
+    runtime_repositories: dict[str, Any] = {}
+    for repository_name, expected_repository in manifest.get(
+        "repositories", {}
+    ).items():
+        if not isinstance(expected_repository, dict) or not expected_repository.get(
+            "realpath"
+        ):
+            continue
+        try:
+            actual_repository = git_info(expected_repository["realpath"])
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+            reasons.append(f"{repository_name}_runtime_repository_unreadable={exc}")
+            continue
+        runtime_repositories[repository_name] = actual_repository
+        for key in (
+            "realpath",
+            "commit",
+            "dirty",
+            "status_porcelain",
+            "tracked_diff_sha256",
+        ):
+            if actual_repository.get(key) != expected_repository.get(key):
+                reasons.append(
+                    f"{repository_name}_runtime_repository_{key}_mismatch="
+                    f"{actual_repository.get(key)!r}"
+                )
+
+    components: dict[str, Any] = {}
+    for window, (name, contract) in expected.items():
+        pid = observed.get(window)
+        if pid is None:
+            continue
+        try:
+            executable = str(Path(f"/proc/{pid}/exe").resolve(strict=True))
+            cwd = str(Path(f"/proc/{pid}/cwd").resolve(strict=True))
+            argv = _read_proc_argv(pid)
+            environment = _read_proc_environment(pid)
+            executable_info = file_info(executable)
+        except OSError as exc:
+            reasons.append(f"{name}_process_unreadable={exc}")
+            continue
+        if cwd != contract.get("cwd"):
+            reasons.append(f"{name}_cwd_mismatch={cwd!r}")
+        if argv != contract.get("argv"):
+            reasons.append(f"{name}_argv_mismatch={argv!r}")
+        artifact_name = contract.get("executable_artifact")
+        expected_executable = (
+            artifacts.get(artifact_name, {}).get("realpath")
+            if isinstance(artifacts.get(artifact_name), dict)
+            else None
+        )
+        if executable != expected_executable:
+            reasons.append(f"{name}_executable_mismatch={executable!r}")
+        for key, expected_value in contract.get("environment_equals", {}).items():
+            if environment.get(key) != expected_value:
+                reasons.append(
+                    f"{name}_environment_{key}_mismatch={environment.get(key)!r}"
+                )
+        for key in contract.get("environment_absent", []):
+            if key in environment:
+                reasons.append(
+                    f"{name}_environment_{key}_unexpected={environment.get(key)!r}"
+                )
+        for key, prefixes in contract.get("environment_prefixes", {}).items():
+            actual_parts = environment.get(key, "").split(":")
+            if actual_parts[: len(prefixes)] != prefixes:
+                reasons.append(
+                    f"{name}_environment_{key}_prefix_mismatch={actual_parts!r}"
+                )
+        libraries = _dynamic_libraries(executable, environment, pid)
+        for soname, artifact_key in (
+            ("libddsc.so.0", "deploy_libddsc" if name == "deploy" else "proxy_libddsc"),
+            (
+                "libddscxx.so.0",
+                "deploy_libddscxx" if name == "deploy" else "proxy_libddscxx",
+            ),
+        ):
+            if name not in {"deploy", "proxy"}:
+                continue
+            expected_artifact = artifacts.get(artifact_key, {})
+            actual_library = libraries.get(soname, {})
+            if actual_library.get("realpath") != expected_artifact.get("realpath"):
+                reasons.append(
+                    f"{name}_{soname}_path_mismatch={actual_library.get('realpath')!r}"
+                )
+            if actual_library.get("sha256") != expected_artifact.get("sha256"):
+                reasons.append(
+                    f"{name}_{soname}_hash_mismatch={actual_library.get('sha256')!r}"
+                )
+            if actual_library.get("loaded_in_process") is not True:
+                reasons.append(
+                    f"{name}_{soname}_not_loaded_in_process"
+                )
+        components[name] = {
+            "window": window,
+            "pid": pid,
+            "cwd": cwd,
+            "argv": argv,
+            "environment": environment,
+            "executable": executable_info,
+            "dynamic_libraries": libraries,
+        }
+
+    payload = {
+        "schema_version": 1,
+        "created_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "session": args.session,
+        "manifest": file_info(str(manifest_path)),
+        "valid": not reasons,
+        "reasons": reasons,
+        "artifacts": runtime_artifacts,
+        "repositories": runtime_repositories,
+        "components": components,
+    }
+    output = Path(args.output).expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.tmp-{os.getpid()}")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, sort_keys=True, ensure_ascii=False)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, output)
+    print(f"[jitter-runtime] wrote {output.resolve()} valid={payload['valid']}", flush=True)
+    if reasons:
+        raise RuntimeError("runtime component validation failed:\n  " + "\n  ".join(reasons))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -359,23 +912,36 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--planner", required=True)
     create_parser.add_argument("--gr00t-43dof-usd", required=True)
     create_parser.add_argument("--proxy-bin", required=True)
+    create_parser.add_argument("--proxy-libddsc", required=True)
+    create_parser.add_argument("--proxy-libddscxx", required=True)
     create_parser.add_argument("--deploy-bin", required=True)
     create_parser.add_argument("--deploy-root", required=True)
-    create_parser.add_argument("--deploy-setup-env", required=True)
+    create_parser.add_argument("--deploy-fastrtps-profile", required=True)
+    create_parser.add_argument("--deploy-libddsc", required=True)
+    create_parser.add_argument("--deploy-libddscxx", required=True)
     create_parser.add_argument("--deploy-runtime-repo")
     create_parser.add_argument("--deploy-source")
     create_parser.add_argument("--seed", type=int)
-    create_parser.add_argument("--external-launcher", required=True)
-    create_parser.add_argument("--external-wrapper", required=True)
+    create_parser.add_argument("--teleop-python", required=True)
     create_parser.add_argument("--mocap-manager", required=True)
     create_parser.add_argument("--bvh-sender", required=True)
     create_parser.add_argument("--bvh")
     create_parser.add_argument("--gui", action="store_true")
     create_parser.add_argument("--session", required=True)
+    create_parser.add_argument("--runtime-sidecar", required=True)
     create_parser.add_argument("--command-arg", action="append")
     create_parser.add_argument("--runner-command-arg", action="append")
     create_parser.add_argument("--runner-env", action="append")
     create_parser.add_argument("--runner-arg", action="append")
+
+    runtime_parser = subparsers.add_parser(
+        "capture-runtime",
+        help="capture and validate the actual tmux component processes",
+    )
+    runtime_parser.add_argument("--output", required=True)
+    runtime_parser.add_argument("--manifest", required=True)
+    runtime_parser.add_argument("--session", required=True)
+    runtime_parser.add_argument("--wait-s", type=float, default=30.0)
     return parser
 
 
@@ -384,6 +950,8 @@ def main() -> int:
     try:
         if args.command == "print-imports":
             print_import_paths(args.isaaclab_root)
+        elif args.command == "capture-runtime":
+            capture_runtime(args)
         else:
             create_manifest(args)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:

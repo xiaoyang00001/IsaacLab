@@ -26,6 +26,7 @@ sign-test p-value <= 0.05.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -60,6 +61,14 @@ def _get(node: dict, dotted: str, default=None):
             return default
         value = value[part]
     return value
+
+
+def _sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _finite(value) -> float | None:
@@ -104,6 +113,8 @@ def _runtime_valid(
     expected_sony_repo: str | None,
     expected_unlock_source_index: int | None,
     expected_isaaclab_repository: dict | None,
+    expected_launch_mode: str | None,
+    expected_component_contract: dict | None,
 ) -> list[str]:
     reasons: list[str] = []
     meta = report.get("meta", {})
@@ -177,6 +188,22 @@ def _runtime_valid(
     if not isinstance(manifest, dict):
         reasons.append("missing_run_manifest")
     else:
+        if expected_launch_mode is not None:
+            manifest_schema = _finite(manifest.get("schema_version"))
+            if manifest_schema is None or manifest_schema < 3:
+                reasons.append(
+                    f"unsupported_isolated_manifest_schema={manifest.get('schema_version', '<missing>')}"
+                )
+            if _get(manifest, "run.launch_mode") != expected_launch_mode:
+                reasons.append(
+                    f"launch_mode_mismatch={_get(manifest, 'run.launch_mode')!r}"
+                )
+            manifest_artifacts = manifest.get("artifacts", {})
+            if isinstance(manifest_artifacts, dict) and any(
+                name in manifest_artifacts
+                for name in ("external_launcher", "external_wrapper")
+            ):
+                reasons.append("external_launcher_artifact_present")
         manifest_root = _get(manifest, "repositories.isaaclab.realpath")
         if manifest_root != str(repo_root):
             reasons.append(f"manifest_worktree_mismatch={manifest_root!r}")
@@ -279,10 +306,42 @@ def _runtime_valid(
             expected_setup = expected_runtime.get("setup_env", {})
             actual_setup_path = _get(manifest, "artifacts.deploy_setup_env.realpath")
             actual_setup_hash = _get(manifest, "artifacts.deploy_setup_env.sha256")
-            if actual_setup_path != expected_setup.get("realpath"):
+            if expected_setup and actual_setup_path != expected_setup.get("realpath"):
                 reasons.append(f"deploy_setup_env_path_mismatch={actual_setup_path!r}")
-            if actual_setup_hash != expected_setup.get("sha256"):
+            if expected_setup and actual_setup_hash != expected_setup.get("sha256"):
                 reasons.append(f"deploy_setup_env_hash_mismatch={actual_setup_hash!r}")
+            expected_profile = expected_runtime.get("fastrtps_profile", {})
+            actual_profile_path = _get(
+                manifest, "artifacts.deploy_fastrtps_profile.realpath"
+            )
+            actual_profile_hash = _get(
+                manifest, "artifacts.deploy_fastrtps_profile.sha256"
+            )
+            if expected_profile and actual_profile_path != expected_profile.get(
+                "realpath"
+            ):
+                reasons.append(
+                    f"deploy_fastrtps_profile_path_mismatch={actual_profile_path!r}"
+                )
+            if expected_profile and actual_profile_hash != expected_profile.get(
+                "sha256"
+            ):
+                reasons.append(
+                    f"deploy_fastrtps_profile_hash_mismatch={actual_profile_hash!r}"
+                )
+            for artifact_name, expected_artifact in (
+                expected_runtime.get("runtime_libraries") or {}
+            ).items():
+                actual_path = _get(manifest, f"artifacts.{artifact_name}.realpath")
+                actual_hash = _get(manifest, f"artifacts.{artifact_name}.sha256")
+                if actual_path != expected_artifact.get("realpath"):
+                    reasons.append(
+                        f"{artifact_name}_path_mismatch={actual_path!r}"
+                    )
+                if actual_hash != expected_artifact.get("sha256"):
+                    reasons.append(
+                        f"{artifact_name}_hash_mismatch={actual_hash!r}"
+                    )
             expected_repository = expected_runtime.get("repository", {})
             for key in (
                 "realpath",
@@ -295,6 +354,559 @@ def _runtime_valid(
                 expected = expected_repository.get(key)
                 if actual != expected:
                     reasons.append(f"deploy_runtime_{key}_mismatch={actual!r}")
+
+        manifest_contract = manifest.get("component_contract")
+        if expected_component_contract is not None:
+            if not isinstance(manifest_contract, dict):
+                reasons.append("missing_component_contract")
+            else:
+                if manifest_contract.get("launch_mode") != expected_launch_mode:
+                    reasons.append(
+                        f"component_launch_mode_mismatch={manifest_contract.get('launch_mode')!r}"
+                    )
+                if manifest_contract.get("launch_order") != expected_component_contract.get(
+                    "launch_order"
+                ):
+                    reasons.append(
+                        "component_launch_order_mismatch="
+                        f"{manifest_contract.get('launch_order')!r}"
+                    )
+                if manifest_contract.get("pose_contract") != expected_component_contract.get(
+                    "pose"
+                ):
+                    reasons.append(
+                        f"component_pose_contract_mismatch={manifest_contract.get('pose_contract')!r}"
+                    )
+                components = manifest_contract.get("components", {})
+                enabled_components = sorted(
+                    name
+                    for name, details in components.items()
+                    if isinstance(details, dict) and details.get("enabled") is True
+                )
+                if enabled_components != sorted(
+                    expected_component_contract.get("launch_order", [])
+                ):
+                    reasons.append(
+                        f"enabled_component_set_mismatch={enabled_components!r}"
+                    )
+                forbidden_tokens = ("launch_sonic_", "just", "target/release/g1_deploy_onnx_ref")
+                for component_name, details in components.items():
+                    if not isinstance(details, dict) or details.get("enabled") is not True:
+                        continue
+                    argv = details.get("argv")
+                    if not isinstance(argv, list) or not all(
+                        isinstance(item, str) for item in argv
+                    ):
+                        reasons.append(f"{component_name}_invalid_planned_argv")
+                        continue
+                    joined_argv = " ".join(argv)
+                    for token in forbidden_tokens:
+                        if token in joined_argv:
+                            reasons.append(
+                                f"{component_name}_forbidden_argv_token={token}"
+                            )
+
+                def option_value(component_name: str, option: str) -> str | None:
+                    details = components.get(component_name)
+                    argv = details.get("argv", []) if isinstance(details, dict) else []
+                    try:
+                        index = argv.index(option)
+                    except (ValueError, AttributeError):
+                        return None
+                    return argv[index + 1] if index + 1 < len(argv) else None
+
+                proxy_expected = expected_component_contract.get("proxy", {})
+                for option, expected in (
+                    ("--interface", proxy_expected.get("interface")),
+                    ("--domain-id", proxy_expected.get("domain_id")),
+                    ("--lowstate-hz", proxy_expected.get("lowstate_hz")),
+                    ("--follow-alpha", proxy_expected.get("follow_alpha")),
+                    (
+                        "--isaac-state-endpoint",
+                        proxy_expected.get("isaac_state_endpoint"),
+                    ),
+                    ("--isaac-state-topic", proxy_expected.get("isaac_state_topic")),
+                ):
+                    actual = option_value("proxy", option)
+                    if actual != str(expected):
+                        reasons.append(
+                            f"proxy_contract_{option}_mismatch={actual!r}"
+                        )
+                pose_expected = expected_component_contract.get("pose", {})
+                if "input" in expected_component_contract.get("launch_order", []):
+                    input_expected = expected_component_contract.get("input", {})
+                    for option, expected in (
+                        ("--source", input_expected.get("source")),
+                        (
+                            "--bvh-stream-host",
+                            input_expected.get("bvh_stream_host"),
+                        ),
+                        (
+                            "--bvh-stream-port",
+                            input_expected.get("bvh_stream_port"),
+                        ),
+                        (
+                            "--bvh-stream-bonedata-position-scale",
+                            input_expected.get("position_scale"),
+                        ),
+                        (
+                            "--bvh-stream-bonedata-input-quat-order",
+                            input_expected.get("input_quat_order"),
+                        ),
+                        (
+                            "--sony-pico-bonedata-basis",
+                            input_expected.get("bonedata_basis"),
+                        ),
+                        (
+                            "--sony-pico-smpl-joints-source",
+                            input_expected.get("smpl_joints_source"),
+                        ),
+                        ("--control-mode", input_expected.get("control_mode")),
+                        (
+                            "--pose-window-size",
+                            input_expected.get("pose_window_size"),
+                        ),
+                        (
+                            "--pose-encoder-mode",
+                            input_expected.get("pose_encoder_mode"),
+                        ),
+                        (
+                            "--pose-protocol-version",
+                            input_expected.get("pose_protocol_version"),
+                        ),
+                        ("--zmq-port", input_expected.get("zmq_port")),
+                        (
+                            "--log-interval-s",
+                            input_expected.get("log_interval_s"),
+                        ),
+                    ):
+                        actual = option_value("input", option)
+                        if actual != str(expected):
+                            reasons.append(
+                                f"input_contract_{option}_mismatch={actual!r}"
+                            )
+                    if (
+                        input_expected.get("source") != pose_expected.get("source")
+                        or input_expected.get("pose_encoder_mode")
+                        != pose_expected.get("encoder")
+                        or input_expected.get("pose_protocol_version")
+                        != pose_expected.get("protocol")
+                    ):
+                        reasons.append("input_pose_contract_internal_mismatch")
+                    sender_expected = expected_component_contract.get("sender", {})
+                    for option, expected in (
+                        ("--host", sender_expected.get("host")),
+                        ("--port", sender_expected.get("port")),
+                        ("--fps", sender_expected.get("fps")),
+                        ("--unit-scale", sender_expected.get("unit_scale")),
+                        ("--format", sender_expected.get("format")),
+                        (
+                            "--log-interval-s",
+                            sender_expected.get("log_interval_s"),
+                        ),
+                    ):
+                        actual = option_value("bvh_sender", option)
+                        if actual != str(expected):
+                            reasons.append(
+                                f"sender_contract_{option}_mismatch={actual!r}"
+                            )
+                    sender_argv = components.get("bvh_sender", {}).get("argv", [])
+                    sender_bvh = option_value("bvh_sender", "--bvh-file")
+                    expected_bvh_path = _get(
+                        manifest,
+                        f"artifacts.{sender_expected.get('bvh_artifact')}.realpath",
+                    )
+                    if sender_bvh is None or str(
+                        pathlib.Path(sender_bvh).resolve()
+                    ) != expected_bvh_path:
+                        reasons.append(
+                            f"sender_contract_bvh_file_mismatch={sender_bvh!r}"
+                        )
+                    if sender_expected.get("loop") is True and "--loop" not in sender_argv:
+                        reasons.append("sender_contract_missing_loop")
+                deploy_expected = expected_component_contract.get("deploy", {})
+                deploy_expected_input = deploy_expected.get("input_type")
+                if option_value("deploy", "--input-type") != str(
+                    deploy_expected_input
+                ):
+                    reasons.append(
+                        "deploy_contract_input_type_mismatch="
+                        f"{option_value('deploy', '--input-type')!r}"
+                    )
+                deploy_argv = components.get("deploy", {}).get("argv", [])
+                expected_deploy_path = _get(manifest, "artifacts.deploy_binary.realpath")
+                if (
+                    not isinstance(deploy_argv, list)
+                    or not deploy_argv
+                    or str(pathlib.Path(deploy_argv[0]).resolve())
+                    != expected_deploy_path
+                ):
+                    reasons.append("deploy_contract_executable_mismatch")
+                if isinstance(deploy_argv, list) and len(deploy_argv) >= 4:
+                    if deploy_argv[1] != str(
+                        deploy_expected.get("interface_argument")
+                    ):
+                        reasons.append(
+                            f"deploy_contract_interface_mismatch={deploy_argv[1]!r}"
+                        )
+                    if str(pathlib.Path(deploy_argv[2]).resolve()) != _get(
+                        manifest,
+                        f"artifacts.{deploy_expected.get('decoder_artifact')}.realpath",
+                    ):
+                        reasons.append("deploy_contract_decoder_mismatch")
+                    if deploy_argv[3] != deploy_expected.get("motion_data"):
+                        reasons.append(
+                            f"deploy_contract_motion_data_mismatch={deploy_argv[3]!r}"
+                        )
+                else:
+                    reasons.append("deploy_contract_positional_argv_missing")
+                for option, artifact_name in (
+                    (
+                        "--obs-config",
+                        deploy_expected.get("observation_config_artifact"),
+                    ),
+                    ("--encoder-file", deploy_expected.get("encoder_artifact")),
+                    ("--planner-file", deploy_expected.get("planner_artifact")),
+                ):
+                    actual = option_value("deploy", option)
+                    expected_path = _get(
+                        manifest, f"artifacts.{artifact_name}.realpath"
+                    )
+                    if actual is None or str(pathlib.Path(actual).resolve()) != expected_path:
+                        reasons.append(
+                            f"deploy_contract_{option}_mismatch={actual!r}"
+                        )
+                for option, expected in (
+                    ("--output-type", deploy_expected.get("output_type")),
+                    ("--zmq-out-port", deploy_expected.get("debug_port")),
+                    ("--zmq-out-topic", deploy_expected.get("debug_topic")),
+                ):
+                    actual = option_value("deploy", option)
+                    if actual != str(expected):
+                        reasons.append(
+                            f"deploy_contract_{option}_mismatch={actual!r}"
+                        )
+                for option, expected in (
+                    ("--zmq-host", deploy_expected.get("zmq_host")),
+                    ("--zmq-port", deploy_expected.get("zmq_port")),
+                    ("--zmq-topic", deploy_expected.get("zmq_topic")),
+                ):
+                    actual = option_value("deploy", option)
+                    if expected is None:
+                        if actual is not None:
+                            reasons.append(
+                                f"deploy_contract_unexpected_{option}={actual!r}"
+                            )
+                    elif actual != str(expected):
+                        reasons.append(
+                            f"deploy_contract_{option}_mismatch={actual!r}"
+                        )
+                if (
+                    deploy_expected.get("disable_crc_check") is True
+                    and "--disable-crc-check" not in deploy_argv
+                ):
+                    reasons.append("deploy_contract_missing_disable_crc_check")
+
+                deploy_details = components.get("deploy", {})
+                deploy_environment = (
+                    deploy_details.get("environment_equals", {})
+                    if isinstance(deploy_details, dict)
+                    else {}
+                )
+                expected_deploy_environment = deploy_expected.get("environment", {})
+                for key in ("DDS_INTERFACE", "ROS_LOCALHOST_ONLY"):
+                    if deploy_environment.get(key) != expected_deploy_environment.get(key):
+                        reasons.append(
+                            f"deploy_contract_environment_{key}_mismatch="
+                            f"{deploy_environment.get(key)!r}"
+                        )
+                expected_profile_path = _get(
+                    manifest, "artifacts.deploy_fastrtps_profile.realpath"
+                )
+                if (
+                    deploy_environment.get("FASTRTPS_DEFAULT_PROFILES_FILE")
+                    != expected_profile_path
+                ):
+                    reasons.append(
+                        "deploy_contract_environment_FASTRTPS_DEFAULT_PROFILES_FILE_mismatch"
+                    )
+                deploy_prefixes = (
+                    deploy_details.get("environment_prefixes", {}).get(
+                        "LD_LIBRARY_PATH", []
+                    )
+                    if isinstance(deploy_details, dict)
+                    else []
+                )
+                deploy_dds_path = _get(manifest, "artifacts.deploy_libddsc.realpath")
+                deploy_root = _get(manifest, "run.deploy_root")
+                runtime_arch = _get(manifest, "host.machine")
+                expected_deploy_prefixes = [
+                    str(pathlib.Path(deploy_dds_path).parent)
+                    if deploy_dds_path
+                    else None,
+                    str(
+                        pathlib.Path(deploy_root)
+                        / "thirdparty/unitree_sdk2/lib"
+                        / str(runtime_arch)
+                    )
+                    if deploy_root and runtime_arch
+                    else None,
+                ]
+                if deploy_prefixes != expected_deploy_prefixes:
+                    reasons.append(
+                        f"deploy_contract_LD_LIBRARY_PATH_mismatch={deploy_prefixes!r}"
+                    )
+
+                proxy_details = components.get("proxy", {})
+                proxy_environment = (
+                    proxy_details.get("environment_equals", {})
+                    if isinstance(proxy_details, dict)
+                    else {}
+                )
+                if proxy_environment.get("DDS_INTERFACE") != proxy_expected.get(
+                    "interface"
+                ):
+                    reasons.append(
+                        "proxy_contract_environment_DDS_INTERFACE_mismatch"
+                    )
+                proxy_prefixes = (
+                    proxy_details.get("environment_prefixes", {}).get(
+                        "LD_LIBRARY_PATH", []
+                    )
+                    if isinstance(proxy_details, dict)
+                    else []
+                )
+                proxy_dds_path = _get(manifest, "artifacts.proxy_libddsc.realpath")
+                sony_root = _get(manifest, "repositories.sony.realpath")
+                expected_proxy_prefixes = [
+                    str(pathlib.Path(proxy_dds_path).parent)
+                    if proxy_dds_path
+                    else None,
+                    str(
+                        pathlib.Path(sony_root)
+                        / "gear_sonic_deploy/thirdparty/unitree_sdk2/lib"
+                        / str(runtime_arch)
+                    )
+                    if sony_root and runtime_arch
+                    else None,
+                ]
+                if proxy_prefixes != expected_proxy_prefixes:
+                    reasons.append(
+                        f"proxy_contract_LD_LIBRARY_PATH_mismatch={proxy_prefixes!r}"
+                    )
+
+        runtime_components = meta.get("runtime_components")
+        if expected_launch_mode is not None:
+            if not isinstance(runtime_components, dict):
+                reasons.append("missing_runtime_components")
+            else:
+                manifest_session = _get(manifest, "run.session")
+                if runtime_components.get("session") != manifest_session:
+                    reasons.append(
+                        "runtime_session_mismatch="
+                        f"{runtime_components.get('session')!r}!={manifest_session!r}"
+                    )
+                run_manifest_path = meta.get("run_manifest_path")
+                runtime_manifest_path = meta.get("runtime_manifest_path")
+                if runtime_manifest_path != _get(manifest, "run.runtime_sidecar"):
+                    reasons.append(
+                        f"runtime_sidecar_path_mismatch={runtime_manifest_path!r}"
+                    )
+                if not isinstance(run_manifest_path, str):
+                    reasons.append("missing_run_manifest_path")
+                else:
+                    try:
+                        manifest_path = pathlib.Path(run_manifest_path).resolve(
+                            strict=True
+                        )
+                        manifest_on_disk = json.loads(
+                            manifest_path.read_text(encoding="utf-8")
+                        )
+                        if manifest_on_disk != manifest:
+                            reasons.append("embedded_manifest_differs_from_disk")
+                        if _get(
+                            runtime_components, "manifest.realpath"
+                        ) != str(manifest_path):
+                            reasons.append("runtime_manifest_path_fingerprint_mismatch")
+                        if _get(
+                            runtime_components, "manifest.sha256"
+                        ) != _sha256_file(manifest_path):
+                            reasons.append("runtime_manifest_hash_fingerprint_mismatch")
+                    except (OSError, json.JSONDecodeError) as exc:
+                        reasons.append(f"run_manifest_recheck_failed={exc}")
+                if not isinstance(runtime_manifest_path, str):
+                    reasons.append("missing_runtime_manifest_path")
+                else:
+                    try:
+                        runtime_path = pathlib.Path(runtime_manifest_path).resolve(
+                            strict=True
+                        )
+                        runtime_on_disk = json.loads(
+                            runtime_path.read_text(encoding="utf-8")
+                        )
+                        if runtime_on_disk != runtime_components:
+                            reasons.append(
+                                "embedded_runtime_components_differs_from_disk"
+                            )
+                    except (OSError, json.JSONDecodeError) as exc:
+                        reasons.append(f"runtime_manifest_recheck_failed={exc}")
+                if runtime_components.get("valid") is not True:
+                    reasons.append(
+                        f"runtime_components_invalid={runtime_components.get('reasons')!r}"
+                    )
+                runtime_artifacts = runtime_components.get("artifacts", {})
+                for artifact_name, expected_artifact in manifest.get(
+                    "artifacts", {}
+                ).items():
+                    if not isinstance(expected_artifact, dict):
+                        continue
+                    actual_artifact = (
+                        runtime_artifacts.get(artifact_name)
+                        if isinstance(runtime_artifacts, dict)
+                        else None
+                    )
+                    if not isinstance(actual_artifact, dict):
+                        reasons.append(
+                            f"runtime_artifact_missing={artifact_name}"
+                        )
+                        continue
+                    if actual_artifact.get("realpath") != expected_artifact.get(
+                        "realpath"
+                    ):
+                        reasons.append(
+                            f"runtime_artifact_{artifact_name}_path_mismatch"
+                        )
+                    if actual_artifact.get("sha256") != expected_artifact.get(
+                        "sha256"
+                    ):
+                        reasons.append(
+                            f"runtime_artifact_{artifact_name}_hash_mismatch"
+                        )
+                runtime_repositories = runtime_components.get("repositories", {})
+                for repository_name, expected_repository in manifest.get(
+                    "repositories", {}
+                ).items():
+                    if not isinstance(expected_repository, dict):
+                        continue
+                    actual_repository = (
+                        runtime_repositories.get(repository_name)
+                        if isinstance(runtime_repositories, dict)
+                        else None
+                    )
+                    if not isinstance(actual_repository, dict):
+                        reasons.append(
+                            f"runtime_repository_missing={repository_name}"
+                        )
+                        continue
+                    for key in (
+                        "realpath",
+                        "commit",
+                        "dirty",
+                        "status_porcelain",
+                        "tracked_diff_sha256",
+                    ):
+                        if actual_repository.get(key) != expected_repository.get(key):
+                            reasons.append(
+                                f"runtime_repository_{repository_name}_{key}_mismatch"
+                            )
+                runtime_map = runtime_components.get("components", {})
+                planned_components = (
+                    manifest_contract.get("components", {})
+                    if isinstance(manifest_contract, dict)
+                    else {}
+                )
+                expected_enabled = {
+                    name
+                    for name, details in planned_components.items()
+                    if isinstance(details, dict) and details.get("enabled") is True
+                }
+                if set(runtime_map) != expected_enabled:
+                    reasons.append(
+                        "runtime_component_set_mismatch="
+                        f"expected:{sorted(expected_enabled)},actual:{sorted(runtime_map)}"
+                    )
+                artifacts = manifest.get("artifacts", {})
+                for component_name in expected_enabled:
+                    planned = planned_components.get(component_name, {})
+                    actual = runtime_map.get(component_name, {})
+                    if actual.get("argv") != planned.get("argv"):
+                        reasons.append(f"runtime_{component_name}_argv_mismatch")
+                    if actual.get("cwd") != planned.get("cwd"):
+                        reasons.append(f"runtime_{component_name}_cwd_mismatch")
+                    actual_environment = actual.get("environment", {})
+                    if not isinstance(actual_environment, dict):
+                        reasons.append(
+                            f"runtime_{component_name}_environment_invalid"
+                        )
+                        actual_environment = {}
+                    for key, expected_value in planned.get(
+                        "environment_equals", {}
+                    ).items():
+                        if actual_environment.get(key) != expected_value:
+                            reasons.append(
+                                f"runtime_{component_name}_environment_{key}_mismatch"
+                            )
+                    for key in planned.get("environment_absent", []):
+                        if key in actual_environment:
+                            reasons.append(
+                                f"runtime_{component_name}_environment_{key}_unexpected"
+                            )
+                    for key, expected_prefixes in planned.get(
+                        "environment_prefixes", {}
+                    ).items():
+                        actual_parts = actual_environment.get(key, "").split(":")
+                        if actual_parts[: len(expected_prefixes)] != expected_prefixes:
+                            reasons.append(
+                                f"runtime_{component_name}_environment_{key}_prefix_mismatch"
+                            )
+                    artifact_name = planned.get("executable_artifact")
+                    expected_executable = _get(
+                        artifacts, f"{artifact_name}.realpath"
+                    )
+                    expected_executable_hash = _get(
+                        artifacts, f"{artifact_name}.sha256"
+                    )
+                    if _get(actual, "executable.realpath") != expected_executable:
+                        reasons.append(
+                            f"runtime_{component_name}_executable_path_mismatch"
+                        )
+                    if _get(actual, "executable.sha256") != expected_executable_hash:
+                        reasons.append(
+                            f"runtime_{component_name}_executable_hash_mismatch"
+                        )
+                    if component_name in {"proxy", "deploy"}:
+                        prefix = "deploy" if component_name == "deploy" else "proxy"
+                        for soname, artifact_name in (
+                            ("libddsc.so.0", f"{prefix}_libddsc"),
+                            ("libddscxx.so.0", f"{prefix}_libddscxx"),
+                        ):
+                            actual_libraries = actual.get("dynamic_libraries", {})
+                            actual_library = (
+                                actual_libraries.get(soname)
+                                if isinstance(actual_libraries, dict)
+                                else {}
+                            )
+                            if not isinstance(actual_library, dict):
+                                reasons.append(
+                                    f"runtime_{component_name}_{soname}_invalid"
+                                )
+                                continue
+                            if actual_library.get("realpath") != _get(
+                                artifacts, f"{artifact_name}.realpath"
+                            ):
+                                reasons.append(
+                                    f"runtime_{component_name}_{soname}_path_mismatch"
+                                )
+                            if actual_library.get("sha256") != _get(
+                                artifacts, f"{artifact_name}.sha256"
+                            ):
+                                reasons.append(
+                                    f"runtime_{component_name}_{soname}_hash_mismatch"
+                                )
+                            if actual_library.get("loaded_in_process") is not True:
+                                reasons.append(
+                                    f"runtime_{component_name}_{soname}_not_loaded"
+                                )
 
         if expected_seed is not None:
             if _finite(meta.get("seed_requested")) != float(expected_seed):
@@ -790,6 +1402,8 @@ def build_summary(results_path: pathlib.Path) -> dict:
     expected_shared_artifacts = plan.get("shared_artifacts", {})
     expected_sony_repo = plan.get("sony_repo")
     expected_isaaclab_repository = plan.get("isaaclab_repository")
+    expected_launch_mode = plan.get("runtime_launch_mode")
+    expected_component_contract = plan.get("component_contract")
     unlock_alignment = plan.get("unlock_alignment", {})
     expected_unlock_source_index = (
         int(unlock_alignment["source_index_target"])
@@ -848,6 +1462,8 @@ def build_summary(results_path: pathlib.Path) -> dict:
                             expected_sony_repo=expected_sony_repo,
                             expected_unlock_source_index=expected_unlock_source_index,
                             expected_isaaclab_repository=expected_isaaclab_repository,
+                            expected_launch_mode=expected_launch_mode,
+                            expected_component_contract=expected_component_contract,
                         )
                     )
                 except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:

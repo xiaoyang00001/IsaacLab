@@ -145,19 +145,29 @@ GR00T_43DOF_USD_REALPATH="$(readlink -f -- "$GR00T_43DOF_USD" 2>/dev/null || tru
 export GR00T_WBC_ROOT="$SONY_REPO"
 export SONIC_GR00T_43DOF_USD="$GR00T_43DOF_USD"
 MANIFEST_HELPER="${ISAACLAB_ROOT}/scripts/tools/sonic_run_manifest.py"
-EXTERNAL_LAUNCHER="${SONY_REPO}/scripts/launch_sonic_local_isaaclab_closed_loop.py"
-EXTERNAL_WRAPPER="${SONY_REPO}/scripts/launch_sonic_json_isaaclab_closed_loop.sh"
 MOCAP_MANAGER="${SONY_REPO}/gear_sonic/scripts/mocap_manager_server.py"
 BVH_SENDER="${SONY_REPO}/gear_sonic/scripts/bvh_stream_sender.py"
+TELEOP_PYTHON="${SONY_REPO}/.venv_teleop/bin/python"
 DEPLOY_ROOT_INPUT="${DEPLOY_ROOT_OVERRIDE:-${SONY_REPO}/gear_sonic_deploy}"
 DEPLOY_ROOT="$(cd "$DEPLOY_ROOT_INPUT" 2>/dev/null && pwd -P)" || {
     echo "✗ deploy runtime root 不存在或不可访问: $DEPLOY_ROOT_INPUT" >&2
     exit 2
 }
-DEPLOY_SETUP_ENV="${DEPLOY_ROOT}/scripts/setup_env.sh"
 DEPLOY_BIN="${DEPLOY_BIN_OVERRIDE:-${DEPLOY_ROOT}/target/release/g1_deploy_onnx_ref}"
+DEPLOY_FASTRTPS_PROFILE="${DEPLOY_ROOT}/src/g1/g1_deploy_onnx_ref/config/fastrtps_profile.xml"
 PROXY_BIN="${SONY_REPO}/gear_sonic_deploy/build/tools/sonic_unitree_lowstate_cpp_proxy"
 [[ -x "$PROXY_BIN" ]] || PROXY_BIN="${SONY_REPO}/gear_sonic_deploy/prebuilt/linux-x86_64/sonic_unitree_lowstate_cpp_proxy"
+RUNTIME_ARCH="$(uname -m)"
+DEPLOY_SDK_ROOT="${DEPLOY_ROOT}/thirdparty/unitree_sdk2"
+DEPLOY_DDS_LIB_DIR="${DEPLOY_SDK_ROOT}/thirdparty/lib/${RUNTIME_ARCH}"
+DEPLOY_SDK_LIB_DIR="${DEPLOY_SDK_ROOT}/lib/${RUNTIME_ARCH}"
+DEPLOY_LIBDDSC="${DEPLOY_DDS_LIB_DIR}/libddsc.so.0"
+DEPLOY_LIBDDSCXX="${DEPLOY_DDS_LIB_DIR}/libddscxx.so.0"
+PROXY_SDK_ROOT="${SONY_REPO}/gear_sonic_deploy/thirdparty/unitree_sdk2"
+PROXY_DDS_LIB_DIR="${PROXY_SDK_ROOT}/thirdparty/lib/${RUNTIME_ARCH}"
+PROXY_SDK_LIB_DIR="${PROXY_SDK_ROOT}/lib/${RUNTIME_ARCH}"
+PROXY_LIBDDSC="${PROXY_DDS_LIB_DIR}/libddsc.so.0"
+PROXY_LIBDDSCXX="${PROXY_DDS_LIB_DIR}/libddscxx.so.0"
 
 SAFE_LABEL="$(printf '%s' "$LABEL" | sed 's/[^[:alnum:]_.-]/_/g')"
 [[ -n "$SAFE_LABEL" ]] || SAFE_LABEL="run"
@@ -166,6 +176,7 @@ RUN_DIR="${OUT_ROOT%/}/${SAFE_LABEL}_${RUN_STAMP}_$$"
 ISAAC_LOG="${RUN_DIR}/isaac.log"
 OUT_NPZ="${RUN_DIR}/${SAFE_LABEL}.npz"
 MANIFEST_JSON="${RUN_DIR}/manifest.json"
+RUNTIME_COMPONENTS_JSON="${RUN_DIR}/runtime_components.json"
 RUNNER_STATUS_JSON="${RUN_DIR}/runner_status.json"
 TOTAL_TIMEOUT_S=900
 
@@ -230,27 +241,85 @@ require_file "$ENCODER_MODEL" "encoder model"
 require_file "$OBS_CONFIG" "observation config"
 require_file "$PLANNER_MODEL" "planner model"
 require_file "$GR00T_43DOF_USD" "GR00T G1 43-DoF import USD"
-require_file "$EXTERNAL_LAUNCHER" "SONY launcher"
-require_file "$EXTERNAL_WRAPPER" "SONY launcher wrapper"
 require_file "$MOCAP_MANAGER" "mocap manager"
 require_file "$BVH_SENDER" "BVH sender"
-require_file "$DEPLOY_SETUP_ENV" "deploy runtime setup_env.sh"
+require_executable "$TELEOP_PYTHON" "teleop venv Python"
+require_file "$DEPLOY_FASTRTPS_PROFILE" "deploy FastRTPS profile"
+require_file "$DEPLOY_LIBDDSC" "deploy libddsc.so.0"
+require_file "$DEPLOY_LIBDDSCXX" "deploy libddscxx.so.0"
+require_file "$PROXY_LIBDDSC" "proxy libddsc.so.0"
+require_file "$PROXY_LIBDDSCXX" "proxy libddscxx.so.0"
 require_executable "$DEPLOY_BIN" "deploy binary"
 require_executable "$PROXY_BIN" "proxy binary"
 DEPLOY_BIN="$(readlink -f -- "$DEPLOY_BIN")"
-if [[ -n "${DEPLOY_BIN_SHA256_EXPECTED:-}" ]]; then
-    [[ "$DEPLOY_BIN_SHA256_EXPECTED" =~ ^[[:xdigit:]]{64}$ ]] || {
-        echo "✗ DEPLOY_BIN_SHA256_EXPECTED 必须是 64 位 SHA256" >&2
+DEPLOY_LIBDDSC="$(readlink -f -- "$DEPLOY_LIBDDSC")"
+DEPLOY_LIBDDSCXX="$(readlink -f -- "$DEPLOY_LIBDDSCXX")"
+PROXY_LIBDDSC="$(readlink -f -- "$PROXY_LIBDDSC")"
+PROXY_LIBDDSCXX="$(readlink -f -- "$PROXY_LIBDDSCXX")"
+
+verify_expected_sha256() { # verify_expected_sha256 <file> <expected-env-name>
+    local path="$1" expected_name="$2" expected="${!2:-}" actual
+    [[ -n "$expected" ]] || return 0
+    [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || {
+        echo "✗ $expected_name 必须是 64 位 SHA256" >&2
         exit 2
     }
-    DEPLOY_BIN_SHA256_ACTUAL="$(sha256sum -- "$DEPLOY_BIN" | awk '{print $1}')"
-    if [[ "$DEPLOY_BIN_SHA256_ACTUAL" != "$DEPLOY_BIN_SHA256_EXPECTED" ]]; then
-        echo "✗ deploy binary 指纹变化: $DEPLOY_BIN" >&2
-        echo "  expected=$DEPLOY_BIN_SHA256_EXPECTED" >&2
-        echo "  actual=$DEPLOY_BIN_SHA256_ACTUAL" >&2
+    actual="$(sha256sum -- "$path" | awk '{print $1}')"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "✗ runtime artifact 指纹变化: $path" >&2
+        echo "  expected=$expected" >&2
+        echo "  actual=$actual" >&2
         exit 2
     fi
-fi
+}
+
+verify_linked_library() { # verify_linked_library <binary> <soname> <expected-realpath> <library-path>
+    local binary="$1" soname="$2" expected="$3" library_path="$4"
+    local output actual
+    output="$(
+        LD_LIBRARY_PATH="$library_path" ldd "$binary" 2>&1
+    )" || {
+        echo "✗ ldd 失败: $binary" >&2
+        printf '%s\n' "$output" >&2
+        exit 2
+    }
+    if printf '%s\n' "$output" | grep -q 'not found'; then
+        echo "✗ runtime 动态库不完整: $binary" >&2
+        printf '%s\n' "$output" >&2
+        exit 2
+    fi
+    actual="$(
+        printf '%s\n' "$output" |
+            awk -v soname="$soname" '$1 == soname && $2 == "=>" {print $3; exit}'
+    )"
+    actual="$(readlink -f -- "$actual" 2>/dev/null || true)"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "✗ $binary 的 $soname 解析到非固定库" >&2
+        echo "  expected=$expected" >&2
+        echo "  actual=${actual:-<missing>}" >&2
+        exit 2
+    fi
+}
+
+verify_expected_sha256 "$DEPLOY_BIN" DEPLOY_BIN_SHA256_EXPECTED
+verify_expected_sha256 \
+    "$DEPLOY_FASTRTPS_PROFILE" DEPLOY_FASTRTPS_PROFILE_SHA256_EXPECTED
+verify_expected_sha256 "$DEPLOY_LIBDDSC" DEPLOY_LIBDDSC_SHA256_EXPECTED
+verify_expected_sha256 "$DEPLOY_LIBDDSCXX" DEPLOY_LIBDDSCXX_SHA256_EXPECTED
+verify_expected_sha256 "$PROXY_LIBDDSC" PROXY_LIBDDSC_SHA256_EXPECTED
+verify_expected_sha256 "$PROXY_LIBDDSCXX" PROXY_LIBDDSCXX_SHA256_EXPECTED
+verify_linked_library \
+    "$DEPLOY_BIN" libddsc.so.0 "$DEPLOY_LIBDDSC" \
+    "${DEPLOY_DDS_LIB_DIR}:${DEPLOY_SDK_LIB_DIR}"
+verify_linked_library \
+    "$DEPLOY_BIN" libddscxx.so.0 "$DEPLOY_LIBDDSCXX" \
+    "${DEPLOY_DDS_LIB_DIR}:${DEPLOY_SDK_LIB_DIR}"
+verify_linked_library \
+    "$PROXY_BIN" libddsc.so.0 "$PROXY_LIBDDSC" \
+    "${PROXY_DDS_LIB_DIR}:${PROXY_SDK_LIB_DIR}"
+verify_linked_library \
+    "$PROXY_BIN" libddscxx.so.0 "$PROXY_LIBDDSCXX" \
+    "${PROXY_DDS_LIB_DIR}:${PROXY_SDK_LIB_DIR}"
 DEPLOY_RUNTIME_REPO="$(git -C "$DEPLOY_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
 DEPLOY_SOURCE="${DEPLOY_ROOT}/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp"
 [[ -f "$DEPLOY_SOURCE" ]] || DEPLOY_SOURCE=""
@@ -266,7 +335,13 @@ PORT_PATTERN=':(5557|5560)\b'
 if [[ "$JITTER_INPUT" == "bvh" ]]; then
     PORT_PATTERN=':(5556|5557|5560|12352)\b'
 fi
-PORT_LISTENERS="$(ss -H -ltnp 2>/dev/null | rg "$PORT_PATTERN" || true)"
+current_port_listeners() {
+    {
+        ss -H -ltnp 2>/dev/null
+        [[ "$JITTER_INPUT" == "bvh" ]] && ss -H -lunp 2>/dev/null
+    } | rg "$PORT_PATTERN" || true
+}
+PORT_LISTENERS="$(current_port_listeners)"
 if [[ -n "$PORT_LISTENERS" ]]; then
     echo "✗ 闭环所需端口已被其他进程监听，拒绝启动：" >&2
     printf '%s\n' "$PORT_LISTENERS" >&2
@@ -284,6 +359,7 @@ RUNNER_COMMAND=(
     "${HEADLESS_ARGS[@]}" --device cpu
     --out "$OUT_NPZ"
     --run_manifest "$MANIFEST_JSON"
+    --runtime_manifest "$RUNTIME_COMPONENTS_JSON"
     --status_file "$RUNNER_STATUS_JSON"
     --kit_args "--/app/vsync=false --/app/runLoops/main/rateLimitEnabled=false"
     "${RUNNER_EXTRA_ARGS[@]}"
@@ -307,14 +383,18 @@ MANIFEST_COMMAND=(
     --planner "$PLANNER_MODEL"
     --gr00t-43dof-usd "$GR00T_43DOF_USD"
     --proxy-bin "$PROXY_BIN"
+    --proxy-libddsc "$PROXY_LIBDDSC"
+    --proxy-libddscxx "$PROXY_LIBDDSCXX"
     --deploy-bin "$DEPLOY_BIN"
     --deploy-root "$DEPLOY_ROOT"
-    --deploy-setup-env "$DEPLOY_SETUP_ENV"
-    --external-launcher "$EXTERNAL_LAUNCHER"
-    --external-wrapper "$EXTERNAL_WRAPPER"
+    --deploy-fastrtps-profile "$DEPLOY_FASTRTPS_PROFILE"
+    --deploy-libddsc "$DEPLOY_LIBDDSC"
+    --deploy-libddscxx "$DEPLOY_LIBDDSCXX"
+    --teleop-python "$TELEOP_PYTHON"
     --mocap-manager "$MOCAP_MANAGER"
     --bvh-sender "$BVH_SENDER"
     --session "$SESSION"
+    --runtime-sidecar "$RUNTIME_COMPONENTS_JSON"
 )
 [[ -n "$DEPLOY_RUNTIME_REPO" ]] && MANIFEST_COMMAND+=(--deploy-runtime-repo "$DEPLOY_RUNTIME_REPO")
 [[ -n "$DEPLOY_SOURCE" ]] && MANIFEST_COMMAND+=(--deploy-source "$DEPLOY_SOURCE")
@@ -382,7 +462,7 @@ stop_session_and_wait() {
     local waited=0 listeners=""
     sleep "$grace"
     while :; do
-        listeners="$(ss -H -ltnp 2>/dev/null | rg "$PORT_PATTERN" || true)"
+        listeners="$(current_port_listeners)"
         if ! tmux has-session -t "=$SESSION" 2>/dev/null && [[ -z "$listeners" ]]; then
             TEARDOWN_DONE=1
             return 0
@@ -473,9 +553,10 @@ wait_for_log() { # wait_for_log <file> <pattern> <timeout_s> <desc>
 
 wait_for_log "$ISAAC_LOG" "waiting for valid deploy targets" 600 "IsaacLab 就绪（5560 状态发布中）"
 
-LAUNCH_STAMP=$(date +%s)
+INPUT_LOG=""
 PROXY_LOG=""
 DEPLOY_LOG=""
+SENDER_LOG=""
 
 start_explicit_deploy_window() { # start_explicit_deploy_window <keyboard|zmq_manager>
     local input_type="$1"
@@ -484,20 +565,7 @@ start_explicit_deploy_window() { # start_explicit_deploy_window <keyboard|zmq_ma
         input_args="--zmq-host localhost --zmq-port 5556 --zmq-topic pose"
     fi
     tmux new-window -t "$SESSION" -n deploy \
-        "cd '$DEPLOY_ROOT' && export DDS_INTERFACE=lo && source '$DEPLOY_SETUP_ENV' && '$DEPLOY_BIN' \"\$DDS_INTERFACE\" '$DECODER_MODEL' reference/example --obs-config '$OBS_CONFIG' --encoder-file '$ENCODER_MODEL' --planner-file '$PLANNER_MODEL' --input-type '$input_type' $input_args --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check |& tee '$DEPLOY_LOG'; exec bash"
-}
-
-wait_deploy_port_free() {
-    local waited=0
-    while ss -H -ltnp 2>/dev/null | rg -q ':5557\b'; do
-        sleep 1
-        waited=$((waited + 1))
-        if (( waited >= 15 )); then
-            log "✗ 本会话旧 deploy 窗口退出后 5557 仍未释放"
-            ss -H -ltnp 2>/dev/null | rg ':5557\b' >&2 || true
-            return 1
-        fi
-    done
+        "cd '$DEPLOY_ROOT' && unset LD_PRELOAD && export DDS_INTERFACE=lo ROS_LOCALHOST_ONLY=1 FASTRTPS_DEFAULT_PROFILES_FILE='$DEPLOY_FASTRTPS_PROFILE' LD_LIBRARY_PATH='${DEPLOY_DDS_LIB_DIR}:${DEPLOY_SDK_LIB_DIR}' && exec '$DEPLOY_BIN' \"\$DDS_INTERFACE\" '$DECODER_MODEL' reference/example --obs-config '$OBS_CONFIG' --encoder-file '$ENCODER_MODEL' --planner-file '$PLANNER_MODEL' --input-type '$input_type' $input_args --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check > >(tee '$DEPLOY_LOG') 2>&1"
 }
 
 if [[ "$JITTER_INPUT" == "keyboard" ]]; then
@@ -510,76 +578,42 @@ if [[ "$JITTER_INPUT" == "keyboard" ]]; then
     rm -f "$PROXY_LOG" "$DEPLOY_LOG"
     log "启动 proxy + deploy(--input-type keyboard) (session=$SESSION)"
     tmux new-session -d -s "$SESSION" -n proxy \
-        "cd '$SONY_REPO' && export DDS_INTERFACE=lo SDK='${SONY_REPO}/gear_sonic_deploy/thirdparty/unitree_sdk2' && export LD_LIBRARY_PATH=\"\$SDK/thirdparty/lib/\$(uname -m):\$SDK/lib/\$(uname -m):\${LD_LIBRARY_PATH:-}\" && '$PROXY_BIN' --interface \"\$DDS_INTERFACE\" --domain-id 0 --lowstate-hz 500.0 --follow-alpha 0.35 --isaac-state-endpoint tcp://127.0.0.1:5560 --isaac-state-topic sonic_state |& tee '$PROXY_LOG'; exec bash" \
+        "cd '$SONY_REPO' && unset LD_PRELOAD && export DDS_INTERFACE=lo LD_LIBRARY_PATH='${PROXY_DDS_LIB_DIR}:${PROXY_SDK_LIB_DIR}' && exec '$PROXY_BIN' --interface \"\$DDS_INTERFACE\" --domain-id 0 --lowstate-hz 500.0 --follow-alpha 0.35 --isaac-state-endpoint tcp://127.0.0.1:5560 --isaac-state-topic sonic_state > >(tee '$PROXY_LOG') 2>&1" \
         || { log "✗ tmux proxy 窗口启动失败"; exit 1; }
     start_explicit_deploy_window keyboard \
         || { log "✗ tmux deploy 窗口启动失败"; exit 1; }
-elif [[
-    "$PROTO" == "1"
-    && "$(readlink -f -- "$POLICY_ROOT")" == "$(readlink -f -- "${SONY_REPO}/gear_sonic_deploy/policy/release")"
-    && "$DEPLOY_ROOT" == "$(cd "${SONY_REPO}/gear_sonic_deploy" && pwd -P)"
-    && "$DEPLOY_BIN" == "$(readlink -f -- "${SONY_REPO}/gear_sonic_deploy/target/release/g1_deploy_onnx_ref")"
-]]; then
-    # ---------- 2. 启动 sony 三窗口（input/proxy/deploy，默认 v1+release 走原包装层） ----------
-    log "启动 sony 闭环三端 (session=$SESSION, bvh=$(basename "$BVH"))"
-    (
-        cd "$SONY_REPO"
-        SESSION="$SESSION" POSE_PROTOCOL_VERSION=1 \
-            ./scripts/launch_sonic_json_isaaclab_closed_loop.sh --no-isaaclab --replace "$BVH"
-    ) || { log "✗ sony launcher 失败"; exit 1; }
 else
-    # ---------- 2V. BVH + 非默认协议/policy：直调 python launcher（sony shell 包装层
-    # 把 --input-type/policy 路径写死，绕开；参数按 launch_sonic_json_isaaclab_closed_loop.sh
-    # 的 launcher_args 原样复刻 + policy 三件套 + 协议版本） ----------
-    log "直调 sony python launcher (v$PROTO, policy=$DEPLOY_POLICY_DIR, bvh=$(basename "$BVH"))"
-    (
-        cd "$SONY_REPO"
-        exec ./.venv_teleop/bin/python -u scripts/launch_sonic_local_isaaclab_closed_loop.py \
-            --session "$SESSION" --no-attach --replace \
-            --repo-root "$SONY_REPO" \
-            --proxy-bin "$PROXY_BIN" \
-            --no-isaaclab --no-bvh-stream-sender \
-            --bvh-stream-port 12352 \
-            --bvh-stream-bonedata-coordinate-frame left_handed_yup \
-            --bvh-stream-bonedata-position-scale 1.0 \
-            --bvh-stream-bonedata-input-quat-order xyzw \
-            --bvh-stream-bonedata-rotation-mode input \
-            --sony-pico-bonedata-basis zflip \
-            --sony-pico-smpl-joints-source pico_fk \
-            --pose-protocol-version "$PROTO" \
-            --zmq-port 5556 --debug-port 5557 --state-port 5560 \
-            --isaac-state-host 127.0.0.1 \
-            --decoder "$DECODER_MODEL" \
-            --encoder "$ENCODER_MODEL" \
-            --obs-config "$OBS_CONFIG"
-    ) || { log "✗ sony python launcher 失败"; exit 1; }
-    # 外部 launcher 的 deploy recipe 固定执行 SONY_REPO 下 target/release。
-    # 评测允许显式 pin 另一 runtime root/build，因此只替换本会话的 deploy
-    # 窗口，不改用户文件或生产二进制；proxy/input 仍固定来自 SONY_REPO。
+    # ---------- 2V. 自建 input + proxy + 固定 deploy + sender ----------
+    # 评测不经过外部 launcher：该 launcher 的 deploy recipe 会执行 ``just run``，
+    # 即使随后替换窗口，也可能重编译/覆盖生产 target/release，污染候选身份。
+    INPUT_LOG="${RUN_DIR}/input.log"
+    PROXY_LOG="${RUN_DIR}/proxy.log"
     DEPLOY_LOG="${RUN_DIR}/deploy.log"
-    rm -f "$DEPLOY_LOG"
-    log "替换本会话 deploy 窗口 → $DEPLOY_BIN"
-    tmux kill-window -t "${SESSION}:deploy" 2>/dev/null \
-        || { log "✗ 无法关闭本会话默认 deploy 窗口"; exit 1; }
-    wait_deploy_port_free || exit 1
+    SENDER_LOG="${RUN_DIR}/bvh_sender.log"
+    rm -f "$INPUT_LOG" "$PROXY_LOG" "$DEPLOY_LOG" "$SENDER_LOG"
+    if [[ "$PROTO" == "3" ]]; then
+        INPUT_SOURCE_ARGS="--source sony_pico --bvh-stream-host 0.0.0.0 --bvh-stream-port 12352 --bvh-stream-bonedata-position-scale 1.0 --bvh-stream-bonedata-input-quat-order xyzw --sony-pico-bonedata-basis zflip --sony-pico-smpl-joints-source pico_fk --pose-encoder-mode smpl"
+    else
+        INPUT_SOURCE_ARGS="--source bvh_stream --bvh-stream-host 0.0.0.0 --bvh-stream-port 12352 --bvh-stream-bonedata-coordinate-frame left_handed_yup --bvh-stream-bonedata-position-scale 1.0 --bvh-stream-bonedata-input-quat-order xyzw --bvh-stream-bonedata-rotation-mode input --pose-encoder-mode g1"
+    fi
+    log "启动隔离 BVH 链路 (v$PROTO, policy=$DEPLOY_POLICY_DIR, session=$SESSION)"
+    tmux new-session -d -s "$SESSION" -n input \
+        "cd '$SONY_REPO' && unset LD_PRELOAD && export PYTHONUNBUFFERED=1 PYTHONPATH='$SONY_REPO':\"\${PYTHONPATH:-}\" && exec '$TELEOP_PYTHON' -u '$MOCAP_MANAGER' $INPUT_SOURCE_ARGS --control-mode pose --pose-window-size 80 --pose-protocol-version '$PROTO' --zmq-port 5556 --log-interval-s 1.0 > >(tee '$INPUT_LOG') 2>&1" \
+        || { log "✗ tmux input 窗口启动失败"; exit 1; }
+    wait_for_log "$INPUT_LOG" "publishing on tcp://.*:5556" 60 "mocap manager 就绪（5556/12352）"
+    tmux new-window -t "$SESSION" -n proxy \
+        "cd '$SONY_REPO' && unset LD_PRELOAD && export DDS_INTERFACE=lo LD_LIBRARY_PATH='${PROXY_DDS_LIB_DIR}:${PROXY_SDK_LIB_DIR}' && exec '$PROXY_BIN' --interface \"\$DDS_INTERFACE\" --domain-id 0 --lowstate-hz 500.0 --follow-alpha 0.35 --isaac-state-endpoint tcp://127.0.0.1:5560 --isaac-state-topic sonic_state > >(tee '$PROXY_LOG') 2>&1" \
+        || { log "✗ tmux proxy 窗口启动失败"; exit 1; }
     start_explicit_deploy_window zmq_manager \
         || { log "✗ 显式 deploy 窗口启动失败"; exit 1; }
-    # BVH 发送端窗口（包装层的 sony_json_sender 等价物，.bvh 走 bvh_stream_sender）
-    tmux new-window -t "$SESSION" -n sony_json_sender \
-        "cd '$SONY_REPO' && export PYTHONUNBUFFERED=1 PYTHONPATH='$SONY_REPO' && ./.venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_sender.py --bvh-file '$BVH' --host 127.0.0.1 --port 12352 --fps 50 --unit-scale 0.01 --loop |& tee /tmp/sonic_local_bvh_sender_\$(date +%Y%m%d_%H%M%S).log; exec bash" \
+    tmux new-window -t "$SESSION" -n bvh_sender \
+        "cd '$SONY_REPO' && unset LD_PRELOAD && export PYTHONUNBUFFERED=1 PYTHONPATH='$SONY_REPO':\"\${PYTHONPATH:-}\" && exec '$TELEOP_PYTHON' -u '$BVH_SENDER' --bvh-file '$BVH' --host 127.0.0.1 --port 12352 --fps 50 --unit-scale 0.01 --format msgpack --loop --log-interval-s 1.0 > >(tee '$SENDER_LOG') 2>&1" \
         || { log "✗ BVH 发送端窗口启动失败"; exit 1; }
 fi
-
-newest_log() { # newest_log <name>：launch 之后新建的 /tmp/sonic_local_<name>_*.log
-    local f
-    f=$(ls -t /tmp/sonic_local_"$1"_*.log 2>/dev/null | head -1)
-    [[ -n "$f" && $(stat -c %Y "$f") -ge $((LAUNCH_STAMP - 5)) ]] && echo "$f"
-}
 
 # ---------- 3. 等 proxy src=isaac（lowstate 链路健康） ----------
 waited=0
 while :; do
-    [[ -z "$PROXY_LOG" ]] && PROXY_LOG=$(newest_log proxy)
     if [[ -n "$PROXY_LOG" ]] && grep -q "src=isaac" "$PROXY_LOG" 2>/dev/null; then
         log "✓ proxy src=isaac ($PROXY_LOG)"
         break
@@ -592,11 +626,20 @@ while :; do
     fi
 done
 
+"${CONDA_ENV_PREFIX}/bin/python" "$MANIFEST_HELPER" capture-runtime \
+    --output "$RUNTIME_COMPONENTS_JSON" \
+    --manifest "$MANIFEST_JSON" \
+    --session "$SESSION" \
+    --wait-s 60 || {
+    log "✗ 实际组件身份/参数与评测契约不一致"
+    exit 1
+}
+log "✓ runtime 组件身份已固定: $RUNTIME_COMPONENTS_JSON"
+
 # ---------- 4. 反复按 ']' 直到 deploy 目标进入 IsaacLab ----------
 log "向 deploy 窗口发送 ']' 进 CONTROL（每 5s 重试）"
 waited=0
 until grep -q "deploy targets flowing" "$ISAAC_LOG" 2>/dev/null; do
-    [[ -z "$DEPLOY_LOG" ]] && DEPLOY_LOG=$(newest_log deploy)
     if [[ -n "$DEPLOY_LOG" ]] && grep -Eq \
         "Unknown encoder observation|Invalid encoder observation|terminate called|Aborted \\(core dumped\\)|Recipe .* failed" \
         "$DEPLOY_LOG" 2>/dev/null; then
@@ -611,7 +654,6 @@ until grep -q "deploy targets flowing" "$ISAAC_LOG" 2>/dev/null; do
     fi
     if (( waited >= 240 )); then
         log "✗ deploy 目标 240s 未进入 IsaacLab；deploy 窗口尾部："
-        [[ -z "$DEPLOY_LOG" ]] && DEPLOY_LOG=$(newest_log deploy)
         [[ -n "$DEPLOY_LOG" ]] && tail -25 "$DEPLOY_LOG"
         exit 1
     fi
