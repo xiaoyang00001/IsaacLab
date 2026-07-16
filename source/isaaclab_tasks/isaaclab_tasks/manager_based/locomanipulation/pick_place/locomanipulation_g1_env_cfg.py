@@ -264,14 +264,21 @@ def _box_cfg(
                 angular_damping=0.20,
                 max_linear_velocity=2.0,
                 max_angular_velocity=720.0,
-                max_depenetration_velocity=0.50,
-                max_contact_impulse=0.20,
+                # A light box needs only a small support impulse.  Keeping these
+                # limits low prevents a stalled position-driven finger from
+                # turning a few millimetres of overlap into an ejection impulse.
+                max_depenetration_velocity=0.25,
+                max_contact_impulse=0.05,
                 solver_position_iteration_count=8,
                 solver_velocity_iteration_count=4,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.001,
                 rest_offset=0.0,
+                # Approximate the finite contact patch of a rubber finger pad so
+                # the box does not alternate between point contacts while held.
+                torsional_patch_radius=0.010,
+                min_torsional_patch_radius=0.005,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
             visual_material=sim_utils.PreviewSurfaceCfg(
@@ -279,9 +286,15 @@ def _box_cfg(
                 roughness=0.70,
             ),
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.2,
-                dynamic_friction=0.9,
+                static_friction=1.5,
+                dynamic_friction=1.2,
                 restitution=0.0,
+                friction_combine_mode="max",
+                restitution_combine_mode="min",
+                # A thin compliant layer absorbs closing-speed error before the
+                # rigid contact solver has to generate a large corrective impulse.
+                compliant_contact_stiffness=1000.0,
+                compliant_contact_damping=50.0,
             ),
         ),
     )
@@ -557,10 +570,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_hand_middle_.*",
                 ".*_hand_thumb_.*",
             ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 6.0),
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 2.0),
             velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 2.5),
-            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 30.0),
-            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 3.0),
+            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 15.0),
+            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 0.5),
             armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.02),
         ),
     },
@@ -675,9 +688,9 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         write_body_joint_state=_isaac_robot_write_body_joint_state(robot_id),
         write_hand_joint_state=_isaac_robot_write_hand_joint_state(robot_id),
         use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
-        body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.20),
+        body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.30),
         zero_target_only_body_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_BODY_VELOCITY", False),
-        zero_target_only_hand_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_HAND_VELOCITY", False),
+        zero_target_only_hand_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_HAND_VELOCITY", True),
         body_joint_target_scale_overrides=_isaac_robot_cfg_pattern_float_dict(
             robot_id,
             "BODY_JOINT_TARGET_SCALE_OVERRIDES",

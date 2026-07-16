@@ -103,20 +103,24 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     use_source_joint_velocity: bool = True
     """Whether to use MuJoCo joint velocity when writing or targeting mirrored joints."""
 
-    body_joint_target_max_delta: float = 0.08
-    """Maximum per-step body target change in radians when body joints are not hard-written."""
+    body_joint_target_max_delta: float = 0.30
+    """Maximum body drive position error in radians when body joints are not hard-written."""
 
     zero_target_only_body_velocity: bool = False
     """Whether to zero velocity targets for mirrored body joints that are driven only by actuator targets."""
 
-    zero_target_only_hand_velocity: bool = False
-    """Whether to zero velocity targets for mirrored hand joints that are driven only by actuator targets."""
+    zero_target_only_hand_velocity: bool = True
+    """Whether to zero velocity targets for mirrored hand joints that are driven only by actuator targets.
+
+    Enabling this keeps noisy or contact-incompatible source hand velocities out of the damping term while the
+    position target continues to mirror the source hand pose.
+    """
 
     body_joint_target_scale_overrides: dict[str, float] | None = None
     """Regex-to-scale overrides applied to mirrored body joint position and velocity targets."""
 
-    hand_joint_target_max_delta: float = 0.20
-    """Maximum per-step hand target change in radians when hand joints are not hard-written."""
+    hand_joint_target_max_delta: float = 0.02
+    """Maximum hand drive position error in radians when hand joints are not hard-written."""
 
     hold_default_until_first_packet: bool = True
     """Whether to hold the default standing pose until the first valid MuJoCo body packet arrives."""
