@@ -179,6 +179,55 @@ class SonicDeployTargetActionCfg(ActionTermCfg):
     封顶后 policy 追不上失衡，摔倒反增 3 倍。仅在诊断"放电脉冲"时临时启用。
     """
 
+    elastic_band: bool = False
+    """弹力带替代硬锁根（sim2sim 清单第④项，MuJoCo ElasticBand 语义移植）。
+
+    开启后锁根阶段不再逐子步写回根位姿，改为朝锚点施加弹簧 PD 外力
+    （unitree_sdk2py_bridge.py:414-447 参考实现，增益原样）：policy 全程在
+    真实物理里平衡（带只提供纠正力），解锁=撤力，交接无放电——对比硬锁根
+    的 settle/unlock/recover 全链级联（放电踹倒、obs 瞬移污染均源于硬写）。
+    settle/摔倒恢复/自动重解锁等状态机语义不变。"""
+
+    band_kp_pos: float = 2000.0
+    """弹力带位置弹簧刚度（N/m）。MuJoCo 参考 10000 在 PhysX 下发散（探针实测
+    悬吊摆振 84kN），降档 + 范数封顶后稳定；重力垂坠 mg/kp ≈ 0.17m 属带语义。"""
+
+    band_kd_pos: float = 400.0
+    """弹力带位置阻尼（N·s/m），约 0.75× 临界（2√(m·kp)≈530）。"""
+
+    band_kp_ang: float = 200.0
+    """弹力带姿态弹簧刚度（N·m/rad），拉向"锚点偏航的直立姿态"。MuJoCo 参考
+    1000 在 PhysX 单步延迟阻尼下转动通道失稳，降档。"""
+
+    band_kd_ang: float = 20.0
+    """弹力带姿态阻尼（N·m·s/rad）。"""
+
+    band_max_force_n: float = 800.0
+    """位置弹簧力范数封顶（N，≈2.3×mg）。限制单步能量注入防 PhysX 发散；
+    平衡点附近弹簧语义不变。<=0 不封顶。"""
+
+    band_max_torque_nm: float = 150.0
+    """姿态弹簧力矩范数封顶（N·m）。<=0 不封顶。"""
+
+    band_hover_m: float = 0.25
+    """锚点相对出生根高的抬升量（m）。默认 0.25=悬吊（MuJoCo 参考拉向 z=1，
+    equilibrium 离地悬空，policy 空中踏步，放手=小落差接住——实测其放手
+    零摔的关键要素之一）；0=原地持稳（脚承重，放手前状态更接近站立但
+    带阶段与地面接触耦合）。"""
+
+    band_release_steps: int = 0
+    """放手渐变步数（env 步）。0=瞬时撤力（MuJoCo 参考语义：带上已在真实
+    平衡，瞬时交接本身温和）；>0=增益线性降到 0 再撤。"""
+
+    band_raw_targets: bool = False
+    """带阶段是否让 deploy 目标裸流（MuJoCo 无限速语义）。⚠️实测（2026-07-16
+    band3/band4）：Isaac 回灌延迟振荡下托举期 policy 输出积压 2.4~2.9 rad，
+    放手泄洪+接触爆炸把 PhysX 打飞——延迟根治前保持 False（带期沿用锁根
+    限速，放手走增长曲线）。"""
+
+    band_body_name: str = "pelvis"
+    """弹力带附着 body（MuJoCo 参考优先 pelvis，无则 torso_link）。"""
+
     substep_consume: bool = False
     """稳态自由根下在物理子步（200Hz）也捞取 deploy 目标包并即时更新目标。
 

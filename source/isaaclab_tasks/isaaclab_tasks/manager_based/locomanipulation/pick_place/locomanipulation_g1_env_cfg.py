@@ -1066,6 +1066,18 @@ class ActionsCfg:
             # 子步消费（200Hz 捞 deploy 包，#8 回灌延迟治理）：稳态直通下砍掉
             # 动作通路 0~20ms 相位抽签。默认关，站立协议 A/B 验证后再转正。
             substep_consume=_env_flag("SONIC_DEPLOY_SUBSTEP_CONSUME", False),
+            # 弹力带替代硬锁根（#10，MuJoCo ElasticBand 语义）：锁根期改为朝锚点
+            # 弹簧 PD 外力，解锁=撤力，消灭放电/级联。默认关，A/B 验证后再转正。
+            elastic_band=_env_flag("SONIC_DEPLOY_ELASTIC_BAND", False),
+            band_release_steps=int(os.environ.get("SONIC_DEPLOY_BAND_RELEASE_STEPS", "0")),
+            band_hover_m=float(os.environ.get("SONIC_DEPLOY_BAND_HOVER_M", "0")),
+            band_raw_targets=_env_flag("SONIC_DEPLOY_BAND_RAW_TARGETS", False),
+            band_kp_pos=float(os.environ.get("SONIC_DEPLOY_BAND_KP_POS", "2000")),
+            band_kd_pos=float(os.environ.get("SONIC_DEPLOY_BAND_KD_POS", "400")),
+            band_kp_ang=float(os.environ.get("SONIC_DEPLOY_BAND_KP_ANG", "200")),
+            band_kd_ang=float(os.environ.get("SONIC_DEPLOY_BAND_KD_ANG", "20")),
+            band_max_force_n=float(os.environ.get("SONIC_DEPLOY_BAND_MAX_FORCE", "1500")),
+            band_max_torque_nm=float(os.environ.get("SONIC_DEPLOY_BAND_MAX_TORQUE", "150")),
             # 解锁前锁根排空目标积压（drain-then-release）。默认关：2026-07-15
             # 闭环 A/B 实测排空无法收敛（policy 锁根开环振荡数 rad），不优于基线。
             unlock_drain_backlog=_env_flag("SONIC_DEPLOY_UNLOCK_DRAIN", False),

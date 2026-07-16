@@ -1384,6 +1384,27 @@ class SonicDeployTargetAction(ActionTerm):
         self._drain_steps_remaining = 0
         self._last_raw_target: torch.Tensor | None = None
         self._root_pose_anchor: torch.Tensor | None = None
+        # 弹力带（cfg.elastic_band）：附着 body 解析 + 运行时状态（锚点/放手渐变）。
+        self._band_enabled = bool(getattr(self.cfg, "elastic_band", False))
+        self._band_body_ids: torch.Tensor | None = None
+        if self._band_enabled:
+            band_ids: list[int] = []
+            for body_name in (str(getattr(self.cfg, "band_body_name", "pelvis")), "torso_link"):
+                found_ids, _ = self._asset.find_bodies(body_name)
+                if len(found_ids) > 0:
+                    band_ids = [int(found_ids[0])]
+                    self._log_info(f"elastic band attaches to body '{body_name}' (id {band_ids[0]})")
+                    break
+            if not band_ids:
+                band_ids = [0]
+                self._log_warning("elastic band body not found; attaching to body 0")
+            self._band_body_ids = torch.tensor(band_ids, dtype=torch.long, device=self.device)
+        self._band_point: torch.Tensor | None = None
+        self._band_target_quat: torch.Tensor | None = None
+        self._band_release_total = 0
+        self._band_release_counter = 0
+        self._band_debug_counter = 0
+        self._band_wrench_zero = torch.zeros(self.num_envs, 1, 3, device=self.device, dtype=torch.float32)
         self._root_velocity_zero = torch.zeros(self.num_envs, 6, device=self.device, dtype=torch.float32)
         self._root_anchor_logged = False
         self._root_pose_unlocked = False
@@ -1746,7 +1767,17 @@ class SonicDeployTargetAction(ActionTerm):
             return self._processed_actions + delta
         max_delta = float(self.cfg.target_rate_limit_rad_per_step)
         if bool(self.cfg.rate_limit_only_while_root_locked) and (
-            self._root_pose_unlocked or self._unlock_blend_total > 0
+            self._root_pose_unlocked
+            or self._unlock_blend_total > 0
+            # band_raw_targets=True 时带阶段目标裸流（MuJoCo 语义）。实测警告：
+            # Isaac 回灌延迟振荡下 policy 被托举时输出积压到 2.4~2.9 rad，放手
+            # 泄洪+落地接触爆炸（band3/band4 两轮 PhysX 打飞）；延迟根治前默认
+            # 保留锁根限速堵积压。
+            or (
+                self._band_enabled
+                and bool(getattr(self.cfg, "band_raw_targets", False))
+                and self._settle_step_counter >= int(self.cfg.startup_settle_steps)
+            )
         ):
             # Closed loop handover: the policy's raw action is the contract (MuJoCo
             # deploy has no slew limiter), but an instant bypass discharges the
@@ -1778,6 +1809,10 @@ class SonicDeployTargetAction(ActionTerm):
 
     def _stabilize_root_pose(self) -> None:
         if not self.cfg.stabilize_root_pose or self._root_pose_unlocked:
+            return
+        if self._band_enabled:
+            # 弹力带模式：不写根位姿/速度，改为朝锚点施加弹簧 PD 外力。
+            self._stabilize_root_pose_band()
             return
         # Unlock blending: gradually release root velocity damping over N steps
         # while letting PhysX control the root pose. Unlike position lerping
@@ -1988,11 +2023,134 @@ class SonicDeployTargetAction(ActionTerm):
             vel[:, 3:] = 0.0
             self._asset.write_root_velocity_to_sim(vel)
 
+    def _stabilize_root_pose_band(self) -> None:
+        """弹力带根稳定（MuJoCo ElasticBand 移植，unitree_sdk2py_bridge.py:414-447）。
+
+        位置弹簧拉向锚点（可选悬吊抬升），姿态弹簧拉向"锚点偏航的直立姿态"；
+        外力经 permanent wrench composer 施加（world frame，每物理子步更新）。
+        policy 全程真实平衡，解锁=撤力（可选渐变），无硬锁根的放电/级联问题。
+        """
+        if self._root_pose_anchor is None:
+            self._root_pose_anchor = torch.cat(
+                [self._asset.data.root_pos_w, self._asset.data.root_quat_w], dim=-1
+            ).clone()
+            self._root_anchor_yaw = self._yaw_from_quat(self._root_pose_anchor[:, 3:7]).clone()
+            self._last_root_xy_target = self._root_pose_anchor[:, :2].clone()
+            self._last_root_yaw_target = self._root_anchor_yaw.clone()
+            self._band_point = self._root_pose_anchor[:, :3].clone()
+            self._band_point[:, 2] += float(getattr(self.cfg, "band_hover_m", 0.0))
+            self._band_target_quat = self._quat_from_yaw(self._root_anchor_yaw)
+            anchor = self._band_point[0].tolist()
+            self._log_info(
+                f"elastic band engaged at ({anchor[0]:+.3f},{anchor[1]:+.3f},{anchor[2]:+.3f}) "
+                f"kp={float(self.cfg.band_kp_pos):.0f}/{float(self.cfg.band_kp_ang):.0f}"
+            )
+        scale = 1.0
+        if self._band_release_total > 0:
+            self._band_release_counter += 1
+            scale = max(0.0, 1.0 - self._band_release_counter / float(self._band_release_total))
+            if self._band_release_counter >= self._band_release_total:
+                self._finish_band_release()
+                return
+        pos = self._asset.data.root_pos_w
+        quat = self._asset.data.root_quat_w
+        vel = self._asset.data.root_vel_w
+        force = (
+            float(self.cfg.band_kp_pos) * (self._band_point - pos)
+            - float(self.cfg.band_kd_pos) * vel[:, :3]
+        )
+        rotvec = self._quat_error_rotvec(quat, self._band_target_quat)
+        torque = -float(self.cfg.band_kp_ang) * rotvec - float(self.cfg.band_kd_ang) * vel[:, 3:]
+        # 范数封顶：限制单步能量注入（PhysX 显式外力 + 单步延迟阻尼的稳定裕度
+        # 低于 MuJoCo，探针实测参考增益裸奔发散）。平衡点附近弹簧语义不变。
+        max_f = float(getattr(self.cfg, "band_max_force_n", 0.0))
+        if max_f > 0.0:
+            f_norm = torch.linalg.norm(force, dim=-1, keepdim=True).clamp_min(1.0e-9)
+            force = force * torch.clamp(max_f / f_norm, max=1.0)
+        max_t = float(getattr(self.cfg, "band_max_torque_nm", 0.0))
+        if max_t > 0.0:
+            t_norm = torch.linalg.norm(torque, dim=-1, keepdim=True).clamp_min(1.0e-9)
+            torque = torque * torch.clamp(max_t / t_norm, max=1.0)
+        self._band_debug_counter += 1
+        if self._band_debug_counter % 200 == 1:
+            self._log_info(
+                f"band: z={float(pos[0, 2].item()):.3f} err={float(torch.norm(self._band_point[0] - pos[0]).item()):.3f}m "
+                f"|F|={float(torch.norm(force[0]).item()):.0f}N |T|={float(torch.norm(torque[0]).item()):.1f}Nm scale={scale:.2f}"
+            )
+        # 世界系→link 系自行旋转后走 is_global=False：is_global=True 路径实测把
+        # 力方向翻转（悬吊探针 3000N 向上反而加速砸地——疑 warp quatf xyzw 序
+        # 与 IsaacLab wxyz 数据错位，恒等姿态被读成绕 X 180°）。
+        force_b = self._rotate_world_to_link(force * scale, quat)
+        torque_b = self._rotate_world_to_link(torque * scale, quat)
+        self._asset.permanent_wrench_composer.set_forces_and_torques(
+            forces=force_b.unsqueeze(1),
+            torques=torque_b.unsqueeze(1),
+            body_ids=self._band_body_ids,
+            is_global=False,
+        )
+
+    @staticmethod
+    def _rotate_world_to_link(vec_w: torch.Tensor, quat_wxyz: torch.Tensor) -> torch.Tensor:
+        """v_link = R(q)ᵀ · v_world（q 为 link→world 的 wxyz 四元数）。"""
+        w = quat_wxyz[:, 0:1]
+        xyz = quat_wxyz[:, 1:4]
+        # R(q)ᵀ v = v + 2w(v×u) + 2u×(v×u)，u=xyz（等价于用共轭四元数旋转）
+        t = 2.0 * torch.cross(vec_w, xyz, dim=-1)
+        return vec_w + w * t + torch.cross(t, xyz, dim=-1)
+
+    def _finish_band_release(self) -> None:
+        self._clear_band_wrench()
+        self._band_release_total = 0
+        self._band_release_counter = 0
+        self._root_pose_unlocked = True
+        self._post_unlock_steps = 0
+        self._log_info("elastic band released; root is now free")
+
+    def _clear_band_wrench(self) -> None:
+        if self._band_body_ids is None:
+            return
+        self._asset.permanent_wrench_composer.set_forces_and_torques(
+            forces=self._band_wrench_zero,
+            torques=self._band_wrench_zero,
+            body_ids=self._band_body_ids,
+            is_global=True,
+        )
+
+    @staticmethod
+    def _quat_error_rotvec(quat_wxyz: torch.Tensor, target_wxyz: torch.Tensor) -> torch.Tensor:
+        """世界系姿态误差 rotvec（axis·angle）：q_err = q_cur ⊗ q_target⁻¹。"""
+        w1, x1, y1, z1 = quat_wxyz.unbind(-1)
+        # conj(target)
+        w2, x2, y2, z2 = target_wxyz.unbind(-1)
+        x2, y2, z2 = -x2, -y2, -z2
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+        sign = torch.where(w < 0.0, -1.0, 1.0)
+        w, x, y, z = w * sign, x * sign, y * sign, z * sign
+        v = torch.stack([x, y, z], dim=-1)
+        v_norm = torch.linalg.norm(v, dim=-1, keepdim=True).clamp_min(1.0e-9)
+        angle = 2.0 * torch.atan2(v_norm.squeeze(-1), w)
+        return v / v_norm * angle.unsqueeze(-1)
+
     def unlock_root_pose(self) -> None:
         if not self.cfg.stabilize_root_pose:
             self._log_info("root pose stabilization is disabled; unlock request ignored")
             return
         if self._root_pose_unlocked:
+            return
+        if self._band_enabled:
+            if self._band_release_total > 0:
+                return  # already releasing
+            steps = int(getattr(self.cfg, "band_release_steps", 0))
+            if steps <= 0:
+                self._finish_band_release()
+            else:
+                self._band_release_total = steps
+                self._band_release_counter = 0
+                self._post_unlock_steps = 0
+                self._log_info(f"elastic band release ramp started ({steps} steps)")
             return
         if self._unlock_blend_total > 0:
             return  # already blending
@@ -2268,6 +2426,12 @@ class SonicDeployTargetAction(ActionTerm):
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
+            if self._band_enabled:
+                self._clear_band_wrench()
+                self._band_point = None
+                self._band_target_quat = None
+                self._band_release_total = 0
+                self._band_release_counter = 0
             self._processed_actions.copy_(self._default_joint_pos)
             self._last_target_step_delta_absmax.zero_()
             self._last_root_xy_step_norm.zero_()
