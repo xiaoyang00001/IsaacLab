@@ -66,6 +66,10 @@ def main() -> int:
         "--wait_first_packet_s", type=float, default=60.0,
         help="等首包的超时（deploy 未进 CONTROL 时 g1_debug 不发包）",
     )
+    parser.add_argument(
+        "--max_packet_stale_s", type=float, default=0.5,
+        help="录制开始后允许的最长 g1_debug 空窗；超出则保存部分诊断并返回非零",
+    )
     args = parser.parse_args()
 
     ctx = zmq.Context.instance()
@@ -84,28 +88,33 @@ def main() -> int:
     def log(msg: str) -> None:
         print(f"[StreamRecorder] {msg}", flush=True)
 
-    def drain_base_pose(last):
+    def drain_base_pose(last, last_rx_wall):
         if udp is None:
-            return last
+            return last, last_rx_wall
         while True:
             try:
                 raw, _ = udp.recvfrom(65536)
             except BlockingIOError:
-                return last
+                return last, last_rx_wall
             try:
                 last = json.loads(raw.decode())
+                last_rx_wall = time.monotonic()
             except (UnicodeDecodeError, json.JSONDecodeError):
                 pass
 
     wall_t, q, dq, target, packets = [], [], [], [], []
-    reference = []  # body_q_target（参考动作目标，跟随延迟测量用；包内缺失则整体不落盘）
+    reference, reference_valid = [], []
     root_pos, root_quat, tilt, fall = [], [], [], []
+    base_valid, base_age_s, base_sim_time_s = [], [], []
     base = None
+    base_rx_wall = None
     n_bad = 0
+    stale_abort = False
 
     log(f"subscribing {args.endpoint} topic={args.topic}; waiting first packet")
     deadline_first = time.monotonic() + args.wait_first_packet_s
     started = None
+    last_packet_wall = None
     while True:
         try:
             raw = sub.recv()
@@ -113,6 +122,21 @@ def main() -> int:
             if started is None and time.monotonic() > deadline_first:
                 log("ERROR: no g1_debug packet (deploy not in CONTROL?)")
                 return 3
+            if (
+                started is not None
+                and args.max_packet_stale_s > 0.0
+                and last_packet_wall is not None
+                and time.monotonic() - last_packet_wall > args.max_packet_stale_s
+            ):
+                stale_abort = True
+                log(
+                    f"ERROR: g1_debug stale for more than {args.max_packet_stale_s:.3f}s; "
+                    "saving partial recording"
+                )
+                break
+            continue
+        if not raw.startswith(args.topic.encode()):
+            n_bad += 1
             continue
         payload = raw[topic_len:]
         try:
@@ -127,8 +151,10 @@ def main() -> int:
         if started is None:
             started = time.monotonic()
             log(f"first packet; recording {args.seconds:.0f}s")
-        base = drain_base_pose(base)
-        wall_t.append(time.monotonic())
+        now = time.monotonic()
+        last_packet_wall = now
+        base, base_rx_wall = drain_base_pose(base, base_rx_wall)
+        wall_t.append(now)
         q.append(np.asarray(bq, dtype=np.float32))
         dq.append(np.asarray(m.get("body_dq", [0.0] * 29), dtype=np.float32))
         target.append(np.asarray(la, dtype=np.float32))
@@ -136,13 +162,28 @@ def main() -> int:
         ref = m.get("body_q_target")
         if ref is not None and len(ref) == 29:
             reference.append(np.asarray(ref, dtype=np.float32))
+            reference_valid.append(True)
+        else:
+            reference.append(np.full(29, np.nan, dtype=np.float32))
+            reference_valid.append(False)
         if base is not None:
             root_pos.append(np.asarray(base["base_pos"], dtype=np.float32))
             bw, bx, by, bz = base["base_quat_wxyz"]
             root_quat.append(np.asarray([bw, bx, by, bz], dtype=np.float32))
             tilt.append(tilt_deg_from_quat_wxyz(bw, bx, by, bz))
             fall.append(bool(base.get("fall", False)))
-        if time.monotonic() - started >= args.seconds:
+            base_valid.append(True)
+            base_age_s.append(float(now - base_rx_wall) if base_rx_wall is not None else math.nan)
+            base_sim_time_s.append(float(base.get("sim_time_s", math.nan)))
+        else:
+            root_pos.append(np.full(3, np.nan, dtype=np.float32))
+            root_quat.append(np.full(4, np.nan, dtype=np.float32))
+            tilt.append(math.nan)
+            fall.append(False)
+            base_valid.append(False)
+            base_age_s.append(math.nan)
+            base_sim_time_s.append(math.nan)
+        if now - started >= args.seconds:
             break
 
     n = len(q)
@@ -161,26 +202,35 @@ def main() -> int:
         "step_delta": step_delta,
         "packets": np.asarray(packets, dtype=np.int64),
         "joint_names": np.asarray(MUJOCO_JOINT_NAMES),
+        "reference": np.stack(reference),
+        "reference_valid": np.asarray(reference_valid, dtype=np.bool_),
+        "root_pos": np.stack(root_pos),
+        "root_quat": np.stack(root_quat),
+        "tilt_deg": np.asarray(tilt, dtype=np.float32),
+        "fall": np.asarray(fall, dtype=np.bool_),
+        "base_valid": np.asarray(base_valid, dtype=np.bool_),
+        "base_age_s": np.asarray(base_age_s, dtype=np.float32),
+        "base_sim_time_s": np.asarray(base_sim_time_s, dtype=np.float64),
         "meta": np.asarray(json.dumps({
+            "schema_version": 2,
             "source": "sonic_debug_stream_recorder",
             "endpoint": args.endpoint,
             "seconds": float(args.seconds),
             "n_bad_packets": n_bad,
-            "has_base_pose": bool(root_pos),
+            "has_base_pose": bool(np.any(base_valid)),
+            "base_valid_frac": float(np.mean(base_valid)),
             "joint_order": "mujoco",
+            "stale_abort": stale_abort,
+            "max_packet_stale_s": float(args.max_packet_stale_s),
         })),
     }
-    if len(reference) == n:
-        out["reference"] = np.stack(reference)
-    if root_pos:
-        out["root_pos"] = np.stack(root_pos)
-        out["root_quat"] = np.stack(root_quat)
-        out["tilt_deg"] = np.asarray(tilt, dtype=np.float32)
-        out["fall"] = np.asarray(fall, dtype=np.bool_)
     np.savez_compressed(args.out, **out)
     hz = (n - 1) / max(1e-6, wall_t[-1] - wall_t[0])
-    log(f"saved {args.out} packets={n} rate={hz:.1f}Hz bad={n_bad} base_pose={len(root_pos)}")
-    return 0
+    log(
+        f"saved {args.out} packets={n} rate={hz:.1f}Hz bad={n_bad} "
+        f"base_valid={sum(base_valid)}/{n} stale_abort={stale_abort}"
+    )
+    return 5 if stale_abort else 0
 
 
 if __name__ == "__main__":

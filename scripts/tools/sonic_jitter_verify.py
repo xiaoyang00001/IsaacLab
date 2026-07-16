@@ -63,7 +63,36 @@ parser.add_argument(
 )
 parser.add_argument(
     "--warmup_packets", type=int, default=25,
-    help="Deploy packets to consume before the locked recording phase starts (~0.5s at 50Hz).",
+    help="Valid deploy targets to consume before locked recording starts (~0.5s at 50Hz).",
+)
+parser.add_argument(
+    "--max_target_stale_s",
+    "--max-target-stale-s",
+    dest="max_target_stale_s",
+    type=float,
+    default=0.10,
+    help="Fail and save a partial run if target age exceeds this many seconds; <=0 disables this gate.",
+)
+parser.add_argument(
+    "--min_valid_coverage",
+    "--min-valid-coverage",
+    dest="min_valid_coverage",
+    type=float,
+    default=0.80,
+    help="Minimum fraction of recorded env steps with a fresh valid target update; <=0 disables this gate.",
+)
+parser.add_argument(
+    "--disable_target_gates",
+    "--disable-target-gates",
+    dest="disable_target_gates",
+    action="store_true",
+    help="Disable stale/coverage result gates (waiting for an initial valid target is still required).",
+)
+parser.add_argument(
+    "--run_manifest",
+    type=str,
+    default="",
+    help="Optional run manifest JSON object; loaded verbatim into meta['run_manifest'].",
 )
 parser.add_argument(
     "--hold_seconds", type=float, default=0.0,
@@ -72,6 +101,20 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+_RUN_MANIFEST: dict = {}
+_RUN_MANIFEST_PATH = ""
+if args_cli.run_manifest:
+    _RUN_MANIFEST_PATH = os.path.abspath(os.path.expanduser(args_cli.run_manifest))
+    try:
+        with open(_RUN_MANIFEST_PATH, encoding="utf-8") as manifest_file:
+            _RUN_MANIFEST = json.load(manifest_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        parser.error(f"--run_manifest could not be loaded from {_RUN_MANIFEST_PATH!r}: {exc}")
+    if not isinstance(_RUN_MANIFEST, dict):
+        parser.error(
+            f"--run_manifest must contain a JSON object, got {type(_RUN_MANIFEST).__name__}"
+        )
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -85,6 +128,7 @@ import torch
 import isaaclab_tasks  # noqa: F401
 import isaaclab_tasks.manager_based.locomanipulation.pick_place  # noqa: F401  (blacklist 包手动注册)
 import isaaclab_tasks.manager_based.manipulation.pick_place  # noqa: F401
+import isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions as sonic_actions_module
 
 from isaaclab_tasks.utils import parse_env_cfg
 
@@ -98,23 +142,43 @@ class StepRecorder:
 
     def __init__(self):
         self.wall_t: list[float] = []
-        self.phase: list[int] = []  # 0=locked, 1=free
+        self.wall_time_unix_s: list[float] = []
+        self.control_state: list[int] = []  # 0=locked, 1=handover, 2=true-free, 3=recovery
+        self.phase: list[int] = []  # Compatibility: 1 only for true-free control_state=2.
         self.q: list[np.ndarray] = []
         self.dq: list[np.ndarray] = []
         self.target: list[np.ndarray] = []
+        self.reference: list[np.ndarray] = []
+        self.reference_valid: list[bool] = []
         self.step_delta: list[float] = []
         self.root_pos: list[np.ndarray] = []
         self.root_quat: list[np.ndarray] = []
         self.tilt_deg: list[float] = []
-        self.packets: list[int] = []
+        self.packet_count: list[int] = []
+        self.valid_target_count: list[int] = []
+        self.invalid_target_count: list[int] = []
+        self.target_age_s: list[float] = []
+        self.recovery_count: list[int] = []
+        self.source_index: list[int] = []
+        self.source_timestamp: list[float] = []
 
-    def record(self, term, asset, joint_ids, env_origin_z: float, phase: int) -> None:
+    def record(self, term, asset, joint_ids, env_origin_z: float) -> None:
         data = asset.data
         self.wall_t.append(time.monotonic())
-        self.phase.append(phase)
+        self.wall_time_unix_s.append(time.time())
+        control_state = int(term.control_state)
+        self.control_state.append(control_state)
+        self.phase.append(1 if control_state == 2 else 0)
         self.q.append(data.joint_pos[0, joint_ids].detach().cpu().numpy().copy())
         self.dq.append(data.joint_vel[0, joint_ids].detach().cpu().numpy().copy())
         self.target.append(term.processed_actions[0].detach().cpu().numpy().copy())
+        reference = term._last_payload_reference_target
+        if reference is None:
+            self.reference.append(np.full(len(joint_ids), np.nan, dtype=np.float32))
+            self.reference_valid.append(False)
+        else:
+            self.reference.append(reference[0].detach().cpu().numpy().astype(np.float32, copy=True))
+            self.reference_valid.append(True)
         self.step_delta.append(float(term._last_target_step_delta_absmax[0].item()))
         root_pos = data.root_pos_w[0].detach().cpu().numpy().copy()
         root_pos[2] -= env_origin_z
@@ -123,21 +187,41 @@ class StepRecorder:
         gb = data.projected_gravity_b[0]
         tilt = math.degrees(math.acos(max(-1.0, min(1.0, -float(gb[2].item())))))
         self.tilt_deg.append(tilt)
-        self.packets.append(int(term._packet_count))
+        self.packet_count.append(int(term._packet_count))
+        self.valid_target_count.append(int(term._valid_target_count))
+        self.invalid_target_count.append(int(term._invalid_target_count))
+        self.target_age_s.append(float(term.target_age_s))
+        self.recovery_count.append(int(term._recovery_count))
+        self.source_index.append(int(term._last_source_index))
+        self.source_timestamp.append(float(term._last_source_timestamp))
 
     def save(self, path: str, joint_names: list[str], meta: dict) -> None:
+        output_dir = os.path.dirname(os.path.abspath(path))
+        os.makedirs(output_dir, exist_ok=True)
+        packet_count = np.asarray(self.packet_count, dtype=np.int64)
         np.savez_compressed(
             path,
             wall_t=np.asarray(self.wall_t, dtype=np.float64),
+            wall_time_unix_s=np.asarray(self.wall_time_unix_s, dtype=np.float64),
+            control_state=np.asarray(self.control_state, dtype=np.int8),
             phase=np.asarray(self.phase, dtype=np.int8),
             q=np.stack(self.q).astype(np.float32),
             dq=np.stack(self.dq).astype(np.float32),
             target=np.stack(self.target).astype(np.float32),
+            reference=np.stack(self.reference).astype(np.float32),
+            reference_valid=np.asarray(self.reference_valid, dtype=np.bool_),
             step_delta=np.asarray(self.step_delta, dtype=np.float32),
             root_pos=np.stack(self.root_pos).astype(np.float32),
             root_quat=np.stack(self.root_quat).astype(np.float32),
             tilt_deg=np.asarray(self.tilt_deg, dtype=np.float32),
-            packets=np.asarray(self.packets, dtype=np.int64),
+            packet_count=packet_count,
+            packets=packet_count,  # Backward-compatible alias.
+            valid_target_count=np.asarray(self.valid_target_count, dtype=np.int64),
+            invalid_target_count=np.asarray(self.invalid_target_count, dtype=np.int64),
+            target_age_s=np.asarray(self.target_age_s, dtype=np.float64),
+            recovery_count=np.asarray(self.recovery_count, dtype=np.int64),
+            source_index=np.asarray(self.source_index, dtype=np.int64),
+            source_timestamp=np.asarray(self.source_timestamp, dtype=np.float64),
             joint_names=np.asarray(joint_names),
             meta=np.asarray(json.dumps(meta)),
         )
@@ -205,36 +289,162 @@ def main() -> int:
         wall_dts.append(now - last_step_wall)
         last_step_wall = now
 
+    target_gates_enabled = not bool(args_cli.disable_target_gates)
+    _log(
+        "target gates "
+        f"enabled={target_gates_enabled} "
+        f"max_stale={float(args_cli.max_target_stale_s):.3f}s "
+        f"min_valid_coverage={float(args_cli.min_valid_coverage):.3f}"
+    )
+
+    def build_meta(*, status: str, unlocked: bool, target_gate: dict) -> dict:
+        wall_samples = wall_dts[10:] if len(wall_dts) > 10 else wall_dts
+        if wall_samples:
+            env_hz = 1.0 / np.clip(np.asarray(wall_samples, dtype=np.float64), 1.0e-6, None)
+            env_hz_mean = float(env_hz.mean())
+            env_hz_p5 = float(np.percentile(env_hz, 5))
+        else:
+            env_hz_mean = math.nan
+            env_hz_p5 = math.nan
+        return {
+            "schema_version": 2,
+            "status": status,
+            "task": args_cli.task,
+            "locked_seconds": float(args_cli.locked_seconds),
+            "free_seconds": float(args_cli.free_seconds) if unlocked else 0.0,
+            "unlocked": unlocked,
+            "step_dt": step_dt,
+            "settle_steps": int(term.cfg.startup_settle_steps),
+            "unlock_blend_steps": int(term.cfg.unlock_blend_steps),
+            "target_rate_limit": float(term.cfg.target_rate_limit_rad_per_step),
+            "post_unlock_cap": float(getattr(term.cfg, "post_unlock_rate_limit_max_delta", -1.0)),
+            "post_unlock_growth": float(getattr(term.cfg, "post_unlock_rate_limit_growth_steps", -1.0)),
+            "env_hz_mean": env_hz_mean,
+            "env_hz_p5": env_hz_p5,
+            "packets_total": int(term._packet_count),
+            "valid_targets_total": int(term._valid_target_count),
+            "invalid_targets_total": int(term._invalid_target_count),
+            "recoveries_total": int(term._recovery_count),
+            "source_index_field": str(term._last_source_index_field),
+            "source_timestamp_field": str(term._last_source_timestamp_field),
+            "control_state_encoding": {
+                "locked": 0,
+                "handover_or_blend": 1,
+                "true_free": 2,
+                "recovery": 3,
+            },
+            "target_gate": target_gate,
+            "run_manifest_path": _RUN_MANIFEST_PATH,
+            "run_manifest": _RUN_MANIFEST,
+            "argv": list(sys.argv),
+            "cwd": os.getcwd(),
+            "isaaclab_tasks_file": os.path.realpath(str(isaaclab_tasks.__file__)),
+            "actions_module_file": os.path.realpath(str(sonic_actions_module.__file__)),
+            "sonic_env": {
+                key: value for key, value in sorted(os.environ.items()) if key.startswith("SONIC_")
+            },
+        }
+
     # ---- 阶段 0：等 deploy 目标流入（期间照常推进：settle 走完、5560 状态持续发布）----
-    _log("waiting for deploy packets (start proxy/deploy now; press ']' in deploy)")
+    _log("waiting for valid deploy targets (start proxy/deploy now; press ']' in deploy)")
     wait_deadline = time.monotonic() + float(args_cli.wait_packets_s)
     settle_steps = int(term.cfg.startup_settle_steps)
+    wait_recorder = StepRecorder()
+    wait_failure = ""
     while True:
+        if not simulation_app.is_running():
+            wait_failure = "simulation stopped while waiting for a valid deploy target"
+            break
         paced_step()
+        wait_recorder.record(term, asset, joint_ids, env_origin_z)
         settle_done = int(term._settle_step_counter) >= settle_steps
-        if settle_done and int(term._packet_count) >= int(args_cli.warmup_packets):
+        if settle_done and int(term._valid_target_count) >= int(args_cli.warmup_packets):
             break
         if time.monotonic() > wait_deadline:
-            _log(
-                f"ERROR no deploy targets within {args_cli.wait_packets_s:.0f}s "
-                f"(packets={int(term._packet_count)}); aborting"
+            wait_failure = (
+                f"no valid deploy targets within {args_cli.wait_packets_s:.0f}s "
+                f"(packets={int(term._packet_count)} valid={int(term._valid_target_count)} "
+                f"invalid={int(term._invalid_target_count)})"
             )
-            env.close()
-            return 3
-    _log(f"deploy targets flowing (packets={int(term._packet_count)}); start locked recording")
+            break
+
+    if wait_failure:
+        _log(f"ERROR {wait_failure}; saving diagnostic recording")
+        wait_valid_counts = np.asarray(wait_recorder.valid_target_count, dtype=np.int64)
+        if wait_valid_counts.size:
+            wait_previous_counts = np.concatenate(
+                [np.zeros(1, dtype=np.int64), wait_valid_counts[:-1]]
+            )
+            wait_valid_coverage = float(np.mean(wait_valid_counts > wait_previous_counts))
+        else:
+            wait_valid_coverage = 0.0
+        wait_classified = int(term._valid_target_count + term._invalid_target_count)
+        target_gate = {
+            "enabled": target_gates_enabled,
+            "passed": False,
+            "failures": [wait_failure],
+            "max_target_stale_s": float(args_cli.max_target_stale_s),
+            "min_valid_coverage": float(args_cli.min_valid_coverage),
+            "valid_updates": int(term._valid_target_count),
+            "invalid_updates": int(term._invalid_target_count),
+            "valid_coverage": wait_valid_coverage,
+            "payload_valid_ratio": (
+                float(term._valid_target_count)
+                / max(float(wait_classified), 1.0)
+            ),
+            "max_observed_target_age_s": (
+                float(np.max(wait_recorder.target_age_s)) if wait_recorder.target_age_s else math.inf
+            ),
+        }
+        if wait_recorder.wall_t:
+            meta = build_meta(status="invalid_no_target", unlocked=False, target_gate=target_gate)
+            wait_recorder.save(args_cli.out, joint_names, meta)
+        env.close()
+        return 3
+
+    _log(
+        f"deploy targets flowing (packets={int(term._packet_count)} "
+        f"valid={int(term._valid_target_count)} invalid={int(term._invalid_target_count)}); "
+        "start locked recording"
+    )
 
     recorder = StepRecorder()
+    count_baseline = {
+        "packets": int(term._packet_count),
+        "valid": int(term._valid_target_count),
+        "invalid": int(term._invalid_target_count),
+        "recoveries": int(term._recovery_count),
+    }
+    abort_reason = ""
+    runtime_failure = ""
+
+    def record_and_check_target_health() -> None:
+        nonlocal abort_reason
+        recorder.record(term, asset, joint_ids, env_origin_z)
+        if (
+            target_gates_enabled
+            and float(args_cli.max_target_stale_s) > 0.0
+            and recorder.target_age_s[-1] > float(args_cli.max_target_stale_s)
+        ):
+            abort_reason = (
+                f"target stale for {recorder.target_age_s[-1]:.3f}s "
+                f"(limit {float(args_cli.max_target_stale_s):.3f}s)"
+            )
 
     # ---- 阶段 1：锁根跟随 ----
     locked_steps = max(1, int(round(args_cli.locked_seconds / step_dt)))
     for _ in range(locked_steps):
         if not simulation_app.is_running():
+            runtime_failure = "simulation stopped during locked measurement"
             break
         paced_step()
-        recorder.record(term, asset, joint_ids, env_origin_z, phase=0)
+        record_and_check_target_health()
+        if abort_reason:
+            _log(f"ERROR {abort_reason}; stopping measurement and saving partial recording")
+            break
 
     unlocked = False
-    if not args_cli.no_unlock and simulation_app.is_running():
+    if not abort_reason and not runtime_failure and not args_cli.no_unlock and simulation_app.is_running():
         # ---- 阶段 2：程序化解锁 → 自由根闭环 ----
         _log("unlocking root pose (programmatic U)")
         term.unlock_root_pose()
@@ -242,11 +452,20 @@ def main() -> int:
         free_steps = max(1, int(round(args_cli.free_seconds / step_dt)))
         for _ in range(free_steps):
             if not simulation_app.is_running():
+                runtime_failure = "simulation stopped during free-root measurement"
                 break
             paced_step()
-            recorder.record(term, asset, joint_ids, env_origin_z, phase=1)
+            record_and_check_target_health()
+            if abort_reason:
+                _log(f"ERROR {abort_reason}; stopping measurement and saving partial recording")
+                break
 
-    if args_cli.hold_seconds > 0 and simulation_app.is_running():
+    if (
+        not abort_reason
+        and not runtime_failure
+        and args_cli.hold_seconds > 0
+        and simulation_app.is_running()
+    ):
         # ---- 阶段 3（可选，GUI 观察）：继续实时推进但不记录 ----
         _log(f"measurement done; holding {args_cli.hold_seconds:.0f}s for observation (Ctrl+C to end)")
         hold_steps = int(round(args_cli.hold_seconds / step_dt))
@@ -259,31 +478,88 @@ def main() -> int:
             _log("observation interrupted by user")
 
     # ---- 汇总 ----
-    wall = np.asarray(wall_dts[10:], dtype=np.float64)  # 掐头：首步含 JIT/加载
-    env_hz = 1.0 / np.clip(wall, 1e-6, None)
-    meta = {
-        "task": args_cli.task,
-        "locked_seconds": float(args_cli.locked_seconds),
-        "free_seconds": float(args_cli.free_seconds) if unlocked else 0.0,
-        "unlocked": unlocked,
-        "step_dt": step_dt,
-        "settle_steps": settle_steps,
-        "unlock_blend_steps": int(term.cfg.unlock_blend_steps),
-        "target_rate_limit": float(term.cfg.target_rate_limit_rad_per_step),
-        "post_unlock_cap": float(getattr(term.cfg, "post_unlock_rate_limit_max_delta", -1.0)),
-        "post_unlock_growth": float(getattr(term.cfg, "post_unlock_rate_limit_growth_steps", -1.0)),
-        "env_hz_mean": float(env_hz.mean()),
-        "env_hz_p5": float(np.percentile(env_hz, 5)),
-        "packets_total": int(term._packet_count),
-        "sonic_env": {key: os.environ.get(key, "") for key in sorted(_SONIC_ENV_DEFAULTS)},
+    valid_updates = int(term._valid_target_count) - count_baseline["valid"]
+    invalid_updates = int(term._invalid_target_count) - count_baseline["invalid"]
+    packet_updates = int(term._packet_count) - count_baseline["packets"]
+    recovery_updates = int(term._recovery_count) - count_baseline["recoveries"]
+    classified_updates = valid_updates + invalid_updates
+    payload_valid_ratio = (
+        float(valid_updates) / float(classified_updates) if classified_updates > 0 else 0.0
+    )
+    recorded_valid_counts = np.asarray(recorder.valid_target_count, dtype=np.int64)
+    if recorded_valid_counts.size:
+        previous_valid_counts = np.concatenate(
+            [np.asarray([count_baseline["valid"]], dtype=np.int64), recorded_valid_counts[:-1]]
+        )
+        valid_update_mask = recorded_valid_counts > previous_valid_counts
+        valid_update_steps = int(np.count_nonzero(valid_update_mask))
+        valid_coverage = float(np.mean(valid_update_mask))
+    else:
+        valid_update_steps = 0
+        valid_coverage = 0.0
+    observed_ages = np.asarray(recorder.target_age_s, dtype=np.float64)
+    max_observed_age = float(np.max(observed_ages)) if observed_ages.size else math.inf
+    stale_fraction = (
+        float(np.mean(observed_ages > float(args_cli.max_target_stale_s)))
+        if observed_ages.size and float(args_cli.max_target_stale_s) > 0.0
+        else 0.0
+    )
+    failures: list[str] = []
+    if runtime_failure:
+        failures.append(runtime_failure)
+    if abort_reason:
+        failures.append(abort_reason)
+    if target_gates_enabled:
+        if valid_updates <= 0:
+            failures.append("no valid target update during the measurement window")
+        if (
+            float(args_cli.min_valid_coverage) > 0.0
+            and valid_coverage < float(args_cli.min_valid_coverage)
+        ):
+            failures.append(
+                f"valid target coverage {valid_coverage:.3f} is below "
+                f"{float(args_cli.min_valid_coverage):.3f}"
+            )
+        if (
+            float(args_cli.max_target_stale_s) > 0.0
+            and max_observed_age > float(args_cli.max_target_stale_s)
+            and not abort_reason
+        ):
+            failures.append(
+                f"max target age {max_observed_age:.3f}s exceeds "
+                f"{float(args_cli.max_target_stale_s):.3f}s"
+            )
+    target_gate = {
+        "enabled": target_gates_enabled,
+        "passed": not failures,
+        "failures": failures,
+        "max_target_stale_s": float(args_cli.max_target_stale_s),
+        "min_valid_coverage": float(args_cli.min_valid_coverage),
+        "packet_updates": packet_updates,
+        "valid_updates": valid_updates,
+        "invalid_updates": invalid_updates,
+        "valid_update_steps": valid_update_steps,
+        "valid_coverage": valid_coverage,
+        "payload_valid_ratio": payload_valid_ratio,
+        "max_observed_target_age_s": max_observed_age,
+        "stale_step_fraction": stale_fraction,
+        "recovery_updates": recovery_updates,
     }
+    status = "ok" if not failures else "invalid_target_gate"
+    meta = build_meta(status=status, unlocked=unlocked, target_gate=target_gate)
     _log(
         f"done; env_hz mean={meta['env_hz_mean']:.1f} p5={meta['env_hz_p5']:.1f} "
-        f"packets={meta['packets_total']} unlocked={unlocked}"
+        f"packets={meta['packets_total']} valid_coverage={valid_coverage:.3f} "
+        f"max_target_age={max_observed_age:.3f}s recoveries={recovery_updates} "
+        f"gate_passed={target_gate['passed']} unlocked={unlocked}"
     )
-    recorder.save(args_cli.out, joint_names, meta)
+    if recorder.wall_t:
+        recorder.save(args_cli.out, joint_names, meta)
+    else:
+        _log("ERROR measurement produced no frames; no NPZ could be saved")
+        failures.append("measurement produced no frames")
     env.close()
-    return 0
+    return 0 if not failures else 5
 
 
 if __name__ == "__main__":

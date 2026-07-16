@@ -1372,6 +1372,19 @@ class SonicDeployTargetAction(ActionTerm):
         self._receiver_ready = False
         self._last_packet_time = 0.0
         self._packet_count = 0
+        # Evaluation-only input health counters. These are cumulative for the
+        # lifetime of the action term (including automatic recovery cycles) and
+        # never participate in target selection or control.
+        self._valid_target_count = 0
+        self._invalid_target_count = 0
+        self._last_valid_target_time = 0.0
+        self._last_payload_reference_target: torch.Tensor | None = None
+        self._last_source_index = -1
+        self._last_source_index_field = "<none>"
+        self._last_source_timestamp = math.nan
+        self._last_source_timestamp_field = "<none>"
+        self._recovery_count = 0
+        self._recovery_cycle_active = False
         self._debug_counter = 0
         self._last_debug_wall_time = 0.0
         self._first_packet_logged = False
@@ -1487,6 +1500,32 @@ class SonicDeployTargetAction(ActionTerm):
     def processed_actions(self) -> torch.Tensor:
         return self._processed_actions
 
+    @property
+    def control_state(self) -> int:
+        """Return the evaluation control state without changing controller state.
+
+        Encoding is intentionally stable for on-disk recordings:
+        0=locked, 1=handover/blend, 2=true-free, 3=recovery.
+        """
+        if self._recovery_cycle_active:
+            return 3
+        if (
+            self._drain_steps_remaining > 0
+            or self._unlock_blend_total > 0
+            or self._band_release_total > 0
+        ):
+            return 1
+        if self._root_pose_unlocked or not bool(self.cfg.stabilize_root_pose):
+            return 2
+        return 0
+
+    @property
+    def target_age_s(self) -> float:
+        """Wall-clock age of the most recently validated deploy target."""
+        if self._last_valid_target_time <= 0.0:
+            return math.inf
+        return max(0.0, time.monotonic() - self._last_valid_target_time)
+
     @staticmethod
     def _format_log_message(message: str) -> str:
         return f"[SonicDeployTarget] {message}"
@@ -1559,14 +1598,17 @@ class SonicDeployTargetAction(ActionTerm):
         try:
             payload = self._msgpack.unpackb(latest_payload, raw=False, strict_map_key=False)
         except Exception as exc:
+            self._invalid_target_count += 1
             self._log_warning(f"failed to unpack msgpack payload: {exc}")
             return None
 
         if not isinstance(payload, dict):
+            self._invalid_target_count += 1
             self._log_warning(f"expected msgpack map, got {type(payload).__name__}")
             return None
         self._last_packet_time = time.monotonic()
         self._packet_count += 1
+        self._record_payload_instrumentation(payload)
         if not self._first_packet_logged:
             self._first_packet_logged = True
             self._log_info(
@@ -1657,6 +1699,122 @@ class SonicDeployTargetAction(ActionTerm):
                     f"none of target fields {field_names} found; payload keys={list(payload.keys())}"
                 )
         return None, None
+
+    @staticmethod
+    def _payload_scalar(payload: dict, field_names: tuple[str, ...]) -> tuple[float | None, str | None]:
+        """Return the first finite scalar payload value and its field name."""
+        for field_name in field_names:
+            if field_name not in payload:
+                continue
+            value = payload[field_name]
+            if isinstance(value, (list, tuple)):
+                if len(value) != 1:
+                    continue
+                value = value[0]
+            if isinstance(value, bool):
+                continue
+            try:
+                scalar = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(scalar):
+                return scalar, field_name
+        return None, None
+
+    @staticmethod
+    def _timestamp_seconds(value: float, field_name: str) -> float:
+        """Normalize common timestamp encodings to seconds."""
+        lower_name = field_name.lower()
+        if lower_name.endswith("_ns") or lower_name in ("time_ns", "timestamp_ns"):
+            return value * 1.0e-9
+        if lower_name.endswith("_us"):
+            return value * 1.0e-6
+        if lower_name.endswith("_ms"):
+            return value * 1.0e-3
+        magnitude = abs(value)
+        # Ambiguous generic timestamp fields are commonly Unix epoch values.
+        if magnitude >= 1.0e17:
+            return value * 1.0e-9
+        if magnitude >= 1.0e14:
+            return value * 1.0e-6
+        if magnitude >= 1.0e11:
+            return value * 1.0e-3
+        return value
+
+    @staticmethod
+    def _payload_joint_array(payload: dict, field_names: list[str]) -> np.ndarray | None:
+        """Validate a 29-DoF payload field on CPU without touching control tensors."""
+        for field_name in field_names:
+            if field_name not in payload:
+                continue
+            try:
+                values = np.asarray(payload[field_name], dtype=np.float32).reshape(-1)
+            except (TypeError, ValueError):
+                continue
+            if values.size == len(SONIC_G1_29DOF_JOINT_ORDER) and bool(np.isfinite(values).all()):
+                return values
+        return None
+
+    def _record_payload_instrumentation(self, payload: dict) -> None:
+        """Classify one decoded payload and retain trace fields for evaluation.
+
+        This deliberately validates on CPU and does not update any controller
+        target, reference blend, root target, or rate-limit state.
+        """
+        target = self._payload_joint_array(payload, self._primary_target_field_names())
+        if target is None:
+            self._invalid_target_count += 1
+            return
+
+        self._valid_target_count += 1
+        self._last_valid_target_time = time.monotonic()
+
+        reference = self._payload_joint_array(payload, ["body_q_target"])
+        if reference is not None:
+            packet_target_order = str(payload.get("target_order", self._target_order)).lower()
+            if packet_target_order not in ("mujoco", "isaaclab"):
+                packet_target_order = self._target_order
+            if packet_target_order == "mujoco":
+                reference = reference[np.asarray(SONIC_G1_ISAACLAB_TO_MUJOCO_DOF, dtype=np.int64)]
+            self._last_payload_reference_target = torch.from_numpy(reference.copy()).unsqueeze(0).repeat(
+                self.num_envs, 1
+            )
+        else:
+            self._last_payload_reference_target = None
+
+        source_index, source_index_field = self._payload_scalar(
+            payload, ("index", "sequence", "seq", "source_index", "frame_index", "lowcmd_count")
+        )
+        if source_index is None:
+            self._last_source_index = -1
+            self._last_source_index_field = "<none>"
+        else:
+            self._last_source_index = int(source_index)
+            self._last_source_index_field = str(source_index_field)
+
+        source_timestamp, source_timestamp_field = self._payload_scalar(
+            payload,
+            (
+                "timestamp_ns",
+                "time_ns",
+                "stamp_ns",
+                "source_timestamp_ns",
+                "source_time_ns",
+                "timestamp",
+                "time",
+                "stamp",
+                "source_timestamp",
+                "source_time",
+            ),
+        )
+        if source_timestamp is None:
+            self._last_source_timestamp = math.nan
+            self._last_source_timestamp_field = "<none>"
+        else:
+            self._last_source_timestamp = self._timestamp_seconds(
+                source_timestamp, str(source_timestamp_field)
+            )
+            self._last_source_timestamp_field = str(source_timestamp_field)
 
     def _extract_base_quat_target(self, payload: dict) -> torch.Tensor | None:
         field_name = str(self.cfg.base_quat_target_field).strip()
@@ -1838,6 +1996,7 @@ class SonicDeployTargetAction(ActionTerm):
                 self._root_pose_unlocked = True
                 self._unlock_blend_total = 0
                 self._unlock_blend_counter = 0
+                self._recovery_cycle_active = False
                 # No settle restart and no final velocity write here: once the root is
                 # free, every step without deploy targets is a step of passive PD
                 # standing, which is unconditionally unstable (ankle stiffness ≪ mgh).
@@ -2104,6 +2263,7 @@ class SonicDeployTargetAction(ActionTerm):
         self._band_release_counter = 0
         self._root_pose_unlocked = True
         self._post_unlock_steps = 0
+        self._recovery_cycle_active = False
         self._log_info("elastic band released; root is now free")
 
     def _clear_band_wrench(self) -> None:
@@ -2136,6 +2296,7 @@ class SonicDeployTargetAction(ActionTerm):
 
     def unlock_root_pose(self) -> None:
         if not self.cfg.stabilize_root_pose:
+            self._recovery_cycle_active = False
             self._log_info("root pose stabilization is disabled; unlock request ignored")
             return
         if self._root_pose_unlocked:
@@ -2185,6 +2346,7 @@ class SonicDeployTargetAction(ActionTerm):
             # Instant unlock (no blending configured).
             self._root_pose_unlocked = True
             self._post_unlock_steps = 0
+            self._recovery_cycle_active = False
             self._log_info("root pose unlocked by operator (instant)")
 
     def recover_standing(self) -> None:
@@ -2223,11 +2385,23 @@ class SonicDeployTargetAction(ActionTerm):
             torch.zeros_like(self._asset.data.default_joint_vel),
         )
         self.reset()
+        self._recovery_count += 1
+        self._recovery_cycle_active = True
         pending_auto_unlock = bool(self.cfg.auto_unlock_after_recover) and was_unlocked
         if pending_auto_unlock and int(self.cfg.startup_settle_steps) <= 0:
             # 没有 settle 阶段（fixed-root 配置）：立即交还控制权。
             self.unlock_root_pose()
             pending_auto_unlock = False
+        if (
+            int(self.cfg.startup_settle_steps) <= 0
+            and not self._root_pose_unlocked
+            and self._drain_steps_remaining <= 0
+            and self._unlock_blend_total <= 0
+            and self._band_release_total <= 0
+        ):
+            # Instant recovery finished in the locked state; there is no settle
+            # interval in which to clear the recovery marker later.
+            self._recovery_cycle_active = False
         self._auto_unlock_after_settle = pending_auto_unlock
         unlock_text = (
             "will auto re-unlock after settle"
@@ -2286,6 +2460,8 @@ class SonicDeployTargetAction(ActionTerm):
                     self._auto_unlock_after_settle = False
                     self._log_info("auto re-unlocking root after recovery settle")
                     self.unlock_root_pose()
+                else:
+                    self._recovery_cycle_active = False
             return
         # hold_after_unlock: after root is freed, ignore deploy targets and drive joints
         # toward the default standing pose (rate-limited). This isolates physics-only
@@ -2442,6 +2618,12 @@ class SonicDeployTargetAction(ActionTerm):
             self._unlock_blend_total = 0
             self._drain_steps_remaining = 0
             self._last_raw_target = None
+            self._last_payload_reference_target = None
+            self._last_source_index = -1
+            self._last_source_index_field = "<none>"
+            self._last_source_timestamp = math.nan
+            self._last_source_timestamp_field = "<none>"
+            self._recovery_cycle_active = False
             self._settle_step_counter = 0
             self._post_unlock_steps = 0
             self._base_trans_target = None
@@ -2469,6 +2651,12 @@ class SonicDeployTargetAction(ActionTerm):
         self._unlock_blend_total = 0
         self._drain_steps_remaining = 0
         self._last_raw_target = None
+        self._last_payload_reference_target = None
+        self._last_source_index = -1
+        self._last_source_index_field = "<none>"
+        self._last_source_timestamp = math.nan
+        self._last_source_timestamp_field = "<none>"
+        self._recovery_cycle_active = False
         self._settle_step_counter = 0
         self._post_unlock_steps = 0
         self._base_trans_target = None
