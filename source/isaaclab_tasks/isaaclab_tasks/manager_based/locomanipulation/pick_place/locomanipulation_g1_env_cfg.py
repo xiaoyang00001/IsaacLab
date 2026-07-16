@@ -270,7 +270,9 @@ def _box_cfg(
                 max_depenetration_velocity=0.25,
                 max_contact_impulse=0.05,
                 solver_position_iteration_count=8,
-                solver_velocity_iteration_count=4,
+                # Friction is resolved in the velocity solve.  Extra iterations
+                # reduce slow gravity-driven slip without increasing grip force.
+                solver_velocity_iteration_count=8,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.001,
@@ -286,8 +288,11 @@ def _box_cfg(
                 roughness=0.70,
             ),
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.5,
-                dynamic_friction=1.2,
+                # Keep static and dynamic friction equal.  Besides avoiding the
+                # PhysX static-friction edge case, this prevents a tiny initial
+                # slip from dropping to a much weaker friction regime.
+                static_friction=_cfg_float("ISAACLAB_BOX_STATIC_FRICTION", 2.0),
+                dynamic_friction=_cfg_float("ISAACLAB_BOX_DYNAMIC_FRICTION", 2.0),
                 restitution=0.0,
                 friction_combine_mode="max",
                 restitution_combine_mode="min",
@@ -439,7 +444,7 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
             enabled_self_collisions=False,
             fix_root_link=False,
             solver_position_iteration_count=8,
-            solver_velocity_iteration_count=4,
+            solver_velocity_iteration_count=8,
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
@@ -802,7 +807,9 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.solve_articulation_contact_last = True
         self.sim.physx.enable_external_forces_every_iteration = True
         self.sim.physx.min_position_iteration_count = 4
-        self.sim.physx.min_velocity_iteration_count = 2
+        # Four global velocity iterations plus eight on the robot/boxes make
+        # the finger friction constraints converge before gravity causes creep.
+        self.sim.physx.min_velocity_iteration_count = 4
         self.sim.physx.bounce_threshold_velocity = 0.05
         self.sim.physx.friction_offset_threshold = 0.01
         self.sim.physx.friction_correlation_distance = 0.00625
