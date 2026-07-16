@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
@@ -114,6 +115,11 @@ def _parse_args() -> argparse.Namespace:
         help="Matrix output root. Default: /tmp/sonic_eval/<UTC timestamp>.",
     )
     parser.add_argument("--sony-repo", default=None, help="Override the external GR00T/SONY checkout.")
+    parser.add_argument(
+        "--deploy-bin",
+        default=None,
+        help="Pin one deploy executable for every candidate; avoids policy/runtime confounding.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--keep-going",
@@ -132,6 +138,19 @@ def _atomic_json(path: pathlib.Path, payload: dict) -> None:
         handle.write("\n")
         tmp_path = pathlib.Path(handle.name)
     os.replace(tmp_path, path)
+
+
+def _file_fingerprint(path: pathlib.Path) -> dict[str, str | int]:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path),
+        "realpath": str(path.resolve()),
+        "size_bytes": path.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
 
 
 def _candidate_names(raw: str) -> list[str]:
@@ -276,11 +295,20 @@ def main() -> int:
         args.sony_repo
         or os.environ.get("SONY_REPO", "/home/nolo/GR00T-WholeBodyControl-sony-json-stream-20260702")
     ).expanduser().resolve()
+    deploy_bin_path = pathlib.Path(
+        args.deploy_bin
+        or os.environ.get("DEPLOY_BIN_OVERRIDE")
+        or sony_repo / "gear_sonic_deploy/target/release/g1_deploy_onnx_ref"
+    ).expanduser().resolve()
+    if not deploy_bin_path.is_file() or not os.access(deploy_bin_path, os.X_OK):
+        raise SystemExit(f"--deploy-bin is not executable: {deploy_bin_path}")
+    deploy_binary = _file_fingerprint(deploy_bin_path)
     plan = {
         "schema_version": 1,
         "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "repo_root": str(repo_root),
         "sony_repo": str(sony_repo),
+        "deploy_binary": deploy_binary,
         "orchestrator": str(orchestrator),
         "matrix_root": str(matrix_root),
         "scenario": args.scenario,
@@ -360,6 +388,7 @@ def main() -> int:
         )
         if args.sony_repo:
             env["SONY_REPO"] = str(pathlib.Path(args.sony_repo).resolve())
+        env["DEPLOY_BIN_OVERRIDE"] = str(deploy_bin_path)
 
         print(
             f"\n[matrix] {sequence}/{len(order)} block={block} candidate={name} "

@@ -261,6 +261,11 @@ def create_manifest(args: argparse.Namespace) -> None:
         "repositories": {
             "isaaclab": git_info(args.isaaclab_root),
             "sony": git_info(args.sony_repo),
+            **(
+                {"deploy_runtime": git_info(args.deploy_runtime_repo)}
+                if args.deploy_runtime_repo
+                else {}
+            ),
         },
         "artifacts": {
             "bvh": file_info(args.bvh),
@@ -270,6 +275,7 @@ def create_manifest(args: argparse.Namespace) -> None:
             "planner_model": file_info(args.planner),
             "proxy_binary": file_info(args.proxy_bin),
             "deploy_binary": file_info(args.deploy_bin),
+            "deploy_source": file_info(args.deploy_source),
             "external_launcher": file_info(args.external_launcher),
             "external_wrapper": file_info(args.external_wrapper),
             "mocap_manager": file_info(args.mocap_manager),
@@ -348,6 +354,8 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--planner", required=True)
     create_parser.add_argument("--proxy-bin", required=True)
     create_parser.add_argument("--deploy-bin", required=True)
+    create_parser.add_argument("--deploy-runtime-repo")
+    create_parser.add_argument("--deploy-source")
     create_parser.add_argument("--external-launcher", required=True)
     create_parser.add_argument("--external-wrapper", required=True)
     create_parser.add_argument("--mocap-manager", required=True)

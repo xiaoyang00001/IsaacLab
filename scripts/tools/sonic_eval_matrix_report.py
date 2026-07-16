@@ -92,7 +92,13 @@ def _summary(values: list[float]) -> dict[str, float | int] | None:
 
 
 def _runtime_valid(
-    report: dict, repo_root: pathlib.Path, *, expected_free_seconds: float
+    report: dict,
+    repo_root: pathlib.Path,
+    *,
+    expected_free_seconds: float,
+    expected_deploy_binary: dict,
+    candidate_definition: dict,
+    pinned_env: dict,
 ) -> list[str]:
     reasons: list[str] = []
     meta = report.get("meta", {})
@@ -138,6 +144,33 @@ def _runtime_valid(
         manifest_root = _get(manifest, "repositories.isaaclab.realpath")
         if manifest_root != str(repo_root):
             reasons.append(f"manifest_worktree_mismatch={manifest_root!r}")
+        manifest_policy = _get(manifest, "run.policy_dir")
+        if manifest_policy != candidate_definition.get("policy_dir"):
+            reasons.append(f"manifest_policy_mismatch={manifest_policy!r}")
+        actual_deploy_path = _get(manifest, "artifacts.deploy_binary.realpath")
+        actual_deploy_hash = _get(manifest, "artifacts.deploy_binary.sha256")
+        if actual_deploy_path != expected_deploy_binary.get("realpath"):
+            reasons.append(f"deploy_binary_path_mismatch={actual_deploy_path!r}")
+        if actual_deploy_hash != expected_deploy_binary.get("sha256"):
+            reasons.append(f"deploy_binary_hash_mismatch={actual_deploy_hash!r}")
+
+    sonic_env = meta.get("sonic_env")
+    if not isinstance(sonic_env, dict):
+        reasons.append("missing_sonic_environment")
+    else:
+        expected_sonic = {
+            **{
+                key: str(value)
+                for key, value in pinned_env.items()
+                if str(key).startswith("SONIC_")
+            },
+            "SONIC_DEPLOY_SUBSTEP_CONSUME": (
+                "1" if candidate_definition.get("substep_consume") else "0"
+            ),
+        }
+        for key, expected in expected_sonic.items():
+            if sonic_env.get(key) != expected:
+                reasons.append(f"sonic_env_mismatch_{key}={sonic_env.get(key)!r}")
 
     for key in ("isaaclab_tasks_file", "actions_module_file"):
         raw_path = meta.get(key)
@@ -426,6 +459,8 @@ def build_summary(results_path: pathlib.Path) -> dict:
     repo_root = pathlib.Path(plan["repo_root"]).resolve()
     expected_per_candidate = int(plan["repeats"])
     expected_free_seconds = float(plan["free_seconds"])
+    expected_deploy_binary = plan["deploy_binary"]
+    pinned_env = plan.get("pinned_env", {})
     design_validation = _validate_design(plan, results)
 
     runs_by_candidate: dict[str, list[dict]] = defaultdict(list)
@@ -455,6 +490,9 @@ def build_summary(results_path: pathlib.Path) -> dict:
                             report,
                             repo_root,
                             expected_free_seconds=expected_free_seconds,
+                            expected_deploy_binary=expected_deploy_binary,
+                            candidate_definition=definition,
+                            pinned_env=pinned_env,
                         )
                     )
                 except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:

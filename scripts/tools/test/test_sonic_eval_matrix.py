@@ -31,7 +31,9 @@ class TestSonicEvalMatrix(unittest.TestCase):
             self.assertEqual(sorted(positions), list(range(len(names))))
 
     @staticmethod
-    def _write_run(path: Path, repo_root: Path, *, fell: bool) -> None:
+    def _write_run(
+        path: Path, repo_root: Path, *, fell: bool, substep_consume: bool
+    ) -> None:
         length = 160
         wall_t = np.arange(length, dtype=np.float64) * 0.02
         joint_names = np.asarray(
@@ -52,13 +54,30 @@ class TestSonicEvalMatrix(unittest.TestCase):
             "status": "ok",
             "unlocked": True,
             "step_dt": 0.02,
-            "run_manifest": {"repositories": {"isaaclab": {"realpath": str(repo_root)}}},
+            "run_manifest": {
+                "repositories": {"isaaclab": {"realpath": str(repo_root)}},
+                "run": {"policy_dir": "policy/release"},
+                "artifacts": {
+                    "deploy_binary": {
+                        "realpath": "/tmp/test-sonic-deploy",
+                        "sha256": "test-deploy-sha256",
+                    }
+                },
+            },
             "isaaclab_tasks_file": str(repo_root / "source/isaaclab_tasks/isaaclab_tasks/__init__.py"),
             "actions_module_file": str(
                 repo_root
                 / "source/isaaclab_tasks/isaaclab_tasks/manager_based/"
                 "locomanipulation/pick_place/mdp/actions.py"
             ),
+            "sonic_env": {
+                "SONIC_DEPLOY_AUTO_RECOVER": "0",
+                "SONIC_DEPLOY_ELASTIC_BAND": "0",
+                "SONIC_G1_MUJOCO_TORQUE_PARITY": "0",
+                "SONIC_G1_MUJOCO_NO_ARMATURE": "0",
+                "SONIC_G1_MUJOCO_NO_VEL_LIMIT": "0",
+                "SONIC_DEPLOY_SUBSTEP_CONSUME": "1" if substep_consume else "0",
+            },
         }
         np.savez_compressed(
             path,
@@ -92,6 +111,17 @@ class TestSonicEvalMatrix(unittest.TestCase):
             "scenario": "v3_bvh",
             "free_seconds": 3.2,
             "repeats": repeats,
+            "deploy_binary": {
+                "realpath": "/tmp/test-sonic-deploy",
+                "sha256": "test-deploy-sha256",
+            },
+            "pinned_env": {
+                "SONIC_DEPLOY_AUTO_RECOVER": "0",
+                "SONIC_DEPLOY_ELASTIC_BAND": "0",
+                "SONIC_G1_MUJOCO_TORQUE_PARITY": "0",
+                "SONIC_G1_MUJOCO_NO_ARMATURE": "0",
+                "SONIC_G1_MUJOCO_NO_VEL_LIMIT": "0",
+            },
             "design": {"complete_position_balance": repeats % len(names) == 0},
             "candidates": [
                 {"name": "unstable", "policy_dir": "policy/release", "substep_consume": False},
@@ -107,7 +137,12 @@ class TestSonicEvalMatrix(unittest.TestCase):
         runs = []
         for sequence, (block, candidate) in enumerate(order, start=1):
             npz = root / f"{sequence:02d}_{candidate}_{block}.npz"
-            self._write_run(npz, repo_root, fell=candidate == "unstable")
+            self._write_run(
+                npz,
+                repo_root,
+                fell=candidate == "unstable",
+                substep_consume=candidate == "stable",
+            )
             runs.append(
                 {
                     "sequence": sequence,
