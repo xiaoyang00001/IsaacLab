@@ -972,10 +972,11 @@ def print_summary(summary: dict) -> None:
         candidate = by_name[name]
         deploy_binary = candidate.get("deploy_binary", {})
         bundle = str(deploy_binary.get("sha256", "legacy"))[:12]
+        valid_text = f"{candidate['valid_runs']}/{candidate['expected_runs']}"
         print(
             f"{name:<20}"
             f"{bundle:>14}"
-            f"{candidate['valid_runs']}/{candidate['expected_runs']:>7}"
+            f"{valid_text:>9}"
             f"{_fmt_metric(candidate, 'no_fall'):>10}"
             f"{_fmt_metric(candidate, 'survival_fraction'):>11}"
             f"{_fmt_metric(candidate, 'healthy_fraction'):>10}"
