@@ -68,6 +68,7 @@ DEFAULT_GATE = {
     "max_update_gap_s": 0.10,
     "max_target_age_s": 0.10,
     "max_stale_fraction": 0.02,
+    "hard_target_stale_s": 0.50,
     "max_invalid_target_fraction": 0.01,
 }
 
@@ -530,6 +531,7 @@ def _gate_config(meta: dict) -> dict[str, float]:
         "max_update_gap_s": ("max_update_gap_s", "max_gap_s"),
         "max_target_age_s": ("max_target_age_s", "max_target_stale_s", "target_timeout_s"),
         "max_stale_fraction": ("max_stale_fraction",),
+        "hard_target_stale_s": ("hard_target_stale_s",),
         "max_invalid_target_fraction": ("max_invalid_target_fraction",),
     }
     for destination, candidates in aliases.items():
@@ -555,12 +557,12 @@ def _coverage_report(data: dict, mask: np.ndarray) -> dict:
     update_name, update_counter = _select_counter(
         data, ("valid_target_count", "packet_count", "packets")
     )
-    packet_name, packet_counter = _select_counter(
-        data, ("source_index", "packet_count", "packets", "valid_target_count")
-    )
+    source_name, source_counter = _select_counter(data, ("source_index",))
+    received_name, received_counter = _select_counter(data, ("packet_count", "packets"))
     result: dict[str, object] = {
         "update_counter": update_name or "missing",
-        "packet_counter": packet_name or "missing",
+        "packet_counter": source_name or "missing",
+        "received_counter": received_name or "missing",
         "gate": gate,
         "invalid": False,
         "invalid_reasons": [],
@@ -632,32 +634,45 @@ def _coverage_report(data: dict, mask: np.ndarray) -> dict:
         if reset_total:
             reasons.append("update_counter_reset")
 
-    if packet_counter is None:
+    if source_counter is None:
         result["packet_coverage"] = float("nan")
-        reasons.append("missing_packet_counter")
+        reasons.append("missing_source_sequence_counter")
+    elif received_counter is None:
+        result["packet_coverage"] = float("nan")
+        reasons.append("missing_received_packet_counter")
     else:
-        observed_transitions = 0
+        received_increments = 0
         expected_increments = 0
-        packet_resets = 0
+        source_resets = 0
+        received_resets = 0
         max_packet_jump = 0
-        for segment in _contiguous_segments(valid_wall & (packet_counter >= 0)):
+        for segment in _contiguous_segments(
+            valid_wall & (source_counter >= 0) & (received_counter >= 0)
+        ):
             if len(segment) < 2:
                 continue
-            delta = np.diff(packet_counter[segment])
-            positive = delta[delta > 0]
-            observed_transitions += int(positive.size)
-            expected_increments += int(positive.sum())
-            packet_resets += int(np.sum(delta < 0))
-            if positive.size:
-                max_packet_jump = max(max_packet_jump, int(np.max(positive)))
-        packet_coverage = observed_transitions / max(expected_increments, 1)
+            source_delta = np.diff(source_counter[segment])
+            received_delta = np.diff(received_counter[segment])
+            positive_source = source_delta[source_delta > 0]
+            expected_increments += int(positive_source.sum())
+            received_increments += int(np.clip(received_delta, 0, None).sum())
+            source_resets += int(np.sum(source_delta < 0))
+            received_resets += int(np.sum(received_delta < 0))
+            if positive_source.size:
+                max_packet_jump = max(max_packet_jump, int(np.max(positive_source)))
+        packet_coverage = min(received_increments / max(expected_increments, 1), 1.0)
         result["packet_coverage"] = float(packet_coverage)
-        result["packet_counter_resets"] = int(packet_resets)
+        result["source_counter_increments"] = int(expected_increments)
+        result["received_counter_increments"] = int(received_increments)
+        result["packet_counter_resets"] = int(source_resets)
+        result["received_counter_resets"] = int(received_resets)
         result["max_packet_jump"] = int(max_packet_jump)
         if packet_coverage < gate["min_packet_coverage"]:
-            reasons.append("low_packet_coverage_or_index_jumps")
-        if packet_resets:
-            reasons.append("packet_counter_reset")
+            reasons.append("low_source_packet_coverage")
+        if source_resets:
+            reasons.append("source_counter_reset")
+        if received_resets:
+            reasons.append("received_counter_reset")
 
     age = data["target_age_s"]
     valid_age = mask & ~np.isnan(age)
@@ -670,10 +685,13 @@ def _coverage_report(data: dict, mask: np.ndarray) -> dict:
             "max": float(np.max(age_values)),
             "stale_frac": float(np.mean(stale)),
         }
-        if float(np.max(age_values)) > gate["max_target_age_s"]:
-            reasons.append("target_stale_limit_exceeded")
         if float(np.mean(stale)) > gate["max_stale_fraction"]:
             reasons.append("stale_target_fraction_too_high")
+        if (
+            gate["hard_target_stale_s"] > 0.0
+            and float(np.max(age_values)) > gate["hard_target_stale_s"]
+        ):
+            reasons.append("hard_target_stale_limit_exceeded")
 
     invalid_count = data["invalid_target_count"]
     invalid_updates, invalid_resets = _counter_increments(invalid_count, mask)
@@ -1122,12 +1140,52 @@ def _run_is_valid(report: dict) -> bool:
     return _get(report, "free.coverage.invalid") is not True
 
 
+_T_CRITICAL_975 = {
+    1: 12.706,
+    2: 4.303,
+    3: 3.182,
+    4: 2.776,
+    5: 2.571,
+    6: 2.447,
+    7: 2.365,
+    8: 2.306,
+    9: 2.262,
+    10: 2.228,
+    11: 2.201,
+    12: 2.179,
+    13: 2.160,
+    14: 2.145,
+    15: 2.131,
+    16: 2.120,
+    17: 2.110,
+    18: 2.101,
+    19: 2.093,
+    20: 2.086,
+    21: 2.080,
+    22: 2.074,
+    23: 2.069,
+    24: 2.064,
+    25: 2.060,
+    26: 2.056,
+    27: 2.052,
+    28: 2.048,
+    29: 2.045,
+    30: 2.042,
+}
+
+
+def t_critical_95(sample_count: int) -> float:
+    """Two-sided 95% Student-t critical value for a sample mean."""
+    degrees_of_freedom = max(int(sample_count) - 1, 1)
+    return _T_CRITICAL_975.get(degrees_of_freedom, 1.96)
+
+
 def _summary(values: list[float]) -> dict:
     array = np.asarray(values, dtype=np.float64)
     mean = float(np.mean(array))
     if len(array) >= 2:
         sd = float(np.std(array, ddof=1))
-        half = 1.96 * sd / np.sqrt(len(array))
+        half = t_critical_95(len(array)) * sd / np.sqrt(len(array))
     else:
         sd = 0.0
         half = 0.0

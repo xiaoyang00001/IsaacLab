@@ -71,7 +71,23 @@ parser.add_argument(
     dest="max_target_stale_s",
     type=float,
     default=0.10,
-    help="Fail and save a partial run if target age exceeds this many seconds; <=0 disables this gate.",
+    help="Fresh-target threshold used to compute stale-step fraction; <=0 disables this soft gate.",
+)
+parser.add_argument(
+    "--max_stale_fraction",
+    "--max-stale-fraction",
+    dest="max_stale_fraction",
+    type=float,
+    default=0.02,
+    help="Maximum fraction of recorded steps above --max-target-stale-s.",
+)
+parser.add_argument(
+    "--hard_target_stale_s",
+    "--hard-target-stale-s",
+    dest="hard_target_stale_s",
+    type=float,
+    default=0.50,
+    help="Abort a partial run only after this sustained target outage; <=0 disables hard abort.",
 )
 parser.add_argument(
     "--min_valid_coverage",
@@ -80,6 +96,14 @@ parser.add_argument(
     type=float,
     default=0.80,
     help="Minimum fraction of recorded env steps with a fresh valid target update; <=0 disables this gate.",
+)
+parser.add_argument(
+    "--max_invalid_target_fraction",
+    "--max-invalid-target-fraction",
+    dest="max_invalid_target_fraction",
+    type=float,
+    default=0.01,
+    help="Maximum invalid payload fraction among classified target packets.",
 )
 parser.add_argument(
     "--disable_target_gates",
@@ -95,12 +119,30 @@ parser.add_argument(
     help="Optional run manifest JSON object; loaded verbatim into meta['run_manifest'].",
 )
 parser.add_argument(
+    "--status_file",
+    "--status-file",
+    dest="status_file",
+    type=str,
+    default="",
+    help="Optional atomic JSON sidecar carrying the authoritative runner exit code.",
+)
+parser.add_argument(
     "--hold_seconds", type=float, default=0.0,
     help="After measurement, keep stepping in realtime for N seconds without recording "
     "(GUI observation; close the window or Ctrl+C to end early).",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if not 0.0 <= float(args_cli.max_stale_fraction) <= 1.0:
+    parser.error("--max-stale-fraction must be within [0, 1]")
+if not 0.0 <= float(args_cli.max_invalid_target_fraction) <= 1.0:
+    parser.error("--max-invalid-target-fraction must be within [0, 1]")
+if (
+    float(args_cli.hard_target_stale_s) > 0.0
+    and float(args_cli.max_target_stale_s) > 0.0
+    and float(args_cli.hard_target_stale_s) < float(args_cli.max_target_stale_s)
+):
+    parser.error("--hard-target-stale-s must be >= --max-target-stale-s")
 
 _RUN_MANIFEST: dict = {}
 _RUN_MANIFEST_PATH = ""
@@ -293,8 +335,11 @@ def main() -> int:
     _log(
         "target gates "
         f"enabled={target_gates_enabled} "
-        f"max_stale={float(args_cli.max_target_stale_s):.3f}s "
-        f"min_valid_coverage={float(args_cli.min_valid_coverage):.3f}"
+        f"fresh_threshold={float(args_cli.max_target_stale_s):.3f}s "
+        f"max_stale_fraction={float(args_cli.max_stale_fraction):.3f} "
+        f"hard_stale={float(args_cli.hard_target_stale_s):.3f}s "
+        f"min_valid_coverage={float(args_cli.min_valid_coverage):.3f} "
+        f"max_invalid_fraction={float(args_cli.max_invalid_target_fraction):.3f}"
     )
 
     def build_meta(*, status: str, unlocked: bool, target_gate: dict) -> dict:
@@ -384,7 +429,10 @@ def main() -> int:
             "passed": False,
             "failures": [wait_failure],
             "max_target_stale_s": float(args_cli.max_target_stale_s),
+            "max_stale_fraction": float(args_cli.max_stale_fraction),
+            "hard_target_stale_s": float(args_cli.hard_target_stale_s),
             "min_valid_coverage": float(args_cli.min_valid_coverage),
+            "max_invalid_target_fraction": float(args_cli.max_invalid_target_fraction),
             "valid_updates": int(term._valid_target_count),
             "invalid_updates": int(term._invalid_target_count),
             "valid_coverage": wait_valid_coverage,
@@ -423,12 +471,12 @@ def main() -> int:
         recorder.record(term, asset, joint_ids, env_origin_z)
         if (
             target_gates_enabled
-            and float(args_cli.max_target_stale_s) > 0.0
-            and recorder.target_age_s[-1] > float(args_cli.max_target_stale_s)
+            and float(args_cli.hard_target_stale_s) > 0.0
+            and recorder.target_age_s[-1] > float(args_cli.hard_target_stale_s)
         ):
             abort_reason = (
                 f"target stale for {recorder.target_age_s[-1]:.3f}s "
-                f"(limit {float(args_cli.max_target_stale_s):.3f}s)"
+                f"(hard limit {float(args_cli.hard_target_stale_s):.3f}s)"
             )
 
     # ---- 阶段 1：锁根跟随 ----
@@ -520,21 +568,33 @@ def main() -> int:
                 f"valid target coverage {valid_coverage:.3f} is below "
                 f"{float(args_cli.min_valid_coverage):.3f}"
             )
+        invalid_target_fraction = 1.0 - payload_valid_ratio
         if (
-            float(args_cli.max_target_stale_s) > 0.0
-            and max_observed_age > float(args_cli.max_target_stale_s)
-            and not abort_reason
+            classified_updates > 0
+            and invalid_target_fraction > float(args_cli.max_invalid_target_fraction)
         ):
             failures.append(
-                f"max target age {max_observed_age:.3f}s exceeds "
-                f"{float(args_cli.max_target_stale_s):.3f}s"
+                f"invalid target fraction {invalid_target_fraction:.3f} exceeds "
+                f"{float(args_cli.max_invalid_target_fraction):.3f}"
+            )
+        if (
+            float(args_cli.max_target_stale_s) > 0.0
+            and stale_fraction > float(args_cli.max_stale_fraction)
+        ):
+            failures.append(
+                f"stale target fraction {stale_fraction:.3f} exceeds "
+                f"{float(args_cli.max_stale_fraction):.3f} "
+                f"(fresh threshold {float(args_cli.max_target_stale_s):.3f}s)"
             )
     target_gate = {
         "enabled": target_gates_enabled,
         "passed": not failures,
         "failures": failures,
         "max_target_stale_s": float(args_cli.max_target_stale_s),
+        "max_stale_fraction": float(args_cli.max_stale_fraction),
+        "hard_target_stale_s": float(args_cli.hard_target_stale_s),
         "min_valid_coverage": float(args_cli.min_valid_coverage),
+        "max_invalid_target_fraction": float(args_cli.max_invalid_target_fraction),
         "packet_updates": packet_updates,
         "valid_updates": valid_updates,
         "invalid_updates": invalid_updates,
@@ -562,7 +622,51 @@ def main() -> int:
     return 0 if not failures else 5
 
 
+def _write_status_file(*, exit_code: int, completed: bool, error: str = "") -> None:
+    if not args_cli.status_file:
+        return
+    path = os.path.abspath(os.path.expanduser(args_cli.status_file))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.tmp.{os.getpid()}"
+    payload = {
+        "schema_version": 1,
+        "completed": bool(completed),
+        "exit_code": int(exit_code),
+        "error": str(error),
+        "finished_unix_s": time.time(),
+        "out": os.path.abspath(os.path.expanduser(args_cli.out)),
+    }
+    try:
+        with open(temporary, "w", encoding="utf-8") as status_file:
+            json.dump(payload, status_file, ensure_ascii=False, indent=2, sort_keys=True)
+            status_file.write("\n")
+            status_file.flush()
+            os.fsync(status_file.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        _log(f"ERROR could not write status sidecar {path}: {exc}")
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
-    exit_code = main()
+    try:
+        exit_code = main()
+        _write_status_file(exit_code=exit_code, completed=True)
+    except BaseException as exc:
+        exception_code = (
+            int(exc.code)
+            if isinstance(exc, SystemExit) and isinstance(exc.code, int)
+            else 130 if isinstance(exc, KeyboardInterrupt) else 1
+        )
+        _write_status_file(
+            exit_code=exception_code,
+            completed=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        simulation_app.close()
+        raise
     simulation_app.close()
     sys.exit(exit_code)

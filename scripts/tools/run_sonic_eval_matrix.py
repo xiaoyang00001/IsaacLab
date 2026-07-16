@@ -18,11 +18,11 @@ silently spliced into the same recording.
 Examples:
 
     # One screening block (each candidate once), v3 BVH motion.
-    python3 scripts/tools/run_sonic_eval_matrix.py --repeats 1 --free-seconds 45
+    python3 scripts/tools/run_sonic_eval_matrix.py --repeats 1
 
-    # Four balanced confirmation blocks for the two finalists.
+    # Eight balanced confirmatory blocks for the two finalists.
     python3 scripts/tools/run_sonic_eval_matrix.py \
-        --candidates release_base,release_substep --repeats 4 --free-seconds 120
+        --candidates release_base,release_substep --repeats 8 --free-seconds 120
 
     # Print the exact run order and environment without launching Isaac.
     python3 scripts/tools/run_sonic_eval_matrix.py --dry-run
@@ -95,8 +95,19 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bvh", default="/home/nolo/RAYNOS_Motion1.bvh")
     parser.add_argument("--repeats", type=int, default=1, help="Balanced blocks; each candidate runs once per block.")
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=2,
+        help="Maximum attempts for one planned candidate/block before declaring that run invalid.",
+    )
     parser.add_argument("--locked-seconds", type=float, default=15.0)
-    parser.add_argument("--free-seconds", type=float, default=45.0)
+    parser.add_argument(
+        "--free-seconds",
+        type=float,
+        default=55.56,
+        help="True-free measurement length; default covers three 18.52s RAYNOS BVH cycles.",
+    )
     parser.add_argument(
         "--out-root",
         default=None,
@@ -239,6 +250,8 @@ def main() -> int:
     args = _parse_args()
     if args.repeats < 1:
         raise SystemExit("--repeats must be >= 1")
+    if args.max_attempts < 1:
+        raise SystemExit("--max-attempts must be >= 1")
     if args.locked_seconds <= 0.0 or args.free_seconds <= 0.0:
         raise SystemExit("--locked-seconds and --free-seconds must be > 0")
 
@@ -275,12 +288,15 @@ def main() -> int:
         "locked_seconds": args.locked_seconds,
         "free_seconds": args.free_seconds,
         "repeats": args.repeats,
+        "max_attempts": args.max_attempts,
         "design": {
             "type": "Williams-style Latin square",
             "cycle_blocks": len(names),
             "complete_position_balance": args.repeats % len(names) == 0,
             "inference": (
-                "confirmation"
+                "confirmatory-capable; summary still requires paired exact-sign p<=0.05"
+                if args.repeats % len(names) == 0 and args.repeats >= 8
+                else "balanced directional screening"
                 if args.repeats % len(names) == 0
                 else "screening only; candidate is confounded with run position"
             ),
@@ -326,7 +342,6 @@ def main() -> int:
     any_failed = False
     for sequence, (block, name) in enumerate(order, start=1):
         candidate = CANDIDATES[name]
-        label = f"{args.scenario}_{name}_b{block:02d}"
         env = {
             key: value
             for key, value in os.environ.items()
@@ -346,31 +361,65 @@ def main() -> int:
         if args.sony_repo:
             env["SONY_REPO"] = str(pathlib.Path(args.sony_repo).resolve())
 
-        command = [
-            str(orchestrator),
-            label,
-            str(pathlib.Path(args.bvh).resolve()),
-            "--",
-            "--locked_seconds",
-            str(args.locked_seconds),
-            "--free_seconds",
-            str(args.free_seconds),
-        ]
         print(
             f"\n[matrix] {sequence}/{len(order)} block={block} candidate={name} "
             f"policy={candidate.policy_dir} substep={int(candidate.substep_consume)}",
             flush=True,
         )
-        returncode, output, interrupted_signal = _run_streaming(command, cwd=repo_root, env=env)
+        attempts = []
+        returncode = 1
+        interrupted_signal = None
+        run_dir = None
+        npz = None
+        npz_exists = False
+        label = ""
+        for attempt in range(1, args.max_attempts + 1):
+            label = f"{args.scenario}_{name}_b{block:02d}_a{attempt:02d}"
+            command = [
+                str(orchestrator),
+                label,
+                str(pathlib.Path(args.bvh).resolve()),
+                "--",
+                "--locked_seconds",
+                str(args.locked_seconds),
+                "--free_seconds",
+                str(args.free_seconds),
+            ]
+            if attempt > 1:
+                print(
+                    f"[matrix] retry attempt={attempt}/{args.max_attempts} "
+                    f"block={block} candidate={name}",
+                    flush=True,
+                )
+            returncode, output, interrupted_signal = _run_streaming(
+                command, cwd=repo_root, env=env
+            )
+            run_dir = _extract_path(output, "SONIC_JITTER_RUN_DIR")
+            npz = _extract_path(output, "SONIC_JITTER_NPZ")
+            npz_exists = bool(npz and pathlib.Path(npz).is_file())
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "label": label,
+                    "command": command,
+                    "returncode": returncode,
+                    "run_dir": run_dir,
+                    "npz": npz,
+                    "npz_exists": npz_exists,
+                    "interrupted_signal": interrupted_signal,
+                    "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }
+            )
+            if interrupted_signal is not None or (returncode == 0 and npz_exists):
+                break
 
-        run_dir = _extract_path(output, "SONIC_JITTER_RUN_DIR")
-        npz = _extract_path(output, "SONIC_JITTER_NPZ")
-        npz_exists = bool(npz and pathlib.Path(npz).is_file())
         run_result = {
             "sequence": sequence,
             "block": block,
             "candidate": name,
             "label": label,
+            "attempt_count": len(attempts),
+            "attempts": attempts,
             "returncode": returncode,
             "run_dir": run_dir,
             "npz": npz,

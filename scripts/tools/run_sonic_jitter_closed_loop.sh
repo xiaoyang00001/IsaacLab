@@ -127,6 +127,7 @@ RUN_DIR="${OUT_ROOT%/}/${SAFE_LABEL}_${RUN_STAMP}_$$"
 ISAAC_LOG="${RUN_DIR}/isaac.log"
 OUT_NPZ="${RUN_DIR}/${SAFE_LABEL}.npz"
 MANIFEST_JSON="${RUN_DIR}/manifest.json"
+RUNNER_STATUS_JSON="${RUN_DIR}/runner_status.json"
 TOTAL_TIMEOUT_S=900
 
 # JITTER_GUI=1 = 带 Isaac 窗口跑（观察模式）。headless 去掉；DISPLAY 兜底 :0；
@@ -220,6 +221,7 @@ RUNNER_COMMAND=(
     "${HEADLESS_ARGS[@]}" --device cpu
     --out "$OUT_NPZ"
     --run_manifest "$MANIFEST_JSON"
+    --status_file "$RUNNER_STATUS_JSON"
     --kit_args "--/app/vsync=false --/app/runLoops/main/rateLimitEnabled=false"
     "${RUNNER_EXTRA_ARGS[@]}"
 )
@@ -282,11 +284,37 @@ fi
 
 RUNNER_PID=""
 OUTPUT_LOCATIONS_PRINTED=0
+TEARDOWN_DONE=0
 print_output_locations() {
     (( OUTPUT_LOCATIONS_PRINTED == 0 )) || return 0
     printf 'SONIC_JITTER_RUN_DIR=%s\n' "$RUN_DIR"
     printf 'SONIC_JITTER_NPZ=%s\n' "$OUT_NPZ"
     OUTPUT_LOCATIONS_PRINTED=1
+}
+stop_session_and_wait() {
+    (( TEARDOWN_DONE == 0 )) || return 0
+    tmux kill-session -t "=$SESSION" 2>/dev/null || true
+
+    # tmux 退出到 ZMQ 监听 socket 真正释放之间存在短暂窗口；矩阵若立刻进入
+    # 下一候选会偶发撞上 5557。这里仅等待本轮固定资源释放，不广泛 kill 进程。
+    local grace="${SONIC_JITTER_TEARDOWN_GRACE_S:-2}"
+    local timeout="${SONIC_JITTER_TEARDOWN_TIMEOUT_S:-30}"
+    local waited=0 listeners=""
+    sleep "$grace"
+    while :; do
+        listeners="$(ss -H -ltnp 2>/dev/null | rg "$PORT_PATTERN" || true)"
+        if ! tmux has-session -t "=$SESSION" 2>/dev/null && [[ -z "$listeners" ]]; then
+            TEARDOWN_DONE=1
+            return 0
+        fi
+        if (( waited >= timeout )); then
+            log "✗ teardown ${timeout}s 后资源仍未释放"
+            [[ -n "$listeners" ]] && printf '%s\n' "$listeners" >&2
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
 }
 cleanup() {
     local status=$?
@@ -299,7 +327,9 @@ cleanup() {
         sleep 5
         kill -9 -- -"$RUNNER_PID" 2>/dev/null || true
     fi
-    tmux kill-session -t "=$SESSION" 2>/dev/null || true
+    if ! stop_session_and_wait && (( status == 0 )); then
+        status=1
+    fi
     print_output_locations
     exit $status
 }
@@ -493,10 +523,21 @@ while kill -0 "$RUNNER_PID" 2>/dev/null; do
 done
 wait "$RUNNER_PID"; RUNNER_STATUS=$?
 RUNNER_PID=""
-tmux kill-session -t "=$SESSION" 2>/dev/null || true
+if ! stop_session_and_wait; then
+    exit 1
+fi
 
-if [[ $RUNNER_STATUS -ne 0 || ! -f "$OUT_NPZ" ]]; then
-    log "✗ runner 退出码 $RUNNER_STATUS 或无产物；日志尾部："
+VERIFY_STATUS=""
+if [[ -f "$RUNNER_STATUS_JSON" ]]; then
+    VERIFY_STATUS="$(
+        "${CONDA_ENV_PREFIX}/bin/python" -c \
+            'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); code=data.get("exit_code"); completed=data.get("completed"); assert isinstance(code, int) and completed is True; print(code)' \
+            "$RUNNER_STATUS_JSON" 2>/dev/null
+    )" || VERIFY_STATUS=""
+fi
+
+if [[ -z "$VERIFY_STATUS" || $RUNNER_STATUS -ne 0 || $VERIFY_STATUS -ne 0 || ! -f "$OUT_NPZ" ]]; then
+    log "✗ runner launcher=$RUNNER_STATUS verify=${VERIFY_STATUS:-missing} 或无产物；日志尾部："
     tail -30 "$ISAAC_LOG"
     exit 1
 fi

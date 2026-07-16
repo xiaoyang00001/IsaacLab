@@ -36,9 +36,12 @@ def synthetic_npz(
     control_state: np.ndarray | None = None,
     root_length: int | None = None,
     packets: np.ndarray | None = None,
+    packet_count: np.ndarray | None = None,
     valid_target_count: np.ndarray | None = None,
     source_index: np.ndarray | None = None,
     root_z: np.ndarray | None = None,
+    target_age_s: np.ndarray | None = None,
+    target_gate: dict | None = None,
     dt: float = 0.02,
     include_root: bool = True,
 ) -> None:
@@ -62,7 +65,7 @@ def synthetic_npz(
         "step_delta": np.zeros(length, dtype=np.float32),
         "packets": np.arange(length, dtype=np.int64) if packets is None else packets,
         "joint_names": JOINT_NAMES,
-        "meta": np.asarray(json.dumps({"step_dt": dt})),
+        "meta": np.asarray(json.dumps({"step_dt": dt, "target_gate": target_gate or {}})),
     }
     if include_root:
         values["root_pos"] = root
@@ -73,6 +76,10 @@ def synthetic_npz(
         values["valid_target_count"] = valid_target_count
     if source_index is not None:
         values["source_index"] = source_index
+    if packet_count is not None:
+        values["packet_count"] = packet_count
+    if target_age_s is not None:
+        values["target_age_s"] = target_age_s
     np.savez_compressed(path, **values)
 
 
@@ -163,6 +170,7 @@ class TestSonicJitterReport(unittest.TestCase):
                 path,
                 length=length,
                 packets=packets,
+                packet_count=packets,
                 valid_target_count=packets,
                 source_index=packets,
             )
@@ -174,6 +182,57 @@ class TestSonicJitterReport(unittest.TestCase):
         self.assertIn("update_gap_too_large", coverage["invalid_reasons"])
         self.assertGreater(coverage["max_update_gap_s"], 0.40)
         self.assertLess(coverage["update_coverage"], 0.90)
+
+    def test_single_transient_stale_sample_does_not_invalidate_run(self):
+        length = 200
+        target_age = np.full(length, 0.005, dtype=np.float64)
+        target_age[75] = 0.106
+        counts = np.arange(length, dtype=np.int64)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transient_stale.npz"
+            synthetic_npz(
+                path,
+                length=length,
+                target_age_s=target_age,
+                packets=counts,
+                packet_count=counts,
+                valid_target_count=counts,
+                source_index=counts,
+                target_gate={
+                    "enabled": True,
+                    "passed": True,
+                    "max_target_stale_s": 0.10,
+                    "max_stale_fraction": 0.02,
+                    "hard_target_stale_s": 0.50,
+                },
+            )
+            coverage = report.load_report(path)["free"]["coverage"]
+
+        self.assertFalse(coverage["invalid"])
+        self.assertAlmostEqual(coverage["target_age_s"]["stale_frac"], 1 / length)
+        self.assertGreater(coverage["target_age_s"]["max"], 0.10)
+
+    def test_substep_multi_consume_is_not_misclassified_as_packet_loss(self):
+        length = 160
+        counts = np.arange(length, dtype=np.int64) * 2
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "substep.npz"
+            synthetic_npz(
+                path,
+                length=length,
+                packets=counts,
+                packet_count=counts,
+                valid_target_count=counts,
+                source_index=counts,
+                target_age_s=np.full(length, 0.003, dtype=np.float64),
+            )
+            coverage = report.load_report(path)["free"]["coverage"]
+
+        self.assertFalse(coverage["invalid"])
+        self.assertEqual(coverage["packet_coverage"], 1.0)
+        self.assertEqual(coverage["max_packet_jump"], 2)
 
     def test_run_level_paired_effect(self):
         a = [
@@ -190,6 +249,8 @@ class TestSonicJitterReport(unittest.TestCase):
         self.assertAlmostEqual(effect["mean"], -5 / 3)
         self.assertEqual(effect["n"], 3)
         self.assertTrue(np.isfinite(effect["paired_dz"]))
+        normal_half = 1.96 * effect["sd"] / np.sqrt(effect["n"])
+        self.assertGreater(effect["ci95_high"] - effect["mean"], normal_half)
 
     def test_invalid_runs_are_excluded_from_metric_aggregate(self):
         valid = {
