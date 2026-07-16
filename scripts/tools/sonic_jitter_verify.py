@@ -21,6 +21,7 @@ env_hz 偏离实时则闭环数据无效——见 KB《SONIC闭环日志分析SO
 """
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -205,12 +206,23 @@ import isaaclab_tasks  # noqa: F401
 import isaaclab_tasks.manager_based.locomanipulation.pick_place  # noqa: F401  (blacklist 包手动注册)
 import isaaclab_tasks.manager_based.manipulation.pick_place  # noqa: F401
 import isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions as sonic_actions_module
+from isaaclab_tasks.manager_based.locomanipulation.pick_place import (
+    locomanipulation_g1_env_cfg as sonic_env_cfg_module,
+)
 
 from isaaclab_tasks.utils import parse_env_cfg
 
 
 def _log(message: str) -> None:
     print(f"[JitterVerify] {message}", flush=True)
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class StepRecorder:
@@ -315,6 +327,24 @@ def main() -> int:
         device=args_cli.device,
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
+    )
+    robot_usd_realpath = os.path.realpath(
+        str(sonic_env_cfg_module.G1_43DOF_GR00T_CFG.spawn.usd_path)
+    )
+    requested_robot_usd = os.environ.get("SONIC_G1_ROBOT_USD")
+    if requested_robot_usd and robot_usd_realpath != os.path.realpath(
+        os.path.expanduser(requested_robot_usd)
+    ):
+        raise RuntimeError(
+            "configured G1 robot USD does not match SONIC_G1_ROBOT_USD: "
+            f"{robot_usd_realpath!r} != {requested_robot_usd!r}"
+        )
+    robot_usd = {
+        "realpath": robot_usd_realpath,
+        "sha256": _sha256_file(robot_usd_realpath),
+    }
+    _log(
+        f"robot_usd={robot_usd['realpath']} sha256={robot_usd['sha256']}"
     )
     env_cfg.seed = int(args_cli.seed)
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -431,6 +461,7 @@ def main() -> int:
             "target_gate": target_gate,
             "run_manifest_path": _RUN_MANIFEST_PATH,
             "run_manifest": _RUN_MANIFEST,
+            "robot_usd": robot_usd,
             "argv": list(sys.argv),
             "cwd": os.getcwd(),
             "isaaclab_tasks_file": os.path.realpath(str(isaaclab_tasks.__file__)),

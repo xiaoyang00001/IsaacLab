@@ -140,6 +140,8 @@ ENCODER_MODEL="${POLICY_ROOT}/model_encoder.onnx"
 OBS_CONFIG="${POLICY_ROOT}/observation_config.yaml"
 PLANNER_MODEL="${SONY_REPO}/gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx"
 ROBOT_USD="${SONY_REPO}/gear_sonic/data/robots/g1/g1_43dof.usd"
+export GR00T_WBC_ROOT="$SONY_REPO"
+export SONIC_G1_ROBOT_USD="$ROBOT_USD"
 MANIFEST_HELPER="${ISAACLAB_ROOT}/scripts/tools/sonic_run_manifest.py"
 EXTERNAL_LAUNCHER="${SONY_REPO}/scripts/launch_sonic_local_isaaclab_closed_loop.py"
 EXTERNAL_WRAPPER="${SONY_REPO}/scripts/launch_sonic_json_isaaclab_closed_loop.sh"
@@ -200,6 +202,7 @@ RUNNER_ENVIRONMENT=(
     "LD_PRELOAD=$RUNNER_LD_PRELOAD"
     "PYTHONPATH=$PYTHONPATH"
     "PYTHONUNBUFFERED=1"
+    "SONIC_G1_ROBOT_USD=$ROBOT_USD"
     "TERM=xterm"
     "UNITREE_DDS_DOMAIN_ID=0"
     "UNITREE_DDS_INTERFACE=lo"
@@ -417,6 +420,7 @@ log "启动 IsaacLab runner → $ISAAC_LOG"
     fi
     export CONDA_PREFIX="$CONDA_ENV_PREFIX"
     export GR00T_WBC_ROOT="$SONY_REPO"
+    export SONIC_G1_ROBOT_USD="$ROBOT_USD"
     export PYTHONUNBUFFERED=1
     export TERM=xterm
     export XR_RUNTIME_JSON=/nonexistent   # headless 严禁挂上 SteamVR（env_hz 崩溃判例）
@@ -426,7 +430,7 @@ log "启动 IsaacLab runner → $ISAAC_LOG"
     printf '[jitter-import] ISAACLAB_ROOT=%s\n' "$ISAACLAB_ROOT"
     printf '[jitter-import] ISAACLAB_PATH=%s\n' "$ISAACLAB_PATH"
     printf '[jitter-asset] GR00T_WBC_ROOT=%s\n' "$GR00T_WBC_ROOT"
-    printf '[jitter-asset] robot_usd=%s\n' "$ROBOT_USD"
+    printf '[jitter-asset] SONIC_G1_ROBOT_USD=%s\n' "$SONIC_G1_ROBOT_USD"
     "${CONDA_ENV_PREFIX}/bin/python" "$MANIFEST_HELPER" print-imports \
         --isaaclab-root "$ISAACLAB_ROOT" || exit $?
 

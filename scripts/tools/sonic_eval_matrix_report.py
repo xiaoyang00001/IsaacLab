@@ -101,6 +101,7 @@ def _runtime_valid(
     pinned_env: dict,
     expected_seed: int | None,
     expected_shared_artifacts: dict,
+    expected_sony_repo: str | None,
     expected_unlock_source_index: int | None,
     expected_isaaclab_repository: dict | None,
 ) -> list[str]:
@@ -214,6 +215,35 @@ def _runtime_valid(
                 reasons.append(f"shared_{artifact_name}_path_mismatch={actual_path!r}")
             if actual_hash != expected_artifact.get("sha256"):
                 reasons.append(f"shared_{artifact_name}_hash_mismatch={actual_hash!r}")
+        expected_robot_usd = expected_shared_artifacts.get("robot_usd")
+        if isinstance(expected_robot_usd, dict):
+            expected_robot_path = expected_robot_usd.get("realpath")
+            expected_robot_hash = expected_robot_usd.get("sha256")
+            loaded_robot_path = _get(meta, "robot_usd.realpath")
+            loaded_robot_hash = _get(meta, "robot_usd.sha256")
+            if loaded_robot_path != expected_robot_path:
+                reasons.append(f"loaded_robot_usd_path_mismatch={loaded_robot_path!r}")
+            if loaded_robot_hash != expected_robot_hash:
+                reasons.append(f"loaded_robot_usd_hash_mismatch={loaded_robot_hash!r}")
+            runner_robot_path = _get(
+                manifest, "runner_environment.SONIC_G1_ROBOT_USD"
+            )
+            if runner_robot_path != expected_robot_path:
+                reasons.append(f"runner_robot_usd_path_mismatch={runner_robot_path!r}")
+            captured_robot_path = _get(
+                manifest, "environment.SONIC_G1_ROBOT_USD"
+            )
+            if captured_robot_path != expected_robot_path:
+                reasons.append(
+                    f"captured_robot_usd_path_mismatch={captured_robot_path!r}"
+                )
+            if expected_sony_repo is not None:
+                runner_root = _get(manifest, "runner_environment.GR00T_WBC_ROOT")
+                captured_root = _get(manifest, "environment.GR00T_WBC_ROOT")
+                if runner_root != expected_sony_repo:
+                    reasons.append(f"runner_gr00t_root_mismatch={runner_root!r}")
+                if captured_root != expected_sony_repo:
+                    reasons.append(f"captured_gr00t_root_mismatch={captured_root!r}")
         if isinstance(expected_deploy_binary, dict):
             actual_deploy_path = _get(manifest, "artifacts.deploy_binary.realpath")
             actual_deploy_hash = _get(manifest, "artifacts.deploy_binary.sha256")
@@ -274,6 +304,11 @@ def _runtime_valid(
                 "1" if candidate_definition.get("substep_consume") else "0"
             ),
         }
+        expected_robot_usd = expected_shared_artifacts.get("robot_usd")
+        if isinstance(expected_robot_usd, dict):
+            expected_sonic["SONIC_G1_ROBOT_USD"] = str(
+                expected_robot_usd.get("realpath")
+            )
         for key, expected in expected_sonic.items():
             if sonic_env.get(key) != expected:
                 reasons.append(f"sonic_env_mismatch_{key}={sonic_env.get(key)!r}")
@@ -710,6 +745,7 @@ def build_summary(results_path: pathlib.Path) -> dict:
     legacy_deploy_binary = plan.get("deploy_binary")
     pinned_env = plan.get("pinned_env", {})
     expected_shared_artifacts = plan.get("shared_artifacts", {})
+    expected_sony_repo = plan.get("sony_repo")
     expected_isaaclab_repository = plan.get("isaaclab_repository")
     unlock_alignment = plan.get("unlock_alignment", {})
     expected_unlock_source_index = (
@@ -766,6 +802,7 @@ def build_summary(results_path: pathlib.Path) -> dict:
                             pinned_env=pinned_env,
                             expected_seed=expected_seed,
                             expected_shared_artifacts=expected_shared_artifacts,
+                            expected_sony_repo=expected_sony_repo,
                             expected_unlock_source_index=expected_unlock_source_index,
                             expected_isaaclab_repository=expected_isaaclab_repository,
                         )

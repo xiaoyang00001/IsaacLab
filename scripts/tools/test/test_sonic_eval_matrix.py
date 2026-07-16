@@ -49,6 +49,11 @@ class TestSonicEvalMatrix(unittest.TestCase):
         planned_free_seconds: float | None = None,
         termination_reason: str | None = None,
         fall_grace_s: float = 0.0,
+        robot_manifest_realpath: str | None = None,
+        robot_manifest_sha256: str | None = None,
+        robot_actual_realpath: str | None = None,
+        robot_actual_sha256: str | None = None,
+        runner_gr00t_root: str | None = None,
     ) -> None:
         wall_t = np.arange(length, dtype=np.float64) * 0.02
         joint_names = np.asarray(
@@ -86,6 +91,19 @@ class TestSonicEvalMatrix(unittest.TestCase):
             }
         if deploy_runtime_repository is not None:
             manifest["repositories"]["deploy_runtime"] = deploy_runtime_repository
+        if robot_manifest_realpath is not None:
+            manifest["artifacts"]["robot_usd"] = {
+                "realpath": robot_manifest_realpath,
+                "sha256": robot_manifest_sha256,
+            }
+            manifest["environment"] = {
+                "GR00T_WBC_ROOT": runner_gr00t_root,
+                "SONIC_G1_ROBOT_USD": robot_manifest_realpath,
+            }
+            manifest["runner_environment"] = {
+                "GR00T_WBC_ROOT": runner_gr00t_root,
+                "SONIC_G1_ROBOT_USD": robot_manifest_realpath,
+            }
         meta = {
             "schema_version": 3 if seed is not None or termination_reason else 2,
             "status": "ok",
@@ -105,8 +123,18 @@ class TestSonicEvalMatrix(unittest.TestCase):
                 "SONIC_G1_MUJOCO_NO_ARMATURE": "0",
                 "SONIC_G1_MUJOCO_NO_VEL_LIMIT": "0",
                 "SONIC_DEPLOY_SUBSTEP_CONSUME": "1" if substep_consume else "0",
+                **(
+                    {"SONIC_G1_ROBOT_USD": robot_manifest_realpath}
+                    if robot_manifest_realpath is not None
+                    else {}
+                ),
             },
         }
+        if robot_actual_realpath is not None:
+            meta["robot_usd"] = {
+                "realpath": robot_actual_realpath,
+                "sha256": robot_actual_sha256,
+            }
         if seed is not None:
             meta["seed_requested"] = seed
             meta["seed_actual"] = seed
@@ -464,6 +492,108 @@ class TestSonicEvalMatrix(unittest.TestCase):
                 ]
                 self.assertTrue(any(reason.startswith(expected_reason) for reason in invalid))
                 self.assertEqual(summary["confidence"], "provisional_screening")
+
+    def test_robot_asset_identity_gate(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        sony_root = "/tmp/test-sony-root"
+        robot_path = f"{sony_root}/gear_sonic/data/robots/g1/g1_43dof.usd"
+        for mismatch, expected_reason in (
+            ("valid", None),
+            ("manifest_hash", "shared_robot_usd_hash_mismatch"),
+            ("runner_root", "runner_gr00t_root_mismatch"),
+            ("loaded_path", "loaded_robot_usd_path_mismatch"),
+        ):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan_path = root / "matrix_plan.json"
+                results_path = root / "matrix_results.json"
+                npz = root / "run.npz"
+                self._write_run(
+                    npz,
+                    repo_root,
+                    fell=False,
+                    substep_consume=False,
+                    robot_manifest_realpath=robot_path,
+                    robot_manifest_sha256=(
+                        "wrong-hash" if mismatch == "manifest_hash" else "robot-hash"
+                    ),
+                    robot_actual_realpath=(
+                        "/tmp/wrong-robot.usd" if mismatch == "loaded_path" else robot_path
+                    ),
+                    robot_actual_sha256="robot-hash",
+                    runner_gr00t_root=(
+                        "/tmp/wrong-root" if mismatch == "runner_root" else sony_root
+                    ),
+                )
+                plan_path.write_text(
+                    json.dumps(
+                        {
+                            "repo_root": str(repo_root),
+                            "sony_repo": sony_root,
+                            "scenario": "v3_bvh",
+                            "free_seconds": 3.2,
+                            "repeats": 1,
+                            "deploy_binary": {
+                                "realpath": "/tmp/test-sonic-deploy",
+                                "sha256": "test-deploy-sha256",
+                            },
+                            "shared_artifacts": {
+                                "robot_usd": {
+                                    "realpath": robot_path,
+                                    "sha256": "robot-hash",
+                                }
+                            },
+                            "pinned_env": {
+                                "SONIC_DEPLOY_AUTO_RECOVER": "0",
+                                "SONIC_DEPLOY_ELASTIC_BAND": "0",
+                                "SONIC_G1_MUJOCO_TORQUE_PARITY": "0",
+                                "SONIC_G1_MUJOCO_NO_ARMATURE": "0",
+                                "SONIC_G1_MUJOCO_NO_VEL_LIMIT": "0",
+                            },
+                            "candidates": [
+                                {
+                                    "name": "candidate",
+                                    "policy_dir": "policy/release",
+                                    "substep_consume": False,
+                                }
+                            ],
+                            "order": [
+                                {
+                                    "sequence": 1,
+                                    "block": 1,
+                                    "candidate": "candidate",
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                results_path.write_text(
+                    json.dumps(
+                        {
+                            "plan": str(plan_path),
+                            "runs": [
+                                {
+                                    "sequence": 1,
+                                    "block": 1,
+                                    "candidate": "candidate",
+                                    "returncode": 0,
+                                    "npz": str(npz),
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                summary = matrix_report.build_summary(results_path)
+                invalid = summary["candidates"][0]["runs"][0]["invalid_reasons"]
+                if expected_reason is None:
+                    self.assertEqual(invalid, [])
+                else:
+                    self.assertTrue(
+                        any(reason.startswith(expected_reason) for reason in invalid),
+                        invalid,
+                    )
 
     def test_fall_early_stop_is_valid_and_survival_uses_planned_horizon(self):
         repo_root = Path(__file__).resolve().parents[3]

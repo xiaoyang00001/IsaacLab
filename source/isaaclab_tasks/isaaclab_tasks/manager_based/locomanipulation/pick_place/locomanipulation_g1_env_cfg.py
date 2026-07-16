@@ -202,6 +202,18 @@ print(
 def _find_gr00t_g1_43dof_usd() -> str:
     """Resolve the GR00T G1 43-DoF USD used by the sim2sim viewer."""
 
+    explicit_usd = os.environ.get("SONIC_G1_ROBOT_USD")
+    if explicit_usd:
+        usd_path = Path(explicit_usd).expanduser()
+        if not usd_path.is_file():
+            raise FileNotFoundError(
+                "SONIC_G1_ROBOT_USD requires one exact existing file; "
+                f"got: {usd_path}"
+            )
+        resolved = usd_path.resolve()
+        print(f"[locomanipulation_g1_env_cfg] G1 43-DoF USD (strict): {resolved}")
+        return str(resolved)
+
     candidates = []
     if "GR00T_WBC_ROOT" in os.environ:
         candidates.append(Path(os.environ["GR00T_WBC_ROOT"]).expanduser())
