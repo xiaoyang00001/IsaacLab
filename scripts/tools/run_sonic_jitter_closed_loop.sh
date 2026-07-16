@@ -51,6 +51,9 @@ SESSION="sonic_jitter"
 OUT_DIR="/tmp/sonic_jitter"
 ISAACLAB_ROOT="/home/nolo/xiaoyang_IssacLab/IsaacLab"
 SONY_REPO="/home/nolo/GR00T-WholeBodyControl-sony-json-stream-20260702"
+# keyboard 模式的 policy 目录（相对 gear_sonic_deploy）。DEPLOY_POLICY_DIR=policy/low_latency
+# 切 low-latency 变体（step1 前瞻 ckpt，#9 A/B）；obs config 跟随同目录。
+DEPLOY_POLICY_DIR="${DEPLOY_POLICY_DIR:-policy/release}"
 CONDA_ENV_PREFIX="$HOME/miniconda3/envs/env_isaaclab"
 ISAAC_LOG="${OUT_DIR}/isaac_${LABEL}.log"
 OUT_NPZ="${OUT_DIR}/${LABEL}.npz"
@@ -163,7 +166,7 @@ if [[ "$JITTER_INPUT" == "keyboard" ]]; then
         "cd '$SONY_REPO' && export DDS_INTERFACE=lo SDK='${SONY_REPO}/gear_sonic_deploy/thirdparty/unitree_sdk2' && export LD_LIBRARY_PATH=\"\$SDK/thirdparty/lib/\$(uname -m):\$SDK/lib/\$(uname -m):\${LD_LIBRARY_PATH:-}\" && '$PROXY_BIN' --interface \"\$DDS_INTERFACE\" --domain-id 0 --lowstate-hz 500.0 --follow-alpha 0.35 --isaac-state-endpoint tcp://127.0.0.1:5560 --isaac-state-topic sonic_state |& tee '$PROXY_LOG'; exec bash" \
         || { log "✗ tmux proxy 窗口启动失败"; exit 1; }
     tmux new-window -t "$SESSION" -n deploy \
-        "cd '${SONY_REPO}/gear_sonic_deploy' && export DDS_INTERFACE=lo && source scripts/setup_env.sh && just run g1_deploy_onnx_ref \"\$DDS_INTERFACE\" policy/release/model_decoder.onnx reference/example --obs-config policy/release/observation_config.yaml --encoder-file policy/release/model_encoder.onnx --planner-file planner/target_vel/V2/planner_sonic.onnx --input-type keyboard --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check |& tee '$DEPLOY_LOG'; exec bash" \
+        "cd '${SONY_REPO}/gear_sonic_deploy' && export DDS_INTERFACE=lo && source scripts/setup_env.sh && just run g1_deploy_onnx_ref \"\$DDS_INTERFACE\" ${DEPLOY_POLICY_DIR}/model_decoder.onnx reference/example --obs-config ${DEPLOY_POLICY_DIR}/observation_config.yaml --encoder-file ${DEPLOY_POLICY_DIR}/model_encoder.onnx --planner-file planner/target_vel/V2/planner_sonic.onnx --input-type keyboard --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check |& tee '$DEPLOY_LOG'; exec bash" \
         || { log "✗ tmux deploy 窗口启动失败"; exit 1; }
 else
     # ---------- 2. 启动 sony 三窗口（input/proxy/deploy） ----------
