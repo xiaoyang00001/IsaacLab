@@ -350,6 +350,36 @@ class TestSonicEvalMatrix(unittest.TestCase):
         self.assertEqual(first_attempt, retry_attempt)
         self.assertEqual(first_attempt[first_attempt.index("--seed") + 1], "702")
 
+    def test_deploy_binary_snapshot_is_content_addressed_and_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_a = root / "source-a"
+            source_b = root / "source-b"
+            source_a.write_bytes(b"same deploy binary")
+            source_b.write_bytes(b"same deploy binary")
+            source_a.chmod(0o755)
+            source_b.chmod(0o755)
+            definitions = {
+                "a": {"deploy_binary": matrix._file_fingerprint(source_a)},
+                "b": {"deploy_binary": matrix._file_fingerprint(source_b)},
+            }
+            matrix_root = root / "matrix"
+            matrix_root.mkdir()
+
+            matrix._snapshot_deploy_binaries(definitions, matrix_root)
+
+            snapshot_a = Path(definitions["a"]["deploy_binary"]["realpath"])
+            snapshot_b = Path(definitions["b"]["deploy_binary"]["realpath"])
+            self.assertEqual(snapshot_a, snapshot_b)
+            self.assertEqual(snapshot_a.read_bytes(), b"same deploy binary")
+            self.assertEqual(snapshot_a.stat().st_mode & 0o222, 0)
+            self.assertEqual(
+                definitions["a"]["deploy_binary_source"]["realpath"],
+                str(source_a.resolve()),
+            )
+            snapshot_a.chmod(0o755)
+            snapshot_a.parent.chmod(0o755)
+
     @staticmethod
     def _runtime_bundle(name: str) -> dict:
         root = f"/tmp/{name}-runtime"

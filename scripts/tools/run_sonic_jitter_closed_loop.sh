@@ -238,6 +238,19 @@ require_file "$DEPLOY_SETUP_ENV" "deploy runtime setup_env.sh"
 require_executable "$DEPLOY_BIN" "deploy binary"
 require_executable "$PROXY_BIN" "proxy binary"
 DEPLOY_BIN="$(readlink -f -- "$DEPLOY_BIN")"
+if [[ -n "${DEPLOY_BIN_SHA256_EXPECTED:-}" ]]; then
+    [[ "$DEPLOY_BIN_SHA256_EXPECTED" =~ ^[[:xdigit:]]{64}$ ]] || {
+        echo "✗ DEPLOY_BIN_SHA256_EXPECTED 必须是 64 位 SHA256" >&2
+        exit 2
+    }
+    DEPLOY_BIN_SHA256_ACTUAL="$(sha256sum -- "$DEPLOY_BIN" | awk '{print $1}')"
+    if [[ "$DEPLOY_BIN_SHA256_ACTUAL" != "$DEPLOY_BIN_SHA256_EXPECTED" ]]; then
+        echo "✗ deploy binary 指纹变化: $DEPLOY_BIN" >&2
+        echo "  expected=$DEPLOY_BIN_SHA256_EXPECTED" >&2
+        echo "  actual=$DEPLOY_BIN_SHA256_ACTUAL" >&2
+        exit 2
+    fi
+fi
 DEPLOY_RUNTIME_REPO="$(git -C "$DEPLOY_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
 DEPLOY_SOURCE="${DEPLOY_ROOT}/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp"
 [[ -f "$DEPLOY_SOURCE" ]] || DEPLOY_SOURCE=""

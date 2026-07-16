@@ -42,10 +42,12 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -107,6 +109,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=2,
         help="Maximum attempts for one planned candidate/block before declaring that run invalid.",
+    )
+    parser.add_argument(
+        "--retry-backoff-s",
+        type=float,
+        default=10.0,
+        help="Wait before retrying an infrastructure/preflight failure.",
     )
     parser.add_argument("--locked-seconds", type=float, default=15.0)
     parser.add_argument(
@@ -199,6 +207,43 @@ def _file_fingerprint(path: pathlib.Path) -> dict[str, str | int]:
         "size_bytes": path.stat().st_size,
         "sha256": digest.hexdigest(),
     }
+
+
+def _snapshot_deploy_binaries(
+    candidate_definitions: dict[str, dict[str, Any]], matrix_root: pathlib.Path
+) -> None:
+    """Copy mutable build outputs into content-addressed, read-only matrix inputs."""
+    snapshot_dir = matrix_root / "inputs" / "deploy"
+    snapshot_dir.mkdir(parents=True, exist_ok=False)
+    for definition in candidate_definitions.values():
+        source_info = dict(definition["deploy_binary"])
+        source = pathlib.Path(str(source_info["realpath"]))
+        current_info = _file_fingerprint(source)
+        if current_info["sha256"] != source_info["sha256"]:
+            raise RuntimeError(
+                "deploy binary changed while constructing matrix: "
+                f"{source} {source_info['sha256']} -> {current_info['sha256']}"
+            )
+        destination = snapshot_dir / f"deploy-{source_info['sha256']}"
+        if not destination.exists():
+            temporary = destination.with_name(
+                f".{destination.name}.tmp-{os.getpid()}"
+            )
+            with source.open("rb") as source_stream, temporary.open("xb") as output:
+                shutil.copyfileobj(source_stream, output, length=1024 * 1024)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(temporary, 0o555)
+            os.replace(temporary, destination)
+        snapshot_info = _file_fingerprint(destination)
+        if snapshot_info["sha256"] != source_info["sha256"]:
+            raise RuntimeError(
+                f"deploy snapshot hash mismatch: {destination} "
+                f"{snapshot_info['sha256']} != {source_info['sha256']}"
+            )
+        definition["deploy_binary_source"] = source_info
+        definition["deploy_binary"] = snapshot_info
+    os.chmod(snapshot_dir, 0o555)
 
 
 def _git_snapshot(path: pathlib.Path) -> dict[str, Any]:
@@ -398,6 +443,8 @@ def main() -> int:
         raise SystemExit("--repeats must be >= 1")
     if args.max_attempts < 1:
         raise SystemExit("--max-attempts must be >= 1")
+    if args.retry_backoff_s < 0.0:
+        raise SystemExit("--retry-backoff-s must be >= 0")
     if args.locked_seconds <= 0.0 or args.free_seconds <= 0.0:
         raise SystemExit("--locked-seconds and --free-seconds must be > 0")
     if args.stop_after_fall_grace_s < 0.0:
@@ -536,6 +583,18 @@ def main() -> int:
             },
         }
 
+    if not args.dry_run:
+        try:
+            matrix_root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise SystemExit(
+                f"matrix output root already exists; choose a new --out-root: {matrix_root}"
+            ) from exc
+        try:
+            _snapshot_deploy_binaries(candidate_definitions, matrix_root)
+        except (OSError, RuntimeError) as exc:
+            raise SystemExit(f"could not snapshot deploy binaries: {exc}") from exc
+
     bundle_identities = {
         (
             definition["deploy_binary"]["realpath"],
@@ -566,6 +625,12 @@ def main() -> int:
         "free_seconds": args.free_seconds,
         "repeats": args.repeats,
         "max_attempts": args.max_attempts,
+        "retry_backoff_s": args.retry_backoff_s,
+        "deploy_binary_policy": (
+            "content-addressed read-only snapshots below matrix_root/inputs/deploy"
+            if not args.dry_run
+            else "dry-run only; source binary paths shown without creating snapshots"
+        ),
         "stop_after_fall_grace_s": args.stop_after_fall_grace_s,
         "unlock_alignment": {
             "enabled": args.scenario == "v3_bvh" and args.unlock_source_index >= 0,
@@ -642,12 +707,6 @@ def main() -> int:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
 
-    try:
-        matrix_root.mkdir(parents=True, exist_ok=False)
-    except FileExistsError as exc:
-        raise SystemExit(
-            f"matrix output root already exists; choose a new --out-root: {matrix_root}"
-        ) from exc
     _atomic_json(plan_path, plan)
     results: dict = {
         "schema_version": 2,
@@ -684,6 +743,9 @@ def main() -> int:
         )
         env["SONY_REPO"] = str(sony_repo)
         env["DEPLOY_BIN_OVERRIDE"] = str(deploy_bin_path)
+        env["DEPLOY_BIN_SHA256_EXPECTED"] = str(
+            candidate_definition["deploy_binary"]["sha256"]
+        )
         env["DEPLOY_ROOT_OVERRIDE"] = str(deploy_root)
 
         print(
@@ -712,9 +774,12 @@ def main() -> int:
             if attempt > 1:
                 print(
                     f"[matrix] retry attempt={attempt}/{args.max_attempts} "
-                    f"block={block} candidate={name}",
+                    f"block={block} candidate={name} "
+                    f"backoff={args.retry_backoff_s:.1f}s",
                     flush=True,
                 )
+                if args.retry_backoff_s > 0.0:
+                    time.sleep(args.retry_backoff_s)
             returncode, output, interrupted_signal = _run_streaming(
                 command, cwd=repo_root, env=env
             )
