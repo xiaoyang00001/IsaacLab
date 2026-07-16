@@ -473,6 +473,7 @@ def _series_metrics(
 
     q_hf = per_joint_hf_rms(qg, wall_t, finite)
     target_hf = per_joint_hf_rms(tg, wall_t, finite)
+    tracking_error_hf = per_joint_hf_rms(qg - tg, wall_t, finite)
     q_abs_residual = []
     jerk = []
     window = _highpass_window(wall_t, finite)
@@ -491,6 +492,9 @@ def _series_metrics(
             else float("nan")
         ),
         "target_hf_rms_deg": float(np.sqrt(np.nanmean(target_hf**2))),
+        "tracking_error_hf_rms_deg": float(
+            np.sqrt(np.nanmean(tracking_error_hf**2))
+        ),
         "chatter_flips_per_s": _chatter_rate(qg, wall_t, finite),
         "jerk_rms_mdeg": (
             float(np.sqrt(np.mean(np.concatenate(jerk) ** 2)) * RAD2DEG * 1000.0)
@@ -885,6 +889,16 @@ def _phase_report(data: dict, mask: np.ndarray, phase_name: str) -> dict:
         "state": _state_breakdown(data, mask),
         "coverage": _coverage_report(data, mask),
     }
+    source_index = data["source_index"]
+    valid_source = mask & (source_index >= 0)
+    if valid_source.any():
+        source_values = source_index[valid_source]
+        report["source_index"] = {
+            "start": int(source_values[0]),
+            "end": int(source_values[-1]),
+            "min": int(np.min(source_values)),
+            "max": int(np.max(source_values)),
+        }
     for group, idx in groups.items():
         metrics = _series_metrics(q, target, idx, wall_t, mask)
         if metrics:
@@ -963,7 +977,11 @@ def _phase_report(data: dict, mask: np.ndarray, phase_name: str) -> dict:
                 continue
             healthy_report[f"{group}_hf_rms_deg"] = metrics["hf_rms_deg"]
             healthy_report[f"{group}_target_hf_rms_deg"] = metrics["target_hf_rms_deg"]
+            healthy_report[f"{group}_tracking_error_hf_rms_deg"] = metrics[
+                "tracking_error_hf_rms_deg"
+            ]
             healthy_report[f"{group}_chatter_flips_per_s"] = metrics["chatter_flips_per_s"]
+            healthy_report[f"{group}_track_rms_deg"] = metrics["track_rms_deg"]
         if np.sum(healthy & np.isfinite(tilt)) >= 12:
             healthy_report["tilt_hf_rms_deg"] = _scalar_hf_rms(
                 tilt, wall_t, healthy & np.isfinite(tilt)

@@ -6,10 +6,15 @@
 
 """Run a balanced SONIC candidate matrix through the closed-loop evaluator.
 
-The matrix deliberately changes only two factors:
+The default matrix deliberately changes only two factors under one pinned
+deploy runtime:
 
 * deploy policy: ``policy/release`` or ``policy/low_latency``
 * Isaac target consumption: env-step (50 Hz) or physics-substep (200 Hz)
+
+Candidate-specific deploy binary/root overrides can instead compare complete
+runtime bundles. Such a result selects the better bundle but is explicitly not
+reported as the causal effect of policy or substep consumption alone.
 
 Every other experimental switch is pinned to the current production baseline.
 In particular, auto recovery is disabled: a fall is an outcome, not a new trial
@@ -42,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -118,7 +124,49 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--deploy-bin",
         default=None,
-        help="Pin one deploy executable for every candidate; avoids policy/runtime confounding.",
+        help="Default deploy executable for candidates without --candidate-deploy-bin.",
+    )
+    parser.add_argument(
+        "--deploy-root",
+        default=None,
+        help="Default gear_sonic_deploy runtime root for candidates without --candidate-deploy-root.",
+    )
+    parser.add_argument(
+        "--candidate-deploy-bin",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Bind one candidate to a deploy executable. Repeat for mixed-runtime bundle comparisons.",
+    )
+    parser.add_argument(
+        "--candidate-deploy-root",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Bind one candidate to a gear_sonic_deploy runtime root. Repeat as needed.",
+    )
+    parser.add_argument(
+        "--seed-base",
+        type=int,
+        default=20260716,
+        help="Isaac RNG seed for block 1; block N uses seed-base+N-1, shared by all candidates/retries.",
+    )
+    parser.add_argument(
+        "--stop-after-fall-grace-s",
+        type=float,
+        default=1.0,
+        help="End a definitively fallen run after this grace period; 0 disables fall early-stop.",
+    )
+    parser.add_argument(
+        "--unlock-source-index",
+        type=int,
+        default=800,
+        help="For v3_bvh, keep root locked until the deploy source counter reaches this index.",
+    )
+    parser.add_argument(
+        "--allow-dirty-worktree",
+        action="store_true",
+        help="Allow a dirty IsaacLab worktree. Formal runs should leave this off.",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -151,6 +199,85 @@ def _file_fingerprint(path: pathlib.Path) -> dict[str, str | int]:
         "size_bytes": path.stat().st_size,
         "sha256": digest.hexdigest(),
     }
+
+
+def _git_snapshot(path: pathlib.Path) -> dict[str, Any]:
+    root_result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if root_result.returncode != 0:
+        raise ValueError(f"deploy root is not inside a git checkout: {path}")
+    root = pathlib.Path(root_result.stdout.strip()).resolve()
+
+    def git(*command: str, check: bool = True) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(root), *command],
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return result.stdout.rstrip("\n")
+
+    status = git("status", "--porcelain=v1", "--untracked-files=normal")
+    diff = subprocess.run(
+        ["git", "-C", str(root), "diff", "--binary", "HEAD", "--"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    return {
+        "path": str(root),
+        "realpath": str(root),
+        "commit": git("rev-parse", "HEAD"),
+        "branch": branch or None,
+        "dirty": bool(status),
+        "status_porcelain": status.splitlines() if status else [],
+        "tracked_diff_bytes": len(diff),
+        "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
+    }
+
+
+def _named_paths(values: list[str], option: str) -> dict[str, pathlib.Path]:
+    parsed: dict[str, pathlib.Path] = {}
+    for raw in values:
+        name, separator, path = raw.partition("=")
+        name = name.strip()
+        path = path.strip()
+        if not separator or not name or not path:
+            raise ValueError(f"{option} expects NAME=PATH, got {raw!r}")
+        if name in parsed:
+            raise ValueError(f"{option} repeats candidate {name!r}")
+        parsed[name] = pathlib.Path(path).expanduser().resolve()
+    return parsed
+
+
+def _block_seed(seed_base: int, block: int) -> int:
+    return int(seed_base) + int(block) - 1
+
+
+def _runner_extra_args(args: argparse.Namespace, block: int) -> list[str]:
+    return [
+        "--locked_seconds",
+        str(args.locked_seconds),
+        "--free_seconds",
+        str(args.free_seconds),
+        "--seed",
+        str(_block_seed(args.seed_base, block)),
+        "--stop_after_fall_grace_s",
+        str(args.stop_after_fall_grace_s),
+        *(
+            ["--unlock_source_index", str(getattr(args, "unlock_source_index", 800))]
+            if getattr(args, "scenario", "v3_bvh") == "v3_bvh"
+            and getattr(args, "unlock_source_index", 800) >= 0
+            else []
+        ),
+    ]
 
 
 def _candidate_names(raw: str) -> list[str]:
@@ -273,6 +400,8 @@ def main() -> int:
         raise SystemExit("--max-attempts must be >= 1")
     if args.locked_seconds <= 0.0 or args.free_seconds <= 0.0:
         raise SystemExit("--locked-seconds and --free-seconds must be > 0")
+    if args.stop_after_fall_grace_s < 0.0:
+        raise SystemExit("--stop-after-fall-grace-s must be >= 0")
 
     try:
         names = _candidate_names(args.candidates)
@@ -280,6 +409,12 @@ def main() -> int:
         raise SystemExit(str(exc)) from exc
 
     repo_root = pathlib.Path(__file__).resolve().parents[2]
+    isaaclab_repository = _git_snapshot(repo_root)
+    if isaaclab_repository["dirty"] and not args.allow_dirty_worktree:
+        raise SystemExit(
+            "IsaacLab worktree is dirty; commit/stash changes before a formal matrix "
+            "or use --allow-dirty-worktree for diagnostics"
+        )
     orchestrator = repo_root / "scripts/tools/run_sonic_jitter_closed_loop.sh"
     if not orchestrator.is_file():
         raise SystemExit(f"orchestrator not found: {orchestrator}")
@@ -295,28 +430,166 @@ def main() -> int:
         args.sony_repo
         or os.environ.get("SONY_REPO", "/home/nolo/GR00T-WholeBodyControl-sony-json-stream-20260702")
     ).expanduser().resolve()
-    deploy_bin_path = pathlib.Path(
+    default_deploy_root = pathlib.Path(
+        args.deploy_root
+        or os.environ.get("DEPLOY_ROOT_OVERRIDE")
+        or sony_repo / "gear_sonic_deploy"
+    ).expanduser().resolve()
+    default_deploy_bin = pathlib.Path(
         args.deploy_bin
         or os.environ.get("DEPLOY_BIN_OVERRIDE")
         or sony_repo / "gear_sonic_deploy/target/release/g1_deploy_onnx_ref"
     ).expanduser().resolve()
-    if not deploy_bin_path.is_file() or not os.access(deploy_bin_path, os.X_OK):
-        raise SystemExit(f"--deploy-bin is not executable: {deploy_bin_path}")
-    deploy_binary = _file_fingerprint(deploy_bin_path)
+    try:
+        deploy_bin_overrides = _named_paths(args.candidate_deploy_bin, "--candidate-deploy-bin")
+        deploy_root_overrides = _named_paths(args.candidate_deploy_root, "--candidate-deploy-root")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    unknown_overrides = (set(deploy_bin_overrides) | set(deploy_root_overrides)) - set(names)
+    if unknown_overrides:
+        raise SystemExit(
+            "candidate runtime override names are not selected candidates: "
+            + ", ".join(sorted(unknown_overrides))
+        )
+
+    bvh_path = pathlib.Path(args.bvh).expanduser().resolve()
+    planner_path = (
+        sony_repo / "gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx"
+    ).resolve()
+    proxy_path = (
+        sony_repo / "gear_sonic_deploy/build/tools/sonic_unitree_lowstate_cpp_proxy"
+    ).resolve()
+    if not proxy_path.is_file():
+        proxy_path = (
+            sony_repo
+            / "gear_sonic_deploy/prebuilt/linux-x86_64/sonic_unitree_lowstate_cpp_proxy"
+        ).resolve()
+    shared_paths = {
+        "planner_model": planner_path,
+        "proxy_binary": proxy_path,
+        "external_launcher": (
+            sony_repo / "scripts/launch_sonic_local_isaaclab_closed_loop.py"
+        ).resolve(),
+        "external_wrapper": (
+            sony_repo / "scripts/launch_sonic_json_isaaclab_closed_loop.sh"
+        ).resolve(),
+        "mocap_manager": (
+            sony_repo / "gear_sonic/scripts/mocap_manager_server.py"
+        ).resolve(),
+        "bvh_sender": (
+            sony_repo / "gear_sonic/scripts/bvh_stream_sender.py"
+        ).resolve(),
+    }
+    if args.scenario == "v3_bvh":
+        shared_paths["bvh"] = bvh_path
+    for artifact_name, artifact_path in shared_paths.items():
+        if not artifact_path.is_file():
+            raise SystemExit(f"shared artifact {artifact_name!r} does not exist: {artifact_path}")
+    shared_artifacts = {
+        name: _file_fingerprint(path) for name, path in shared_paths.items()
+    }
+
+    candidate_definitions: dict[str, dict[str, Any]] = {}
+    for name in names:
+        deploy_bin_path = deploy_bin_overrides.get(name, default_deploy_bin)
+        deploy_root = deploy_root_overrides.get(name, default_deploy_root)
+        setup_env = deploy_root / "scripts/setup_env.sh"
+        if not deploy_bin_path.is_file() or not os.access(deploy_bin_path, os.X_OK):
+            raise SystemExit(f"deploy binary for {name!r} is not executable: {deploy_bin_path}")
+        if not deploy_root.is_dir():
+            raise SystemExit(f"deploy root for {name!r} is not a directory: {deploy_root}")
+        if not setup_env.is_file():
+            raise SystemExit(f"deploy setup_env for {name!r} does not exist: {setup_env}")
+        policy_dir = pathlib.Path(CANDIDATES[name].policy_dir)
+        policy_root = (
+            policy_dir.resolve()
+            if policy_dir.is_absolute()
+            else (sony_repo / "gear_sonic_deploy" / policy_dir).resolve()
+        )
+        policy_paths = {
+            "decoder_model": policy_root / "model_decoder.onnx",
+            "encoder_model": policy_root / "model_encoder.onnx",
+            "observation_config": policy_root / "observation_config.yaml",
+        }
+        for artifact_name, artifact_path in policy_paths.items():
+            if not artifact_path.is_file():
+                raise SystemExit(
+                    f"policy artifact {artifact_name!r} for {name!r} does not exist: "
+                    f"{artifact_path}"
+                )
+        candidate_definitions[name] = {
+            **asdict(CANDIDATES[name]),
+            "policy_root": str(policy_root),
+            "policy_artifacts": {
+                artifact_name: _file_fingerprint(artifact_path)
+                for artifact_name, artifact_path in policy_paths.items()
+            },
+            "deploy_binary": _file_fingerprint(deploy_bin_path),
+            "deploy_runtime": {
+                "root": str(deploy_root),
+                "realpath": str(deploy_root.resolve()),
+                "repository": _git_snapshot(deploy_root),
+                "setup_env": _file_fingerprint(setup_env),
+            },
+        }
+
+    bundle_identities = {
+        (
+            definition["deploy_binary"]["realpath"],
+            definition["deploy_binary"]["sha256"],
+            definition["deploy_runtime"]["realpath"],
+            definition["deploy_runtime"]["setup_env"]["sha256"],
+        )
+        for definition in candidate_definitions.values()
+    }
+    shared_deploy_binary = (
+        next(iter(candidate_definitions.values()))["deploy_binary"]
+        if len({identity[:2] for identity in bundle_identities}) == 1
+        else None
+    )
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "repo_root": str(repo_root),
+        "isaaclab_repository": isaaclab_repository,
         "sony_repo": str(sony_repo),
-        "deploy_binary": deploy_binary,
+        **({"deploy_binary": shared_deploy_binary} if shared_deploy_binary is not None else {}),
         "orchestrator": str(orchestrator),
         "matrix_root": str(matrix_root),
         "scenario": args.scenario,
-        "bvh": str(pathlib.Path(args.bvh).resolve()),
+        "bvh": str(bvh_path),
+        "shared_artifacts": shared_artifacts,
         "locked_seconds": args.locked_seconds,
         "free_seconds": args.free_seconds,
         "repeats": args.repeats,
         "max_attempts": args.max_attempts,
+        "stop_after_fall_grace_s": args.stop_after_fall_grace_s,
+        "unlock_alignment": {
+            "enabled": args.scenario == "v3_bvh" and args.unlock_source_index >= 0,
+            "source_index_target": (
+                args.unlock_source_index
+                if args.scenario == "v3_bvh" and args.unlock_source_index >= 0
+                else None
+            ),
+            "note": "Source index is the streamed v3 frame counter; alignment remains under locked root.",
+        },
+        "seed_policy": {
+            "scope": "Isaac RNG only; deploy planner seed is separately fixed by the deploy runtime",
+            "type": "paired_by_block",
+            "seed_base": args.seed_base,
+            "distinct_across_blocks": True,
+            "retry_reuses_planned_seed": True,
+        },
+        "comparison_scope": {
+            "unit": "candidate_bundle",
+            "causal_attribution": len(bundle_identities) == 1,
+            "note": (
+                "All candidates share one deploy runtime; policy/substep factors are isolated."
+                if len(bundle_identities) == 1
+                else "Deploy binary/runtime bundle differs across candidates; ranking selects a complete bundle, "
+                "not the causal effect of one factor."
+            ),
+        },
         "design": {
             "type": "Williams-style Latin square",
             "cycle_blocks": len(names),
@@ -329,21 +602,35 @@ def main() -> int:
                 else "screening only; candidate is confounded with run position"
             ),
         },
-        "candidates": [asdict(CANDIDATES[name]) for name in names],
+        "candidates": [candidate_definitions[name] for name in names],
         "environment_policy": "drop inherited SONIC_* variables; force headless; apply pinned baseline",
         "command_template": [
             str(orchestrator),
             "<scenario>_<candidate>_b<block>",
-            str(pathlib.Path(args.bvh).resolve()),
+            str(bvh_path),
             "--",
             "--locked_seconds",
             str(args.locked_seconds),
             "--free_seconds",
             str(args.free_seconds),
+            "--seed",
+            "<paired block seed>",
+            "--stop_after_fall_grace_s",
+            str(args.stop_after_fall_grace_s),
+            *(
+                ["--unlock_source_index", str(args.unlock_source_index)]
+                if args.scenario == "v3_bvh" and args.unlock_source_index >= 0
+                else []
+            ),
         ],
         "pinned_env": PINNED_ENV,
         "order": [
-            {"sequence": sequence, "block": block, "candidate": name}
+            {
+                "sequence": sequence,
+                "block": block,
+                "candidate": name,
+                "seed": _block_seed(args.seed_base, block),
+            }
             for sequence, (block, name) in enumerate(order, start=1)
         ],
     }
@@ -360,7 +647,7 @@ def main() -> int:
         ) from exc
     _atomic_json(plan_path, plan)
     results: dict = {
-        "schema_version": 1,
+        "schema_version": 2,
         "plan": str(plan_path),
         "started_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "runs": [],
@@ -370,6 +657,12 @@ def main() -> int:
     any_failed = False
     for sequence, (block, name) in enumerate(order, start=1):
         candidate = CANDIDATES[name]
+        candidate_definition = candidate_definitions[name]
+        seed = _block_seed(args.seed_base, block)
+        deploy_bin_path = pathlib.Path(
+            candidate_definition["deploy_binary"]["realpath"]
+        )
+        deploy_root = pathlib.Path(candidate_definition["deploy_runtime"]["realpath"])
         env = {
             key: value
             for key, value in os.environ.items()
@@ -389,10 +682,12 @@ def main() -> int:
         if args.sony_repo:
             env["SONY_REPO"] = str(pathlib.Path(args.sony_repo).resolve())
         env["DEPLOY_BIN_OVERRIDE"] = str(deploy_bin_path)
+        env["DEPLOY_ROOT_OVERRIDE"] = str(deploy_root)
 
         print(
             f"\n[matrix] {sequence}/{len(order)} block={block} candidate={name} "
-            f"policy={candidate.policy_dir} substep={int(candidate.substep_consume)}",
+            f"policy={candidate.policy_dir} substep={int(candidate.substep_consume)} "
+            f"seed={seed} deploy={candidate_definition['deploy_binary']['sha256'][:12]}",
             flush=True,
         )
         attempts = []
@@ -402,17 +697,15 @@ def main() -> int:
         npz = None
         npz_exists = False
         label = ""
+        runner_extra_args = _runner_extra_args(args, block)
         for attempt in range(1, args.max_attempts + 1):
             label = f"{args.scenario}_{name}_b{block:02d}_a{attempt:02d}"
             command = [
                 str(orchestrator),
                 label,
-                str(pathlib.Path(args.bvh).resolve()),
+                str(bvh_path),
                 "--",
-                "--locked_seconds",
-                str(args.locked_seconds),
-                "--free_seconds",
-                str(args.free_seconds),
+                *runner_extra_args,
             ]
             if attempt > 1:
                 print(
@@ -430,6 +723,9 @@ def main() -> int:
                 {
                     "attempt": attempt,
                     "label": label,
+                    "seed": seed,
+                    "deploy_binary_sha256": candidate_definition["deploy_binary"]["sha256"],
+                    "deploy_runtime_root": candidate_definition["deploy_runtime"]["realpath"],
                     "command": command,
                     "returncode": returncode,
                     "run_dir": run_dir,
@@ -446,6 +742,9 @@ def main() -> int:
             "sequence": sequence,
             "block": block,
             "candidate": name,
+            "seed": seed,
+            "deploy_binary_sha256": candidate_definition["deploy_binary"]["sha256"],
+            "deploy_runtime_root": candidate_definition["deploy_runtime"]["realpath"],
             "label": label,
             "attempt_count": len(attempts),
             "attempts": attempts,

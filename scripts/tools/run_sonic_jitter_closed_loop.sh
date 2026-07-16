@@ -84,6 +84,34 @@ if [[ "$JITTER_INPUT" == "keyboard" ]]; then
     [[ " ${RUNNER_EXTRA_ARGS[*]:-} " == *" --free_seconds"* ]] || RUNNER_EXTRA_ARGS+=(--free_seconds 120)
 fi
 
+# 提取 runner 的显式 seed 写入 manifest。兼容 argparse 的 ``--seed N`` 与
+# ``--seed=N`` 两种形式；若重复指定，最后一个值与 argparse 的实际行为一致。
+RUN_SEED=""
+RUN_SEED_SET=0
+for ((arg_index = 0; arg_index < ${#RUNNER_EXTRA_ARGS[@]}; arg_index++)); do
+    runner_arg="${RUNNER_EXTRA_ARGS[arg_index]}"
+    case "$runner_arg" in
+        --seed)
+            next_index=$((arg_index + 1))
+            if (( next_index >= ${#RUNNER_EXTRA_ARGS[@]} )); then
+                echo "✗ runner 参数 --seed 缺少整数值" >&2
+                exit 2
+            fi
+            RUN_SEED="${RUNNER_EXTRA_ARGS[next_index]}"
+            RUN_SEED_SET=1
+            arg_index=$next_index
+            ;;
+        --seed=*)
+            RUN_SEED="${runner_arg#--seed=}"
+            RUN_SEED_SET=1
+            ;;
+    esac
+done
+if (( RUN_SEED_SET )) && [[ ! "$RUN_SEED" =~ ^-?[0-9]+$ ]]; then
+    echo "✗ runner 参数 --seed 必须是整数，当前为: $RUN_SEED" >&2
+    exit 2
+fi
+
 SESSION="sonic_jitter_$$"
 OUT_ROOT="$(readlink -m -- "${JITTER_OUT_ROOT:-/tmp/sonic_jitter}")"
 SONY_REPO_INPUT="${SONY_REPO:-/home/nolo/GR00T-WholeBodyControl-sony-json-stream-20260702}"
@@ -116,7 +144,13 @@ EXTERNAL_LAUNCHER="${SONY_REPO}/scripts/launch_sonic_local_isaaclab_closed_loop.
 EXTERNAL_WRAPPER="${SONY_REPO}/scripts/launch_sonic_json_isaaclab_closed_loop.sh"
 MOCAP_MANAGER="${SONY_REPO}/gear_sonic/scripts/mocap_manager_server.py"
 BVH_SENDER="${SONY_REPO}/gear_sonic/scripts/bvh_stream_sender.py"
-DEPLOY_BIN="${DEPLOY_BIN_OVERRIDE:-${SONY_REPO}/gear_sonic_deploy/target/release/g1_deploy_onnx_ref}"
+DEPLOY_ROOT_INPUT="${DEPLOY_ROOT_OVERRIDE:-${SONY_REPO}/gear_sonic_deploy}"
+DEPLOY_ROOT="$(cd "$DEPLOY_ROOT_INPUT" 2>/dev/null && pwd -P)" || {
+    echo "✗ deploy runtime root 不存在或不可访问: $DEPLOY_ROOT_INPUT" >&2
+    exit 2
+}
+DEPLOY_SETUP_ENV="${DEPLOY_ROOT}/scripts/setup_env.sh"
+DEPLOY_BIN="${DEPLOY_BIN_OVERRIDE:-${DEPLOY_ROOT}/target/release/g1_deploy_onnx_ref}"
 PROXY_BIN="${SONY_REPO}/gear_sonic_deploy/build/tools/sonic_unitree_lowstate_cpp_proxy"
 [[ -x "$PROXY_BIN" ]] || PROXY_BIN="${SONY_REPO}/gear_sonic_deploy/prebuilt/linux-x86_64/sonic_unitree_lowstate_cpp_proxy"
 
@@ -192,15 +226,15 @@ require_file "$EXTERNAL_LAUNCHER" "SONY launcher"
 require_file "$EXTERNAL_WRAPPER" "SONY launcher wrapper"
 require_file "$MOCAP_MANAGER" "mocap manager"
 require_file "$BVH_SENDER" "BVH sender"
+require_file "$DEPLOY_SETUP_ENV" "deploy runtime setup_env.sh"
 require_executable "$DEPLOY_BIN" "deploy binary"
 require_executable "$PROXY_BIN" "proxy binary"
 DEPLOY_BIN="$(readlink -f -- "$DEPLOY_BIN")"
-DEPLOY_RUNTIME_REPO="$(git -C "$(dirname -- "$DEPLOY_BIN")" rev-parse --show-toplevel 2>/dev/null || true)"
-DEPLOY_SOURCE=""
+DEPLOY_RUNTIME_REPO="$(git -C "$DEPLOY_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+DEPLOY_SOURCE="${DEPLOY_ROOT}/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp"
+[[ -f "$DEPLOY_SOURCE" ]] || DEPLOY_SOURCE=""
 if [[ -n "$DEPLOY_RUNTIME_REPO" ]]; then
     DEPLOY_RUNTIME_REPO="$(cd "$DEPLOY_RUNTIME_REPO" && pwd -P)"
-    DEPLOY_SOURCE="${DEPLOY_RUNTIME_REPO}/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp"
-    [[ -f "$DEPLOY_SOURCE" ]] || DEPLOY_SOURCE=""
 fi
 if [[ "$JITTER_INPUT" == "bvh" ]]; then
     require_file "$BVH" "BVH"
@@ -252,6 +286,8 @@ MANIFEST_COMMAND=(
     --planner "$PLANNER_MODEL"
     --proxy-bin "$PROXY_BIN"
     --deploy-bin "$DEPLOY_BIN"
+    --deploy-root "$DEPLOY_ROOT"
+    --deploy-setup-env "$DEPLOY_SETUP_ENV"
     --external-launcher "$EXTERNAL_LAUNCHER"
     --external-wrapper "$EXTERNAL_WRAPPER"
     --mocap-manager "$MOCAP_MANAGER"
@@ -260,6 +296,7 @@ MANIFEST_COMMAND=(
 )
 [[ -n "$DEPLOY_RUNTIME_REPO" ]] && MANIFEST_COMMAND+=(--deploy-runtime-repo "$DEPLOY_RUNTIME_REPO")
 [[ -n "$DEPLOY_SOURCE" ]] && MANIFEST_COMMAND+=(--deploy-source "$DEPLOY_SOURCE")
+(( RUN_SEED_SET )) && MANIFEST_COMMAND+=(--seed "$RUN_SEED")
 [[ "$JITTER_INPUT" == "bvh" ]] && MANIFEST_COMMAND+=(--bvh "$BVH")
 [[ "${JITTER_GUI:-0}" == "1" ]] && MANIFEST_COMMAND+=(--gui)
 for arg in "${ORIGINAL_CLI[@]}"; do
@@ -421,7 +458,7 @@ start_explicit_deploy_window() { # start_explicit_deploy_window <keyboard|zmq_ma
         input_args="--zmq-host localhost --zmq-port 5556 --zmq-topic pose"
     fi
     tmux new-window -t "$SESSION" -n deploy \
-        "cd '${SONY_REPO}/gear_sonic_deploy' && export DDS_INTERFACE=lo && source scripts/setup_env.sh && '$DEPLOY_BIN' \"\$DDS_INTERFACE\" '$DECODER_MODEL' reference/example --obs-config '$OBS_CONFIG' --encoder-file '$ENCODER_MODEL' --planner-file '$PLANNER_MODEL' --input-type '$input_type' $input_args --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check |& tee '$DEPLOY_LOG'; exec bash"
+        "cd '$DEPLOY_ROOT' && export DDS_INTERFACE=lo && source '$DEPLOY_SETUP_ENV' && '$DEPLOY_BIN' \"\$DDS_INTERFACE\" '$DECODER_MODEL' reference/example --obs-config '$OBS_CONFIG' --encoder-file '$ENCODER_MODEL' --planner-file '$PLANNER_MODEL' --input-type '$input_type' $input_args --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check |& tee '$DEPLOY_LOG'; exec bash"
 }
 
 wait_deploy_port_free() {
@@ -454,6 +491,7 @@ if [[ "$JITTER_INPUT" == "keyboard" ]]; then
 elif [[
     "$PROTO" == "1"
     && "$(readlink -f -- "$POLICY_ROOT")" == "$(readlink -f -- "${SONY_REPO}/gear_sonic_deploy/policy/release")"
+    && "$DEPLOY_ROOT" == "$(cd "${SONY_REPO}/gear_sonic_deploy" && pwd -P)"
     && "$DEPLOY_BIN" == "$(readlink -f -- "${SONY_REPO}/gear_sonic_deploy/target/release/g1_deploy_onnx_ref")"
 ]]; then
     # ---------- 2. 启动 sony 三窗口（input/proxy/deploy，默认 v1+release 走原包装层） ----------
@@ -489,9 +527,9 @@ else
             --encoder "$ENCODER_MODEL" \
             --obs-config "$OBS_CONFIG"
     ) || { log "✗ sony python launcher 失败"; exit 1; }
-    # 外部 launcher 的 deploy recipe 固定执行 repo 下 target/release。评测允许
-    # 显式 pin 另一构建产物，因此只替换本会话的 deploy 窗口，不改用户文件或
-    # 生产二进制；四候选使用同一个 DEPLOY_BIN，避免 policy/runtime 混杂。
+    # 外部 launcher 的 deploy recipe 固定执行 SONY_REPO 下 target/release。
+    # 评测允许显式 pin 另一 runtime root/build，因此只替换本会话的 deploy
+    # 窗口，不改用户文件或生产二进制；proxy/input 仍固定来自 SONY_REPO。
     DEPLOY_LOG="${RUN_DIR}/deploy.log"
     rm -f "$DEPLOY_LOG"
     log "替换本会话 deploy 窗口 → $DEPLOY_BIN"

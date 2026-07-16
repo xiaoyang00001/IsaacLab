@@ -12,9 +12,10 @@ Selection is deliberately lexicographic rather than a hidden weighted score:
 2. no-fall run fraction
 3. normalized survival time
 4. healthy true-free fraction
-5. healthy-body jitter and XY drift
-6. internal reference-to-q following lag
-7. target receive age (diagnostic tie-breaker after physical outcomes)
+5. reference-to-robot fidelity (correlation, tracking error)
+6. XY drift and excess body jitter
+7. internal reference-to-q following lag
+8. target receive age (diagnostic tie-breaker after physical outcomes)
 
 The output labels a winner ``confirmed`` only when the observed plan/results
 really form a complete position-balanced design, every candidate has complete
@@ -96,9 +97,12 @@ def _runtime_valid(
     repo_root: pathlib.Path,
     *,
     expected_free_seconds: float,
-    expected_deploy_binary: dict,
     candidate_definition: dict,
     pinned_env: dict,
+    expected_seed: int | None,
+    expected_shared_artifacts: dict,
+    expected_unlock_source_index: int | None,
+    expected_isaaclab_repository: dict | None,
 ) -> list[str]:
     reasons: list[str] = []
     meta = report.get("meta", {})
@@ -117,9 +121,14 @@ def _runtime_valid(
     free_seconds = _finite(free.get("seconds"))
     step_dt = _finite(meta.get("step_dt")) or 0.02
     duration_tolerance = max(0.10, 3.0 * step_dt)
-    if free_seconds is None or free_seconds + duration_tolerance < expected_free_seconds:
+    planned_free_seconds = _finite(meta.get("planned_free_seconds"))
+    if (
+        planned_free_seconds is not None
+        and abs(planned_free_seconds - expected_free_seconds) > duration_tolerance
+    ):
         reasons.append(
-            f"incomplete_free_duration={free_seconds!r}<{expected_free_seconds:.3f}"
+            f"planned_free_duration_mismatch={planned_free_seconds:.3f}"
+            f"!={expected_free_seconds:.3f}"
         )
 
     fall_known_fraction = _finite(_get(free, "fall.known_frac"))
@@ -129,6 +138,24 @@ def _runtime_valid(
         reasons.append("missing_fall_event_count")
     if _finite(_get(free, "fall.survival_s")) is None:
         reasons.append("missing_survival_time")
+    fall_events = _finite(_get(free, "fall.event_count"))
+    fall_survival = _finite(_get(free, "fall.survival_s"))
+    termination_reason = meta.get("termination_reason")
+    if free_seconds is None or free_seconds + duration_tolerance < expected_free_seconds:
+        fall_grace = _finite(meta.get("stop_after_fall_grace_s")) or 0.0
+        legitimate_fall_stop = (
+            termination_reason == "fall_observed"
+            and fall_events is not None
+            and fall_events >= 1.0
+            and fall_survival is not None
+            and free_seconds is not None
+            and free_seconds + duration_tolerance
+            >= fall_survival + min(fall_grace, max(expected_free_seconds - fall_survival, 0.0))
+        )
+        if not legitimate_fall_stop:
+            reasons.append(
+                f"incomplete_free_duration={free_seconds!r}<{expected_free_seconds:.3f}"
+            )
     recovery_count = _finite(_get(free, "fall.recovery_count"))
     if recovery_count is None:
         reasons.append("missing_recovery_count")
@@ -136,23 +163,102 @@ def _runtime_valid(
         reasons.append(f"recovery_contamination={recovery_count:g}")
     if _finite(_get(free, "coverage.target_age_s.p95")) is None:
         reasons.append("missing_target_age")
+    if expected_unlock_source_index is not None:
+        target = _finite(meta.get("unlock_source_index_target"))
+        actual = _finite(meta.get("unlock_source_index_actual"))
+        if target != float(expected_unlock_source_index):
+            reasons.append(f"unlock_source_target_mismatch={target!r}")
+        if actual is None or actual < float(expected_unlock_source_index):
+            reasons.append(f"unlock_source_not_reached={actual!r}")
 
     manifest = meta.get("run_manifest")
+    expected_deploy_binary = candidate_definition.get("deploy_binary")
     if not isinstance(manifest, dict):
         reasons.append("missing_run_manifest")
     else:
         manifest_root = _get(manifest, "repositories.isaaclab.realpath")
         if manifest_root != str(repo_root):
             reasons.append(f"manifest_worktree_mismatch={manifest_root!r}")
+        if isinstance(expected_isaaclab_repository, dict):
+            for key in (
+                "realpath",
+                "commit",
+                "dirty",
+                "status_porcelain",
+                "tracked_diff_sha256",
+            ):
+                actual = _get(manifest, f"repositories.isaaclab.{key}")
+                expected = expected_isaaclab_repository.get(key)
+                if actual != expected:
+                    reasons.append(f"isaaclab_repository_{key}_mismatch={actual!r}")
         manifest_policy = _get(manifest, "run.policy_dir")
         if manifest_policy != candidate_definition.get("policy_dir"):
             reasons.append(f"manifest_policy_mismatch={manifest_policy!r}")
-        actual_deploy_path = _get(manifest, "artifacts.deploy_binary.realpath")
-        actual_deploy_hash = _get(manifest, "artifacts.deploy_binary.sha256")
-        if actual_deploy_path != expected_deploy_binary.get("realpath"):
-            reasons.append(f"deploy_binary_path_mismatch={actual_deploy_path!r}")
-        if actual_deploy_hash != expected_deploy_binary.get("sha256"):
-            reasons.append(f"deploy_binary_hash_mismatch={actual_deploy_hash!r}")
+        manifest_policy_root = _get(manifest, "run.policy_root")
+        expected_policy_root = candidate_definition.get("policy_root")
+        if expected_policy_root is not None and manifest_policy_root != expected_policy_root:
+            reasons.append(f"manifest_policy_root_mismatch={manifest_policy_root!r}")
+        for artifact_name, expected_artifact in (
+            candidate_definition.get("policy_artifacts") or {}
+        ).items():
+            actual_path = _get(manifest, f"artifacts.{artifact_name}.realpath")
+            actual_hash = _get(manifest, f"artifacts.{artifact_name}.sha256")
+            if actual_path != expected_artifact.get("realpath"):
+                reasons.append(f"{artifact_name}_path_mismatch={actual_path!r}")
+            if actual_hash != expected_artifact.get("sha256"):
+                reasons.append(f"{artifact_name}_hash_mismatch={actual_hash!r}")
+        for artifact_name, expected_artifact in expected_shared_artifacts.items():
+            actual_path = _get(manifest, f"artifacts.{artifact_name}.realpath")
+            actual_hash = _get(manifest, f"artifacts.{artifact_name}.sha256")
+            if actual_path != expected_artifact.get("realpath"):
+                reasons.append(f"shared_{artifact_name}_path_mismatch={actual_path!r}")
+            if actual_hash != expected_artifact.get("sha256"):
+                reasons.append(f"shared_{artifact_name}_hash_mismatch={actual_hash!r}")
+        if isinstance(expected_deploy_binary, dict):
+            actual_deploy_path = _get(manifest, "artifacts.deploy_binary.realpath")
+            actual_deploy_hash = _get(manifest, "artifacts.deploy_binary.sha256")
+            if actual_deploy_path != expected_deploy_binary.get("realpath"):
+                reasons.append(f"deploy_binary_path_mismatch={actual_deploy_path!r}")
+            if actual_deploy_hash != expected_deploy_binary.get("sha256"):
+                reasons.append(f"deploy_binary_hash_mismatch={actual_deploy_hash!r}")
+
+        expected_runtime = candidate_definition.get("deploy_runtime")
+        if isinstance(expected_runtime, dict):
+            manifest_schema = _finite(manifest.get("schema_version"))
+            if manifest_schema is None or manifest_schema < 2:
+                reasons.append(
+                    f"unsupported_manifest_schema={manifest.get('schema_version', '<missing>')}"
+                )
+            actual_root = _get(manifest, "run.deploy_root")
+            if actual_root != expected_runtime.get("realpath"):
+                reasons.append(f"deploy_runtime_root_mismatch={actual_root!r}")
+            expected_setup = expected_runtime.get("setup_env", {})
+            actual_setup_path = _get(manifest, "artifacts.deploy_setup_env.realpath")
+            actual_setup_hash = _get(manifest, "artifacts.deploy_setup_env.sha256")
+            if actual_setup_path != expected_setup.get("realpath"):
+                reasons.append(f"deploy_setup_env_path_mismatch={actual_setup_path!r}")
+            if actual_setup_hash != expected_setup.get("sha256"):
+                reasons.append(f"deploy_setup_env_hash_mismatch={actual_setup_hash!r}")
+            expected_repository = expected_runtime.get("repository", {})
+            for key in (
+                "realpath",
+                "commit",
+                "dirty",
+                "status_porcelain",
+                "tracked_diff_sha256",
+            ):
+                actual = _get(manifest, f"repositories.deploy_runtime.{key}")
+                expected = expected_repository.get(key)
+                if actual != expected:
+                    reasons.append(f"deploy_runtime_{key}_mismatch={actual!r}")
+
+        if expected_seed is not None:
+            if _finite(meta.get("seed_requested")) != float(expected_seed):
+                reasons.append(f"seed_requested_mismatch={meta.get('seed_requested')!r}")
+            if _finite(meta.get("seed_actual")) != float(expected_seed):
+                reasons.append(f"seed_actual_mismatch={meta.get('seed_actual')!r}")
+            if _finite(_get(manifest, "run.seed")) != float(expected_seed):
+                reasons.append(f"manifest_seed_mismatch={_get(manifest, 'run.seed')!r}")
 
     sonic_env = meta.get("sonic_env")
     if not isinstance(sonic_env, dict):
@@ -184,14 +290,23 @@ def _runtime_valid(
     return reasons
 
 
-def _run_metrics(report: dict) -> dict[str, float | None]:
+def _run_metrics(
+    report: dict, *, expected_free_seconds: float | None = None
+) -> dict[str, float | None]:
     free = report["free"]
     seconds = _finite(free.get("seconds"))
+    normalization_seconds = (
+        float(expected_free_seconds)
+        if expected_free_seconds is not None and expected_free_seconds > 0.0
+        else seconds
+    )
     fall_events = _finite(_get(free, "fall.event_count"))
     survival = _finite(_get(free, "fall.survival_s"))
     survival_fraction = (
-        min(max(survival / seconds, 0.0), 1.0)
-        if survival is not None and seconds is not None and seconds > 0.0
+        min(max(survival / normalization_seconds, 0.0), 1.0)
+        if survival is not None
+        and normalization_seconds is not None
+        and normalization_seconds > 0.0
         else None
     )
     signed_lag = _finite(_get(free, "internal_following_lag.reference_to_q.lag_s"))
@@ -210,17 +325,50 @@ def _run_metrics(report: dict) -> dict[str, float | None]:
         )
         if (value := _finite(_get(free, dotted))) is not None
     ]
+    tracking_error_hf_values = [
+        value
+        for dotted in (
+            "healthy.arms_tracking_error_hf_rms_deg",
+            "healthy.waist_tracking_error_hf_rms_deg",
+            "healthy.legs_tracking_error_hf_rms_deg",
+        )
+        if (value := _finite(_get(free, dotted))) is not None
+    ]
+    tracking_rms_values = [
+        value
+        for dotted in (
+            "healthy.arms_track_rms_deg",
+            "healthy.waist_track_rms_deg",
+            "healthy.legs_track_rms_deg",
+        )
+        if (value := _finite(_get(free, dotted))) is not None
+    ]
+    healthy_seconds = _finite(_get(free, "healthy.seconds"))
+    healthy_fraction = (
+        min(max(healthy_seconds / normalization_seconds, 0.0), 1.0)
+        if healthy_seconds is not None
+        and normalization_seconds is not None
+        and normalization_seconds > 0.0
+        else _finite(_get(free, "healthy.frac"))
+    )
     return {
         "fall_events": fall_events,
         "no_fall": None if fall_events is None else 1.0 if fall_events == 0.0 else 0.0,
         "survival_fraction": survival_fraction,
-        "healthy_fraction": _finite(_get(free, "healthy.frac")),
+        "healthy_fraction": healthy_fraction,
         "reference_to_q_abs_lag_s": lag,
         "reference_to_q_signed_lag_s": signed_lag,
         "reference_to_q_corr": lag_corr,
         "target_age_p95_s": _finite(_get(free, "coverage.target_age_s.p95")),
         "healthy_jitter_mean_deg": float(np.mean(jitter_values)) if jitter_values else None,
+        "healthy_tracking_error_hf_mean_deg": (
+            float(np.mean(tracking_error_hf_values)) if tracking_error_hf_values else None
+        ),
+        "healthy_track_rms_mean_deg": (
+            float(np.mean(tracking_rms_values)) if tracking_rms_values else None
+        ),
         "xy_max_drift_m": _finite(_get(free, "root.xy_max_drift_m")),
+        "source_index_start": _finite(_get(free, "source_index.start")),
         "update_coverage": _finite(_get(free, "coverage.update_coverage")),
         "packet_coverage": _finite(_get(free, "coverage.packet_coverage")),
     }
@@ -242,9 +390,12 @@ def _candidate_rank(candidate: dict) -> tuple:
         higher("no_fall"),
         higher("survival_fraction"),
         higher("healthy_fraction"),
-        lower("healthy_jitter_mean_deg"),
-        lower("xy_max_drift_m"),
+        higher("reference_to_q_corr"),
+        lower("healthy_tracking_error_hf_mean_deg"),
+        lower("healthy_track_rms_mean_deg"),
         lower("reference_to_q_abs_lag_s"),
+        lower("xy_max_drift_m"),
+        lower("healthy_jitter_mean_deg"),
         lower("target_age_p95_s"),
     )
 
@@ -262,9 +413,12 @@ def _single_run_rank(metrics: dict) -> tuple:
         higher("no_fall"),
         higher("survival_fraction"),
         higher("healthy_fraction"),
-        lower("healthy_jitter_mean_deg"),
-        lower("xy_max_drift_m"),
+        higher("reference_to_q_corr"),
+        lower("healthy_tracking_error_hf_mean_deg"),
+        lower("healthy_track_rms_mean_deg"),
         lower("reference_to_q_abs_lag_s"),
+        lower("xy_max_drift_m"),
+        lower("healthy_jitter_mean_deg"),
         lower("target_age_p95_s"),
     )
 
@@ -299,40 +453,62 @@ def _validate_design(plan: dict, results: dict) -> dict:
 
     order = plan.get("order")
     expected_total = repeats * len(names)
-    expected_by_sequence: dict[int, tuple[int, str]] = {}
+    seed_policy = plan.get("seed_policy", {})
+    paired_seed_required = (
+        isinstance(seed_policy, dict) and seed_policy.get("type") == "paired_by_block"
+    )
+    expected_by_sequence: dict[int, tuple[int, str, int | None]] = {}
+    block_seeds: dict[int, int] = {}
     position_counts = {name: [0] * len(names) for name in names}
     if not isinstance(order, list) or len(order) != expected_total:
         reasons.append("plan_order_length_mismatch")
     else:
-        parsed_order: list[tuple[int, int, str]] = []
+        parsed_order: list[tuple[int, int, str, int | None]] = []
         for row in order:
             try:
                 sequence = int(row["sequence"])
                 block = int(row["block"])
                 candidate = str(row["candidate"])
+                seed = int(row["seed"]) if paired_seed_required else None
             except (KeyError, TypeError, ValueError):
                 reasons.append("invalid_plan_order_row")
                 continue
-            parsed_order.append((sequence, block, candidate))
+            parsed_order.append((sequence, block, candidate, seed))
         parsed_order.sort()
-        if [sequence for sequence, _, _ in parsed_order] != list(range(1, expected_total + 1)):
+        if [sequence for sequence, _, _, _ in parsed_order] != list(
+            range(1, expected_total + 1)
+        ):
             reasons.append("plan_sequence_not_contiguous")
-        for sequence, block, candidate in parsed_order:
+        for sequence, block, candidate, seed in parsed_order:
             if sequence in expected_by_sequence:
                 reasons.append("duplicate_plan_sequence")
-            expected_by_sequence[sequence] = (block, candidate)
+            expected_by_sequence[sequence] = (block, candidate, seed)
         for block in range(1, repeats + 1):
             block_rows = [
-                (sequence, candidate)
-                for sequence, row_block, candidate in parsed_order
+                (sequence, candidate, seed)
+                for sequence, row_block, candidate, seed in parsed_order
                 if row_block == block
             ]
             block_rows.sort()
-            if len(block_rows) != len(names) or {name for _, name in block_rows} != set(names):
+            if len(block_rows) != len(names) or {
+                name for _, name, _ in block_rows
+            } != set(names):
                 reasons.append(f"block_{block}_candidate_set_invalid")
                 continue
-            for position, (_, candidate) in enumerate(block_rows):
+            if paired_seed_required:
+                observed_seeds = {seed for _, _, seed in block_rows}
+                if len(observed_seeds) != 1 or None in observed_seeds:
+                    reasons.append(f"block_{block}_seed_not_paired")
+                else:
+                    block_seeds[block] = int(next(iter(observed_seeds)))
+            for position, (_, candidate, _) in enumerate(block_rows):
                 position_counts[candidate][position] += 1
+        if (
+            paired_seed_required
+            and seed_policy.get("distinct_across_blocks") is True
+            and len(set(block_seeds.values())) != repeats
+        ):
+            reasons.append("block_seeds_not_distinct")
 
     position_balance = False
     if names and repeats > 0 and repeats % len(names) == 0 and not any(
@@ -357,13 +533,14 @@ def _validate_design(plan: dict, results: dict) -> dict:
                 sequence = int(row["sequence"])
                 block = int(row["block"])
                 candidate = str(row["candidate"])
+                seed = int(row["seed"]) if paired_seed_required else None
             except (KeyError, TypeError, ValueError):
                 reasons.append("invalid_result_row")
                 continue
             if sequence in seen_sequences:
                 reasons.append("duplicate_result_sequence")
             seen_sequences.add(sequence)
-            if expected_by_sequence.get(sequence) != (block, candidate):
+            if expected_by_sequence.get(sequence) != (block, candidate, seed):
                 reasons.append(f"result_plan_mismatch_sequence_{sequence}")
         if seen_sequences != set(expected_by_sequence):
             reasons.append("result_sequence_set_mismatch")
@@ -371,6 +548,15 @@ def _validate_design(plan: dict, results: dict) -> dict:
     return {
         "valid": not reasons,
         "position_balanced": position_balance,
+        "paired_seed_required": paired_seed_required,
+        "paired_seed_valid": (
+            not paired_seed_required
+            or (
+                len(block_seeds) == repeats
+                and not any("seed" in reason for reason in reasons)
+            )
+        ),
+        "block_seeds": {str(block): seed for block, seed in sorted(block_seeds.items())},
         "reasons": sorted(set(reasons)),
         "expected_total_runs": expected_total,
         "observed_total_runs": len(result_rows) if isinstance(result_rows, list) else 0,
@@ -400,11 +586,18 @@ def _paired_comparison(winner: dict, alternative: dict, expected_blocks: int) ->
         elif winner_rank == alternative_rank:
             tied += 1
 
-    higher_better = ("no_fall", "survival_fraction", "healthy_fraction")
+    higher_better = (
+        "no_fall",
+        "survival_fraction",
+        "healthy_fraction",
+        "reference_to_q_corr",
+    )
     lower_better = (
-        "healthy_jitter_mean_deg",
-        "xy_max_drift_m",
+        "healthy_tracking_error_hf_mean_deg",
+        "healthy_track_rms_mean_deg",
         "reference_to_q_abs_lag_s",
+        "xy_max_drift_m",
+        "healthy_jitter_mean_deg",
         "target_age_p95_s",
     )
     paired_improvements = {}
@@ -452,6 +645,61 @@ def _paired_comparison(winner: dict, alternative: dict, expected_blocks: int) ->
     }
 
 
+def _validate_pairing_context(
+    candidate_summaries: list[dict],
+    *,
+    expected_blocks: int,
+    scenario: str,
+    source_index_tolerance: int = 2,
+) -> dict:
+    """Check that paired runs entered the measured motion at comparable source frames."""
+    if scenario != "v3_bvh":
+        return {
+            "valid": True,
+            "required": False,
+            "source_index_tolerance": source_index_tolerance,
+            "blocks": {},
+            "reasons": [],
+        }
+
+    reasons: list[str] = []
+    block_details: dict[str, dict] = {}
+    candidate_names = [candidate["name"] for candidate in candidate_summaries]
+    for block in range(1, expected_blocks + 1):
+        starts: dict[str, int] = {}
+        for candidate in candidate_summaries:
+            matches = [
+                run
+                for run in candidate["runs"]
+                if run.get("block") == block and run.get("valid")
+            ]
+            if len(matches) != 1:
+                continue
+            value = _finite((matches[0].get("metrics") or {}).get("source_index_start"))
+            if value is not None:
+                starts[candidate["name"]] = int(value)
+        spread = max(starts.values()) - min(starts.values()) if starts else None
+        complete = set(starts) == set(candidate_names)
+        comparable = complete and spread is not None and spread <= source_index_tolerance
+        if not complete:
+            reasons.append(f"block_{block}_missing_source_index_start")
+        elif not comparable:
+            reasons.append(f"block_{block}_source_index_spread={spread}")
+        block_details[str(block)] = {
+            "starts": starts,
+            "spread": spread,
+            "complete": complete,
+            "comparable": comparable,
+        }
+    return {
+        "valid": not reasons,
+        "required": True,
+        "source_index_tolerance": source_index_tolerance,
+        "blocks": block_details,
+        "reasons": reasons,
+    }
+
+
 def build_summary(results_path: pathlib.Path) -> dict:
     results = json.loads(results_path.read_text(encoding="utf-8"))
     plan_path = pathlib.Path(results["plan"])
@@ -459,16 +707,34 @@ def build_summary(results_path: pathlib.Path) -> dict:
     repo_root = pathlib.Path(plan["repo_root"]).resolve()
     expected_per_candidate = int(plan["repeats"])
     expected_free_seconds = float(plan["free_seconds"])
-    expected_deploy_binary = plan["deploy_binary"]
+    legacy_deploy_binary = plan.get("deploy_binary")
     pinned_env = plan.get("pinned_env", {})
+    expected_shared_artifacts = plan.get("shared_artifacts", {})
+    expected_isaaclab_repository = plan.get("isaaclab_repository")
+    unlock_alignment = plan.get("unlock_alignment", {})
+    expected_unlock_source_index = (
+        int(unlock_alignment["source_index_target"])
+        if isinstance(unlock_alignment, dict)
+        and unlock_alignment.get("enabled") is True
+        and unlock_alignment.get("source_index_target") is not None
+        else None
+    )
     design_validation = _validate_design(plan, results)
+    expected_seed_by_sequence = {
+        int(row["sequence"]): int(row["seed"])
+        for row in plan.get("order", [])
+        if isinstance(row, dict) and "sequence" in row and "seed" in row
+    }
 
     runs_by_candidate: dict[str, list[dict]] = defaultdict(list)
     for run in results.get("runs", []):
         runs_by_candidate[str(run.get("candidate"))].append(run)
 
     candidate_summaries = []
-    for definition in plan["candidates"]:
+    for raw_definition in plan["candidates"]:
+        definition = dict(raw_definition)
+        if "deploy_binary" not in definition and isinstance(legacy_deploy_binary, dict):
+            definition["deploy_binary"] = legacy_deploy_binary
         name = definition["name"]
         run_rows = runs_by_candidate.get(name, [])
         valid_metrics: list[dict] = []
@@ -476,6 +742,12 @@ def build_summary(results_path: pathlib.Path) -> dict:
         for row in run_rows:
             reasons = []
             npz_path = row.get("npz")
+            sequence = row.get("sequence")
+            expected_seed = (
+                expected_seed_by_sequence.get(int(sequence))
+                if isinstance(sequence, (int, np.integer))
+                else None
+            )
             if row.get("returncode") != 0:
                 reasons.append(f"returncode={row.get('returncode')}")
             if not isinstance(npz_path, str) or not pathlib.Path(npz_path).is_file():
@@ -490,20 +762,30 @@ def build_summary(results_path: pathlib.Path) -> dict:
                             report,
                             repo_root,
                             expected_free_seconds=expected_free_seconds,
-                            expected_deploy_binary=expected_deploy_binary,
                             candidate_definition=definition,
                             pinned_env=pinned_env,
+                            expected_seed=expected_seed,
+                            expected_shared_artifacts=expected_shared_artifacts,
+                            expected_unlock_source_index=expected_unlock_source_index,
+                            expected_isaaclab_repository=expected_isaaclab_repository,
                         )
                     )
                 except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
                     reasons.append(f"report_error={exc}")
-            metrics = _run_metrics(report) if report is not None and not reasons else None
+            metrics = (
+                _run_metrics(report, expected_free_seconds=expected_free_seconds)
+                if report is not None and not reasons
+                else None
+            )
             if metrics is not None:
                 valid_metrics.append(metrics)
             run_summaries.append(
                 {
                     "sequence": row.get("sequence"),
                     "block": row.get("block"),
+                    "seed": row.get("seed"),
+                    "deploy_binary_sha256": row.get("deploy_binary_sha256"),
+                    "deploy_runtime_root": row.get("deploy_runtime_root"),
                     "npz": npz_path,
                     "valid": not reasons,
                     "invalid_reasons": reasons,
@@ -521,7 +803,10 @@ def build_summary(results_path: pathlib.Path) -> dict:
             "reference_to_q_corr",
             "target_age_p95_s",
             "healthy_jitter_mean_deg",
+            "healthy_tracking_error_hf_mean_deg",
+            "healthy_track_rms_mean_deg",
             "xy_max_drift_m",
+            "source_index_start",
             "update_coverage",
             "packet_coverage",
         )
@@ -577,6 +862,11 @@ def build_summary(results_path: pathlib.Path) -> dict:
     all_candidates_complete = bool(candidate_summaries) and all(
         candidate["complete"] for candidate in candidate_summaries
     )
+    pairing_context = _validate_pairing_context(
+        candidate_summaries,
+        expected_blocks=expected_per_candidate,
+        scenario=str(plan["scenario"]),
+    )
     pairwise_comparisons = []
     if winner_row is not None:
         pairwise_comparisons = [
@@ -595,6 +885,8 @@ def build_summary(results_path: pathlib.Path) -> dict:
         complete_balanced = (
             design_validation["valid"]
             and design_validation["position_balanced"]
+            and design_validation["paired_seed_valid"]
+            and pairing_context["valid"]
             and all_candidates_complete
         )
         if len(candidate_summaries) < 2:
@@ -609,24 +901,38 @@ def build_summary(results_path: pathlib.Path) -> dict:
             confidence = "provisional_screening"
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "matrix_results": str(results_path.resolve()),
         "matrix_plan": str(plan_path.resolve()),
         "scenario": plan["scenario"],
+        "isaaclab_repository": plan.get("isaaclab_repository"),
+        "seed_policy": plan.get("seed_policy"),
+        "comparison_scope": plan.get(
+            "comparison_scope",
+            {
+                "unit": "candidate",
+                "causal_attribution": True,
+                "note": "Legacy plan with one globally pinned deploy binary.",
+            },
+        ),
         "selection_rule": [
             "valid run fraction (higher)",
             "no-fall run fraction (higher)",
             "normalized survival time (higher)",
             "healthy true-free fraction (higher)",
-            "healthy jitter mean across arms/waist/legs/tilt (lower)",
-            "XY max drift (lower)",
+            "reference-to-q correlation (higher)",
+            "healthy high-frequency tracking error (lower)",
+            "healthy target tracking RMS (lower)",
             "reference-to-q absolute internal lag with corr>=0.50 (lower)",
+            "XY max drift (lower)",
+            "healthy body jitter mean (lower)",
             "target receive age p95 (lower; diagnostic tie-breaker)",
         ],
         "winner": winner,
         "confidence": confidence,
         "confirmation": {
             "design_validation": design_validation,
+            "pairing_context": pairing_context,
             "all_candidates_complete": all_candidates_complete,
             "minimum_confirmatory_blocks": 8,
             "directional_evidence_rule": (
@@ -655,8 +961,8 @@ def print_summary(summary: dict) -> None:
         f"winner={summary['winner'] or '<none>'} confidence={summary['confidence']}"
     )
     print(
-        f"{'candidate':<20}{'valid':>9}{'no-fall':>10}{'survival':>11}"
-        f"{'healthy':>10}{'age95(s)':>11}{'|lag|(s)':>11}{'jitter':>10}{'xy(m)':>9}"
+        f"{'candidate':<20}{'bundle':>14}{'valid':>9}{'no-fall':>10}{'survival':>11}"
+        f"{'healthy':>10}{'corr':>8}{'trackHF':>10}{'|lag|(s)':>11}{'xy(m)':>9}"
     )
     by_name = {candidate["name"]: candidate for candidate in summary["candidates"]}
     ordered = summary["ranking"] + [
@@ -664,15 +970,18 @@ def print_summary(summary: dict) -> None:
     ]
     for name in ordered:
         candidate = by_name[name]
+        deploy_binary = candidate.get("deploy_binary", {})
+        bundle = str(deploy_binary.get("sha256", "legacy"))[:12]
         print(
             f"{name:<20}"
+            f"{bundle:>14}"
             f"{candidate['valid_runs']}/{candidate['expected_runs']:>7}"
             f"{_fmt_metric(candidate, 'no_fall'):>10}"
             f"{_fmt_metric(candidate, 'survival_fraction'):>11}"
             f"{_fmt_metric(candidate, 'healthy_fraction'):>10}"
-            f"{_fmt_metric(candidate, 'target_age_p95_s'):>11}"
+            f"{_fmt_metric(candidate, 'reference_to_q_corr'):>8}"
+            f"{_fmt_metric(candidate, 'healthy_tracking_error_hf_mean_deg'):>10}"
             f"{_fmt_metric(candidate, 'reference_to_q_abs_lag_s'):>11}"
-            f"{_fmt_metric(candidate, 'healthy_jitter_mean_deg'):>10}"
             f"{_fmt_metric(candidate, 'xy_max_drift_m'):>9}"
         )
 

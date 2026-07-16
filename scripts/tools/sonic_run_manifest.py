@@ -217,7 +217,7 @@ def create_manifest(args: argparse.Namespace) -> None:
     command_argv = args.command_arg or []
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": {
             "utc": now_utc.isoformat(),
             "local": now_local.isoformat(),
@@ -236,6 +236,8 @@ def create_manifest(args: argparse.Namespace) -> None:
             "pose_protocol": args.pose_protocol,
             "policy_dir": args.policy_dir,
             "policy_root": str(Path(args.policy_root).resolve()),
+            "deploy_root": str(Path(args.deploy_root).resolve()),
+            **({"seed": args.seed} if args.seed is not None else {}),
             "gui": args.gui,
             "session": args.session,
             "outputs": {
@@ -275,6 +277,7 @@ def create_manifest(args: argparse.Namespace) -> None:
             "planner_model": file_info(args.planner),
             "proxy_binary": file_info(args.proxy_bin),
             "deploy_binary": file_info(args.deploy_bin),
+            "deploy_setup_env": file_info(args.deploy_setup_env),
             "deploy_source": file_info(args.deploy_source),
             "external_launcher": file_info(args.external_launcher),
             "external_wrapper": file_info(args.external_wrapper),
@@ -354,8 +357,11 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--planner", required=True)
     create_parser.add_argument("--proxy-bin", required=True)
     create_parser.add_argument("--deploy-bin", required=True)
+    create_parser.add_argument("--deploy-root", required=True)
+    create_parser.add_argument("--deploy-setup-env", required=True)
     create_parser.add_argument("--deploy-runtime-repo")
     create_parser.add_argument("--deploy-source")
+    create_parser.add_argument("--seed", type=int)
     create_parser.add_argument("--external-launcher", required=True)
     create_parser.add_argument("--external-wrapper", required=True)
     create_parser.add_argument("--mocap-manager", required=True)

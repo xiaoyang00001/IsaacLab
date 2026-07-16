@@ -56,6 +56,36 @@ parser.add_argument("--disable_fabric", action="store_true", default=False)
 parser.add_argument("--out", type=str, required=True, help="Output .npz path for per-step recordings.")
 parser.add_argument("--locked_seconds", type=float, default=15.0, help="Recording length while root is locked.")
 parser.add_argument("--free_seconds", type=float, default=30.0, help="Recording length after root unlock.")
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=20260716,
+    help="Isaac environment/reset RNG seed. Matrix runs pair this value within each block.",
+)
+parser.add_argument(
+    "--stop_after_fall_grace_s",
+    "--stop-after-fall-grace-s",
+    dest="stop_after_fall_grace_s",
+    type=float,
+    default=0.0,
+    help="After a definitive fall, record this grace period then end early; 0 records the full horizon.",
+)
+parser.add_argument(
+    "--unlock_source_index",
+    "--unlock-source-index",
+    dest="unlock_source_index",
+    type=int,
+    default=-1,
+    help="Keep root locked until the received deploy source counter reaches this value; -1 disables.",
+)
+parser.add_argument(
+    "--unlock_source_wait_s",
+    "--unlock-source-wait-s",
+    dest="unlock_source_wait_s",
+    type=float,
+    default=5.0,
+    help="Maximum extra locked-root wait for --unlock-source-index.",
+)
 parser.add_argument("--no_unlock", action="store_true", help="Skip the unlock phase (locked-only run).")
 parser.add_argument(
     "--wait_packets_s", type=float, default=180.0,
@@ -137,6 +167,10 @@ if not 0.0 <= float(args_cli.max_stale_fraction) <= 1.0:
     parser.error("--max-stale-fraction must be within [0, 1]")
 if not 0.0 <= float(args_cli.max_invalid_target_fraction) <= 1.0:
     parser.error("--max-invalid-target-fraction must be within [0, 1]")
+if float(args_cli.stop_after_fall_grace_s) < 0.0:
+    parser.error("--stop-after-fall-grace-s must be >= 0")
+if float(args_cli.unlock_source_wait_s) <= 0.0:
+    parser.error("--unlock-source-wait-s must be > 0")
 if (
     float(args_cli.hard_target_stale_s) > 0.0
     and float(args_cli.max_target_stale_s) > 0.0
@@ -282,8 +316,9 @@ def main() -> int:
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
     )
+    env_cfg.seed = int(args_cli.seed)
     env = gym.make(args_cli.task, cfg=env_cfg)
-    env.reset()
+    env.reset(seed=int(args_cli.seed))
 
     unwrapped = env.unwrapped
     term = unwrapped.action_manager.get_term("sonic_wholebody")
@@ -305,6 +340,7 @@ def main() -> int:
             _log(f"GUI camera placement skipped: {exc}")
     _log(
         f"env ready; step_dt={step_dt:.4f}s joints={len(joint_ids)} "
+        f"seed={int(args_cli.seed)} actual_seed={unwrapped.cfg.seed} "
         f"settle_steps={int(term.cfg.startup_settle_steps)} "
         f"unlock_blend_steps={int(term.cfg.unlock_blend_steps)} "
         f"rate_limit={float(term.cfg.target_rate_limit_rad_per_step):.4f}"
@@ -342,6 +378,10 @@ def main() -> int:
         f"max_invalid_fraction={float(args_cli.max_invalid_target_fraction):.3f}"
     )
 
+    free_steps_recorded = 0
+    termination_reason = "not_started"
+    unlock_source_index_actual = -1
+
     def build_meta(*, status: str, unlocked: bool, target_gate: dict) -> dict:
         wall_samples = wall_dts[10:] if len(wall_dts) > 10 else wall_dts
         if wall_samples:
@@ -352,11 +392,21 @@ def main() -> int:
             env_hz_mean = math.nan
             env_hz_p5 = math.nan
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "status": status,
             "task": args_cli.task,
+            "seed_requested": int(args_cli.seed),
+            "seed_actual": int(unwrapped.cfg.seed),
             "locked_seconds": float(args_cli.locked_seconds),
             "free_seconds": float(args_cli.free_seconds) if unlocked else 0.0,
+            "planned_free_seconds": float(args_cli.free_seconds) if unlocked else 0.0,
+            "recorded_free_steps": int(free_steps_recorded),
+            "recorded_free_seconds": float(free_steps_recorded * step_dt),
+            "termination_reason": termination_reason,
+            "stop_after_fall_grace_s": float(args_cli.stop_after_fall_grace_s),
+            "unlock_source_index_target": int(args_cli.unlock_source_index),
+            "unlock_source_index_actual": int(unlock_source_index_actual),
+            "fall_detection": {"tilt_deg_gt": 45.0, "root_z_m_lt": 0.35},
             "unlocked": unlocked,
             "step_dt": step_dt,
             "settle_steps": int(term.cfg.startup_settle_steps),
@@ -491,21 +541,76 @@ def main() -> int:
             _log(f"ERROR {abort_reason}; stopping measurement and saving partial recording")
             break
 
+    if (
+        not abort_reason
+        and not runtime_failure
+        and not args_cli.no_unlock
+        and int(args_cli.unlock_source_index) >= 0
+        and simulation_app.is_running()
+    ):
+        target_source_index = int(args_cli.unlock_source_index)
+        alignment_deadline = time.monotonic() + float(args_cli.unlock_source_wait_s)
+        _log(
+            f"aligning unlock under locked root: source_index>={target_source_index}"
+        )
+        while int(term._last_source_index) < target_source_index:
+            if not simulation_app.is_running():
+                runtime_failure = "simulation stopped while aligning unlock source index"
+                break
+            if time.monotonic() > alignment_deadline:
+                runtime_failure = (
+                    f"unlock source index did not reach {target_source_index} within "
+                    f"{float(args_cli.unlock_source_wait_s):.1f}s "
+                    f"(actual={int(term._last_source_index)})"
+                )
+                break
+            paced_step()
+            record_and_check_target_health()
+            if abort_reason:
+                termination_reason = "target_health_abort"
+                break
+        unlock_source_index_actual = int(term._last_source_index)
+        if not runtime_failure and not abort_reason:
+            _log(f"unlock source aligned at index={unlock_source_index_actual}")
+
     unlocked = False
     if not abort_reason and not runtime_failure and not args_cli.no_unlock and simulation_app.is_running():
         # ---- 阶段 2：程序化解锁 → 自由根闭环 ----
         _log("unlocking root pose (programmatic U)")
         term.unlock_root_pose()
         unlocked = True
+        termination_reason = "planned_duration_complete"
         free_steps = max(1, int(round(args_cli.free_seconds / step_dt)))
+        first_fall_wall_t: float | None = None
         for _ in range(free_steps):
             if not simulation_app.is_running():
                 runtime_failure = "simulation stopped during free-root measurement"
+                termination_reason = "simulation_stopped"
                 break
             paced_step()
             record_and_check_target_health()
+            free_steps_recorded += 1
             if abort_reason:
+                termination_reason = "target_health_abort"
                 _log(f"ERROR {abort_reason}; stopping measurement and saving partial recording")
+                break
+            fallen_now = (
+                recorder.tilt_deg[-1] > 45.0
+                or recorder.root_pos[-1][2] < 0.35
+            )
+            if fallen_now and first_fall_wall_t is None:
+                first_fall_wall_t = recorder.wall_t[-1]
+                _log(
+                    f"definitive fall observed; grace={float(args_cli.stop_after_fall_grace_s):.3f}s"
+                )
+            if (
+                first_fall_wall_t is not None
+                and float(args_cli.stop_after_fall_grace_s) > 0.0
+                and recorder.wall_t[-1] - first_fall_wall_t
+                >= float(args_cli.stop_after_fall_grace_s)
+            ):
+                termination_reason = "fall_observed"
+                _log("fall grace recorded; ending this trial early")
                 break
 
     if (
