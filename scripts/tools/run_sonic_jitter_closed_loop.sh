@@ -168,14 +168,44 @@ if [[ "$JITTER_INPUT" == "keyboard" ]]; then
     tmux new-window -t "$SESSION" -n deploy \
         "cd '${SONY_REPO}/gear_sonic_deploy' && export DDS_INTERFACE=lo && source scripts/setup_env.sh && just run g1_deploy_onnx_ref \"\$DDS_INTERFACE\" ${DEPLOY_POLICY_DIR}/model_decoder.onnx reference/example --obs-config ${DEPLOY_POLICY_DIR}/observation_config.yaml --encoder-file ${DEPLOY_POLICY_DIR}/model_encoder.onnx --planner-file planner/target_vel/V2/planner_sonic.onnx --input-type keyboard --output-type all --zmq-out-port 5557 --zmq-out-topic g1_debug --disable-crc-check |& tee '$DEPLOY_LOG'; exec bash" \
         || { log "✗ tmux deploy 窗口启动失败"; exit 1; }
-else
-    # ---------- 2. 启动 sony 三窗口（input/proxy/deploy） ----------
+elif [[ "${JITTER_POSE_PROTOCOL:-1}" == "1" && "$DEPLOY_POLICY_DIR" == "policy/release" ]]; then
+    # ---------- 2. 启动 sony 三窗口（input/proxy/deploy，默认 v1+release 走原包装层） ----------
     log "启动 sony 闭环三端 (session=$SESSION, bvh=$(basename "$BVH"))"
     (
         cd "$SONY_REPO"
         SESSION="$SESSION" POSE_PROTOCOL_VERSION=1 \
             ./scripts/launch_sonic_json_isaaclab_closed_loop.sh --no-isaaclab --replace "$BVH"
     ) || { log "✗ sony launcher 失败"; exit 1; }
+else
+    # ---------- 2V. BVH + 非默认协议/policy：直调 python launcher（sony shell 包装层
+    # 把 --input-type/policy 路径写死，绕开；参数按 launch_sonic_json_isaaclab_closed_loop.sh
+    # 的 launcher_args 原样复刻 + policy 三件套 + 协议版本） ----------
+    PROTO="${JITTER_POSE_PROTOCOL:-1}"
+    log "直调 sony python launcher (v$PROTO, policy=$DEPLOY_POLICY_DIR, bvh=$(basename "$BVH"))"
+    (
+        cd "$SONY_REPO"
+        exec ./.venv_teleop/bin/python -u scripts/launch_sonic_local_isaaclab_closed_loop.py \
+            --session "$SESSION" --no-attach --replace \
+            --repo-root "$SONY_REPO" \
+            --no-isaaclab --no-bvh-stream-sender \
+            --bvh-stream-port 12352 \
+            --bvh-stream-bonedata-coordinate-frame left_handed_yup \
+            --bvh-stream-bonedata-position-scale 1.0 \
+            --bvh-stream-bonedata-input-quat-order xyzw \
+            --bvh-stream-bonedata-rotation-mode input \
+            --sony-pico-bonedata-basis zflip \
+            --sony-pico-smpl-joints-source pico_fk \
+            --pose-protocol-version "$PROTO" \
+            --zmq-port 5556 --debug-port 5557 --state-port 5560 \
+            --isaac-state-host 127.0.0.1 \
+            --decoder "${DEPLOY_POLICY_DIR}/model_decoder.onnx" \
+            --encoder "${DEPLOY_POLICY_DIR}/model_encoder.onnx" \
+            --obs-config "${DEPLOY_POLICY_DIR}/observation_config.yaml"
+    ) || { log "✗ sony python launcher 失败"; exit 1; }
+    # BVH 发送端窗口（包装层的 sony_json_sender 等价物，.bvh 走 bvh_stream_sender）
+    tmux new-window -t "$SESSION" -n sony_json_sender \
+        "cd '$SONY_REPO' && export PYTHONUNBUFFERED=1 PYTHONPATH='$SONY_REPO' && ./.venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_sender.py --bvh-file '$BVH' --host 127.0.0.1 --port 12352 --fps 50 --unit-scale 0.01 --loop |& tee /tmp/sonic_local_bvh_sender_\$(date +%Y%m%d_%H%M%S).log; exec bash" \
+        || { log "✗ BVH 发送端窗口启动失败"; exit 1; }
 fi
 
 newest_log() { # newest_log <name>：launch 之后新建的 /tmp/sonic_local_<name>_*.log

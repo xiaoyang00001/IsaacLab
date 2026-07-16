@@ -98,6 +98,7 @@ def main() -> int:
                 pass
 
     wall_t, q, dq, target, packets = [], [], [], [], []
+    reference = []  # body_q_target（参考动作目标，跟随延迟测量用；包内缺失则整体不落盘）
     root_pos, root_quat, tilt, fall = [], [], [], []
     base = None
     n_bad = 0
@@ -132,6 +133,9 @@ def main() -> int:
         dq.append(np.asarray(m.get("body_dq", [0.0] * 29), dtype=np.float32))
         target.append(np.asarray(la, dtype=np.float32))
         packets.append(int(m.get("index", len(packets))))
+        ref = m.get("body_q_target")
+        if ref is not None and len(ref) == 29:
+            reference.append(np.asarray(ref, dtype=np.float32))
         if base is not None:
             root_pos.append(np.asarray(base["base_pos"], dtype=np.float32))
             bw, bx, by, bz = base["base_quat_wxyz"]
@@ -166,6 +170,8 @@ def main() -> int:
             "joint_order": "mujoco",
         })),
     }
+    if len(reference) == n:
+        out["reference"] = np.stack(reference)
     if root_pos:
         out["root_pos"] = np.stack(root_pos)
         out["root_quat"] = np.stack(root_quat)
