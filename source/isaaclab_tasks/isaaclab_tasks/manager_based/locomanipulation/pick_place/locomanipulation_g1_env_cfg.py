@@ -783,11 +783,10 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
         self.sim.render_interval = 2
-        # Gripping stability: solve dynamic contacts after articulation constraints,
-        # retain small fast-moving finger contacts, and use manipulation-scale
-        # friction thresholds instead of the much larger scene defaults.
+        # Gripping stability: solve dynamic contacts after articulation constraints
+        # and use manipulation-scale solver/friction thresholds instead of the
+        # much larger scene defaults.
         self.sim.physx.solve_articulation_contact_last = True
-        self.sim.physx.enable_ccd = True
         self.sim.physx.enable_external_forces_every_iteration = True
         self.sim.physx.min_position_iteration_count = 4
         self.sim.physx.min_velocity_iteration_count = 2
