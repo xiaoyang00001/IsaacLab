@@ -30,6 +30,7 @@ ENVIRONMENT_KEYS = {
     "CUDA_VISIBLE_DEVICES",
     "DEPLOY_POLICY_DIR",
     "DISPLAY",
+    "GR00T_WBC_ROOT",
     "ISAACLAB_PATH",
     "ISAACLAB_ROOT",
     "JITTER_GUI",
@@ -275,6 +276,7 @@ def create_manifest(args: argparse.Namespace) -> None:
             "encoder_model": file_info(args.encoder),
             "observation_config": file_info(args.obs_config),
             "planner_model": file_info(args.planner),
+            "robot_usd": file_info(args.robot_usd),
             "proxy_binary": file_info(args.proxy_bin),
             "deploy_binary": file_info(args.deploy_bin),
             "deploy_setup_env": file_info(args.deploy_setup_env),
@@ -355,6 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--encoder", required=True)
     create_parser.add_argument("--obs-config", required=True)
     create_parser.add_argument("--planner", required=True)
+    create_parser.add_argument("--robot-usd", required=True)
     create_parser.add_argument("--proxy-bin", required=True)
     create_parser.add_argument("--deploy-bin", required=True)
     create_parser.add_argument("--deploy-root", required=True)

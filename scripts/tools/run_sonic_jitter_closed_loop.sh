@@ -139,6 +139,7 @@ DECODER_MODEL="${POLICY_ROOT}/model_decoder.onnx"
 ENCODER_MODEL="${POLICY_ROOT}/model_encoder.onnx"
 OBS_CONFIG="${POLICY_ROOT}/observation_config.yaml"
 PLANNER_MODEL="${SONY_REPO}/gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx"
+ROBOT_USD="${SONY_REPO}/gear_sonic/data/robots/g1/g1_43dof.usd"
 MANIFEST_HELPER="${ISAACLAB_ROOT}/scripts/tools/sonic_run_manifest.py"
 EXTERNAL_LAUNCHER="${SONY_REPO}/scripts/launch_sonic_local_isaaclab_closed_loop.py"
 EXTERNAL_WRAPPER="${SONY_REPO}/scripts/launch_sonic_json_isaaclab_closed_loop.sh"
@@ -192,6 +193,7 @@ if [[ -f "$NVJITLINK" ]]; then
 fi
 RUNNER_ENVIRONMENT=(
     "CONDA_PREFIX=$CONDA_ENV_PREFIX"
+    "GR00T_WBC_ROOT=$SONY_REPO"
     "ISAACLAB_PATH=$ISAACLAB_PATH"
     "ISAACLAB_ROOT=$ISAACLAB_ROOT"
     "LD_LIBRARY_PATH=$RUNNER_LD_LIBRARY_PATH"
@@ -222,6 +224,7 @@ require_file "$DECODER_MODEL" "decoder model"
 require_file "$ENCODER_MODEL" "encoder model"
 require_file "$OBS_CONFIG" "observation config"
 require_file "$PLANNER_MODEL" "planner model"
+require_file "$ROBOT_USD" "G1 43-DoF robot USD"
 require_file "$EXTERNAL_LAUNCHER" "SONY launcher"
 require_file "$EXTERNAL_WRAPPER" "SONY launcher wrapper"
 require_file "$MOCAP_MANAGER" "mocap manager"
@@ -284,6 +287,7 @@ MANIFEST_COMMAND=(
     --encoder "$ENCODER_MODEL"
     --obs-config "$OBS_CONFIG"
     --planner "$PLANNER_MODEL"
+    --robot-usd "$ROBOT_USD"
     --proxy-bin "$PROXY_BIN"
     --deploy-bin "$DEPLOY_BIN"
     --deploy-root "$DEPLOY_ROOT"
@@ -412,6 +416,7 @@ log "启动 IsaacLab runner → $ISAAC_LOG"
         unset LD_PRELOAD
     fi
     export CONDA_PREFIX="$CONDA_ENV_PREFIX"
+    export GR00T_WBC_ROOT="$SONY_REPO"
     export PYTHONUNBUFFERED=1
     export TERM=xterm
     export XR_RUNTIME_JSON=/nonexistent   # headless 严禁挂上 SteamVR（env_hz 崩溃判例）
@@ -420,6 +425,8 @@ log "启动 IsaacLab runner → $ISAAC_LOG"
 
     printf '[jitter-import] ISAACLAB_ROOT=%s\n' "$ISAACLAB_ROOT"
     printf '[jitter-import] ISAACLAB_PATH=%s\n' "$ISAACLAB_PATH"
+    printf '[jitter-asset] GR00T_WBC_ROOT=%s\n' "$GR00T_WBC_ROOT"
+    printf '[jitter-asset] robot_usd=%s\n' "$ROBOT_USD"
     "${CONDA_ENV_PREFIX}/bin/python" "$MANIFEST_HELPER" print-imports \
         --isaaclab-root "$ISAACLAB_ROOT" || exit $?
 

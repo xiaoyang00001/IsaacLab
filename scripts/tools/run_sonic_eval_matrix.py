@@ -479,6 +479,9 @@ def main() -> int:
         "bvh_sender": (
             sony_repo / "gear_sonic/scripts/bvh_stream_sender.py"
         ).resolve(),
+        "robot_usd": (
+            sony_repo / "gear_sonic/data/robots/g1/g1_43dof.usd"
+        ).resolve(),
     }
     if args.scenario == "v3_bvh":
         shared_paths["bvh"] = bvh_path
@@ -679,8 +682,7 @@ def main() -> int:
                 "SONIC_DEPLOY_SUBSTEP_CONSUME": "1" if candidate.substep_consume else "0",
             }
         )
-        if args.sony_repo:
-            env["SONY_REPO"] = str(pathlib.Path(args.sony_repo).resolve())
+        env["SONY_REPO"] = str(sony_repo)
         env["DEPLOY_BIN_OVERRIDE"] = str(deploy_bin_path)
         env["DEPLOY_ROOT_OVERRIDE"] = str(deploy_root)
 
