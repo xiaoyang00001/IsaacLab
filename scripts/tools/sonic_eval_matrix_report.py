@@ -215,27 +215,41 @@ def _runtime_valid(
                 reasons.append(f"shared_{artifact_name}_path_mismatch={actual_path!r}")
             if actual_hash != expected_artifact.get("sha256"):
                 reasons.append(f"shared_{artifact_name}_hash_mismatch={actual_hash!r}")
-        expected_robot_usd = expected_shared_artifacts.get("robot_usd")
-        if isinstance(expected_robot_usd, dict):
-            expected_robot_path = expected_robot_usd.get("realpath")
-            expected_robot_hash = expected_robot_usd.get("sha256")
-            loaded_robot_path = _get(meta, "robot_usd.realpath")
-            loaded_robot_hash = _get(meta, "robot_usd.sha256")
-            if loaded_robot_path != expected_robot_path:
-                reasons.append(f"loaded_robot_usd_path_mismatch={loaded_robot_path!r}")
-            if loaded_robot_hash != expected_robot_hash:
-                reasons.append(f"loaded_robot_usd_hash_mismatch={loaded_robot_hash!r}")
-            runner_robot_path = _get(
-                manifest, "runner_environment.SONIC_G1_ROBOT_USD"
+        expected_import_asset = expected_shared_artifacts.get(
+            "gr00t_43dof_import_asset"
+        )
+        if isinstance(expected_import_asset, dict):
+            expected_import_path = expected_import_asset.get("realpath")
+            expected_import_hash = expected_import_asset.get("sha256")
+            configured_import_path = _get(
+                meta, "gr00t_43dof_import_asset.realpath"
             )
-            if runner_robot_path != expected_robot_path:
-                reasons.append(f"runner_robot_usd_path_mismatch={runner_robot_path!r}")
-            captured_robot_path = _get(
-                manifest, "environment.SONIC_G1_ROBOT_USD"
+            configured_import_hash = _get(
+                meta, "gr00t_43dof_import_asset.sha256"
             )
-            if captured_robot_path != expected_robot_path:
+            if configured_import_path != expected_import_path:
                 reasons.append(
-                    f"captured_robot_usd_path_mismatch={captured_robot_path!r}"
+                    "configured_gr00t_43dof_path_mismatch="
+                    f"{configured_import_path!r}"
+                )
+            if configured_import_hash != expected_import_hash:
+                reasons.append(
+                    "configured_gr00t_43dof_hash_mismatch="
+                    f"{configured_import_hash!r}"
+                )
+            runner_import_path = _get(
+                manifest, "runner_environment.SONIC_GR00T_43DOF_USD"
+            )
+            if runner_import_path != expected_import_path:
+                reasons.append(
+                    f"runner_gr00t_43dof_path_mismatch={runner_import_path!r}"
+                )
+            captured_import_path = _get(
+                manifest, "environment.SONIC_GR00T_43DOF_USD"
+            )
+            if captured_import_path != expected_import_path:
+                reasons.append(
+                    f"captured_gr00t_43dof_path_mismatch={captured_import_path!r}"
                 )
             if expected_sony_repo is not None:
                 runner_root = _get(manifest, "runner_environment.GR00T_WBC_ROOT")
@@ -304,10 +318,12 @@ def _runtime_valid(
                 "1" if candidate_definition.get("substep_consume") else "0"
             ),
         }
-        expected_robot_usd = expected_shared_artifacts.get("robot_usd")
-        if isinstance(expected_robot_usd, dict):
-            expected_sonic["SONIC_G1_ROBOT_USD"] = str(
-                expected_robot_usd.get("realpath")
+        expected_import_asset = expected_shared_artifacts.get(
+            "gr00t_43dof_import_asset"
+        )
+        if isinstance(expected_import_asset, dict):
+            expected_sonic["SONIC_GR00T_43DOF_USD"] = str(
+                expected_import_asset.get("realpath")
             )
         for key, expected in expected_sonic.items():
             if sonic_env.get(key) != expected:
@@ -322,6 +338,14 @@ def _runtime_valid(
             pathlib.Path(raw_path).resolve().relative_to(repo_root)
         except (OSError, ValueError):
             reasons.append(f"{key}_outside_worktree={raw_path}")
+    scene_robot_asset = meta.get("scene_robot_asset")
+    if not isinstance(scene_robot_asset, dict):
+        reasons.append("missing_scene_robot_asset")
+    else:
+        for key in ("asset_name", "prim_path", "usd_path"):
+            value = scene_robot_asset.get(key)
+            if not isinstance(value, str) or not value:
+                reasons.append(f"invalid_scene_robot_asset_{key}")
     return reasons
 
 
@@ -688,16 +712,33 @@ def _validate_pairing_context(
     source_index_tolerance: int = 2,
 ) -> dict:
     """Check that paired runs entered the measured motion at comparable source frames."""
+    scene_assets: dict[str, dict] = {}
+    for candidate in candidate_summaries:
+        for run in candidate["runs"]:
+            if run.get("valid") and isinstance(run.get("scene_robot_asset"), dict):
+                scene_assets[
+                    f"{candidate['name']}:block_{run.get('block')}"
+                ] = run["scene_robot_asset"]
+    scene_identities = {
+        json.dumps(asset, sort_keys=True, ensure_ascii=True)
+        for asset in scene_assets.values()
+    }
+    scene_asset_consistent = len(scene_identities) <= 1
+    common_reasons = (
+        [] if scene_asset_consistent else ["scene_robot_asset_mismatch_across_runs"]
+    )
     if scenario != "v3_bvh":
         return {
-            "valid": True,
+            "valid": not common_reasons,
             "required": False,
             "source_index_tolerance": source_index_tolerance,
             "blocks": {},
-            "reasons": [],
+            "scene_robot_assets": scene_assets,
+            "scene_robot_asset_consistent": scene_asset_consistent,
+            "reasons": common_reasons,
         }
 
-    reasons: list[str] = []
+    reasons: list[str] = list(common_reasons)
     block_details: dict[str, dict] = {}
     candidate_names = [candidate["name"] for candidate in candidate_summaries]
     for block in range(1, expected_blocks + 1):
@@ -731,6 +772,8 @@ def _validate_pairing_context(
         "required": True,
         "source_index_tolerance": source_index_tolerance,
         "blocks": block_details,
+        "scene_robot_assets": scene_assets,
+        "scene_robot_asset_consistent": scene_asset_consistent,
         "reasons": reasons,
     }
 
@@ -827,6 +870,11 @@ def build_summary(results_path: pathlib.Path) -> dict:
                     "valid": not reasons,
                     "invalid_reasons": reasons,
                     "metrics": metrics,
+                    "scene_robot_asset": (
+                        _get(report, "meta.scene_robot_asset")
+                        if report is not None
+                        else None
+                    ),
                 }
             )
 

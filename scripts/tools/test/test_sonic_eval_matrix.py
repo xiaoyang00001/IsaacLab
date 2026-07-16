@@ -49,11 +49,12 @@ class TestSonicEvalMatrix(unittest.TestCase):
         planned_free_seconds: float | None = None,
         termination_reason: str | None = None,
         fall_grace_s: float = 0.0,
-        robot_manifest_realpath: str | None = None,
-        robot_manifest_sha256: str | None = None,
-        robot_actual_realpath: str | None = None,
-        robot_actual_sha256: str | None = None,
+        import_manifest_realpath: str | None = None,
+        import_manifest_sha256: str | None = None,
+        import_actual_realpath: str | None = None,
+        import_actual_sha256: str | None = None,
         runner_gr00t_root: str | None = None,
+        scene_robot_usd: str = "omniverse://test/Robots/Unitree/G1/g1.usd",
     ) -> None:
         wall_t = np.arange(length, dtype=np.float64) * 0.02
         joint_names = np.asarray(
@@ -91,18 +92,18 @@ class TestSonicEvalMatrix(unittest.TestCase):
             }
         if deploy_runtime_repository is not None:
             manifest["repositories"]["deploy_runtime"] = deploy_runtime_repository
-        if robot_manifest_realpath is not None:
-            manifest["artifacts"]["robot_usd"] = {
-                "realpath": robot_manifest_realpath,
-                "sha256": robot_manifest_sha256,
+        if import_manifest_realpath is not None:
+            manifest["artifacts"]["gr00t_43dof_import_asset"] = {
+                "realpath": import_manifest_realpath,
+                "sha256": import_manifest_sha256,
             }
             manifest["environment"] = {
                 "GR00T_WBC_ROOT": runner_gr00t_root,
-                "SONIC_G1_ROBOT_USD": robot_manifest_realpath,
+                "SONIC_GR00T_43DOF_USD": import_manifest_realpath,
             }
             manifest["runner_environment"] = {
                 "GR00T_WBC_ROOT": runner_gr00t_root,
-                "SONIC_G1_ROBOT_USD": robot_manifest_realpath,
+                "SONIC_GR00T_43DOF_USD": import_manifest_realpath,
             }
         meta = {
             "schema_version": 3 if seed is not None or termination_reason else 2,
@@ -124,16 +125,21 @@ class TestSonicEvalMatrix(unittest.TestCase):
                 "SONIC_G1_MUJOCO_NO_VEL_LIMIT": "0",
                 "SONIC_DEPLOY_SUBSTEP_CONSUME": "1" if substep_consume else "0",
                 **(
-                    {"SONIC_G1_ROBOT_USD": robot_manifest_realpath}
-                    if robot_manifest_realpath is not None
+                    {"SONIC_GR00T_43DOF_USD": import_manifest_realpath}
+                    if import_manifest_realpath is not None
                     else {}
                 ),
             },
+            "scene_robot_asset": {
+                "asset_name": "sonic_robot",
+                "prim_path": "{ENV_REGEX_NS}/SONICRobot",
+                "usd_path": scene_robot_usd,
+            },
         }
-        if robot_actual_realpath is not None:
-            meta["robot_usd"] = {
-                "realpath": robot_actual_realpath,
-                "sha256": robot_actual_sha256,
+        if import_actual_realpath is not None:
+            meta["gr00t_43dof_import_asset"] = {
+                "realpath": import_actual_realpath,
+                "sha256": import_actual_sha256,
             }
         if seed is not None:
             meta["seed_requested"] = seed
@@ -368,6 +374,7 @@ class TestSonicEvalMatrix(unittest.TestCase):
         *,
         runtime_mismatch: bool = False,
         seed_mismatch: bool = False,
+        scene_asset_mismatch: bool = False,
     ) -> Path:
         names = ["bundle_a", "bundle_b"]
         repeats = 2
@@ -442,6 +449,11 @@ class TestSonicEvalMatrix(unittest.TestCase):
                 deploy_runtime_repository=repository,
                 planned_free_seconds=3.2,
                 termination_reason="planned_duration_complete",
+                scene_robot_usd=(
+                    "omniverse://test/Robots/Unitree/G1/wrong.usd"
+                    if scene_asset_mismatch and sequence == 1
+                    else "omniverse://test/Robots/Unitree/G1/g1.usd"
+                ),
             )
             runs.append(
                 {
@@ -493,15 +505,32 @@ class TestSonicEvalMatrix(unittest.TestCase):
                 self.assertTrue(any(reason.startswith(expected_reason) for reason in invalid))
                 self.assertEqual(summary["confidence"], "provisional_screening")
 
-    def test_robot_asset_identity_gate(self):
+    def test_scene_robot_asset_mismatch_invalidates_pairing_context(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        with tempfile.TemporaryDirectory() as directory:
+            summary = matrix_report.build_summary(
+                self._build_candidate_bundle_matrix(
+                    Path(directory),
+                    repo_root,
+                    scene_asset_mismatch=True,
+                )
+            )
+        self.assertFalse(summary["confirmation"]["pairing_context"]["valid"])
+        self.assertIn(
+            "scene_robot_asset_mismatch_across_runs",
+            summary["confirmation"]["pairing_context"]["reasons"],
+        )
+        self.assertEqual(summary["confidence"], "provisional_screening")
+
+    def test_gr00t_import_asset_identity_gate(self):
         repo_root = Path(__file__).resolve().parents[3]
         sony_root = "/tmp/test-sony-root"
         robot_path = f"{sony_root}/gear_sonic/data/robots/g1/g1_43dof.usd"
         for mismatch, expected_reason in (
             ("valid", None),
-            ("manifest_hash", "shared_robot_usd_hash_mismatch"),
+            ("manifest_hash", "shared_gr00t_43dof_import_asset_hash_mismatch"),
             ("runner_root", "runner_gr00t_root_mismatch"),
-            ("loaded_path", "loaded_robot_usd_path_mismatch"),
+            ("loaded_path", "configured_gr00t_43dof_path_mismatch"),
         ):
             with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -513,14 +542,14 @@ class TestSonicEvalMatrix(unittest.TestCase):
                     repo_root,
                     fell=False,
                     substep_consume=False,
-                    robot_manifest_realpath=robot_path,
-                    robot_manifest_sha256=(
+                    import_manifest_realpath=robot_path,
+                    import_manifest_sha256=(
                         "wrong-hash" if mismatch == "manifest_hash" else "robot-hash"
                     ),
-                    robot_actual_realpath=(
+                    import_actual_realpath=(
                         "/tmp/wrong-robot.usd" if mismatch == "loaded_path" else robot_path
                     ),
-                    robot_actual_sha256="robot-hash",
+                    import_actual_sha256="robot-hash",
                     runner_gr00t_root=(
                         "/tmp/wrong-root" if mismatch == "runner_root" else sony_root
                     ),
@@ -538,7 +567,7 @@ class TestSonicEvalMatrix(unittest.TestCase):
                                 "sha256": "test-deploy-sha256",
                             },
                             "shared_artifacts": {
-                                "robot_usd": {
+                                "gr00t_43dof_import_asset": {
                                     "realpath": robot_path,
                                     "sha256": "robot-hash",
                                 }

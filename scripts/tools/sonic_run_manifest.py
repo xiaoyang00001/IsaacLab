@@ -276,7 +276,7 @@ def create_manifest(args: argparse.Namespace) -> None:
             "encoder_model": file_info(args.encoder),
             "observation_config": file_info(args.obs_config),
             "planner_model": file_info(args.planner),
-            "robot_usd": file_info(args.robot_usd),
+            "gr00t_43dof_import_asset": file_info(args.gr00t_43dof_usd),
             "proxy_binary": file_info(args.proxy_bin),
             "deploy_binary": file_info(args.deploy_bin),
             "deploy_setup_env": file_info(args.deploy_setup_env),
@@ -357,7 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--encoder", required=True)
     create_parser.add_argument("--obs-config", required=True)
     create_parser.add_argument("--planner", required=True)
-    create_parser.add_argument("--robot-usd", required=True)
+    create_parser.add_argument("--gr00t-43dof-usd", required=True)
     create_parser.add_argument("--proxy-bin", required=True)
     create_parser.add_argument("--deploy-bin", required=True)
     create_parser.add_argument("--deploy-root", required=True)

@@ -479,7 +479,7 @@ def main() -> int:
         "bvh_sender": (
             sony_repo / "gear_sonic/scripts/bvh_stream_sender.py"
         ).resolve(),
-        "robot_usd": (
+        "gr00t_43dof_import_asset": (
             sony_repo / "gear_sonic/data/robots/g1/g1_43dof.usd"
         ).resolve(),
     }

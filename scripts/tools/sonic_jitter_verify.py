@@ -328,23 +328,26 @@ def main() -> int:
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
     )
-    robot_usd_realpath = os.path.realpath(
+    gr00t_43dof_realpath = os.path.realpath(
         str(sonic_env_cfg_module.G1_43DOF_GR00T_CFG.spawn.usd_path)
     )
-    requested_robot_usd = os.environ.get("SONIC_G1_ROBOT_USD")
-    if requested_robot_usd and robot_usd_realpath != os.path.realpath(
-        os.path.expanduser(requested_robot_usd)
+    requested_gr00t_43dof = os.environ.get("SONIC_GR00T_43DOF_USD")
+    if requested_gr00t_43dof and gr00t_43dof_realpath != os.path.realpath(
+        os.path.expanduser(requested_gr00t_43dof)
     ):
         raise RuntimeError(
-            "configured G1 robot USD does not match SONIC_G1_ROBOT_USD: "
-            f"{robot_usd_realpath!r} != {requested_robot_usd!r}"
+            "configured GR00T 43-DoF import asset does not match "
+            "SONIC_GR00T_43DOF_USD: "
+            f"{gr00t_43dof_realpath!r} != {requested_gr00t_43dof!r}"
         )
-    robot_usd = {
-        "realpath": robot_usd_realpath,
-        "sha256": _sha256_file(robot_usd_realpath),
+    gr00t_43dof_import_asset = {
+        "realpath": gr00t_43dof_realpath,
+        "sha256": _sha256_file(gr00t_43dof_realpath),
     }
     _log(
-        f"robot_usd={robot_usd['realpath']} sha256={robot_usd['sha256']}"
+        "gr00t_43dof_import_asset="
+        f"{gr00t_43dof_import_asset['realpath']} "
+        f"sha256={gr00t_43dof_import_asset['sha256']}"
     )
     env_cfg.seed = int(args_cli.seed)
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -353,6 +356,23 @@ def main() -> int:
     unwrapped = env.unwrapped
     term = unwrapped.action_manager.get_term("sonic_wholebody")
     asset = unwrapped.scene[term.cfg.asset_name]
+    scene_robot_cfg = getattr(unwrapped.cfg.scene, term.cfg.asset_name)
+    scene_robot_usd_path = getattr(scene_robot_cfg.spawn, "usd_path", None)
+    if not isinstance(scene_robot_usd_path, str) or not scene_robot_usd_path:
+        raise RuntimeError(
+            f"scene asset {term.cfg.asset_name!r} has no auditable USD path"
+        )
+    scene_robot_asset = {
+        "asset_name": str(term.cfg.asset_name),
+        "prim_path": str(scene_robot_cfg.prim_path),
+        "usd_path": scene_robot_usd_path,
+    }
+    _log(
+        "scene_robot_asset="
+        f"{scene_robot_asset['asset_name']} "
+        f"prim={scene_robot_asset['prim_path']} "
+        f"usd={scene_robot_asset['usd_path']}"
+    )
     joint_ids = term._joint_ids
     joint_names = list(term._joint_names)
     env_origin_z = float(unwrapped.scene.env_origins[0, 2].item())
@@ -461,7 +481,8 @@ def main() -> int:
             "target_gate": target_gate,
             "run_manifest_path": _RUN_MANIFEST_PATH,
             "run_manifest": _RUN_MANIFEST,
-            "robot_usd": robot_usd,
+            "gr00t_43dof_import_asset": gr00t_43dof_import_asset,
+            "scene_robot_asset": scene_robot_asset,
             "argv": list(sys.argv),
             "cwd": os.getcwd(),
             "isaaclab_tasks_file": os.path.realpath(str(isaaclab_tasks.__file__)),

@@ -202,12 +202,12 @@ print(
 def _find_gr00t_g1_43dof_usd() -> str:
     """Resolve the GR00T G1 43-DoF USD used by the sim2sim viewer."""
 
-    explicit_usd = os.environ.get("SONIC_G1_ROBOT_USD")
+    explicit_usd = os.environ.get("SONIC_GR00T_43DOF_USD")
     if explicit_usd:
         usd_path = Path(explicit_usd).expanduser()
         if not usd_path.is_file():
             raise FileNotFoundError(
-                "SONIC_G1_ROBOT_USD requires one exact existing file; "
+                "SONIC_GR00T_43DOF_USD requires one exact existing file; "
                 f"got: {usd_path}"
             )
         resolved = usd_path.resolve()
