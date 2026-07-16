@@ -260,10 +260,17 @@ def _box_cfg(
             size=size,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
-                max_depenetration_velocity=3.0,
+                linear_damping=0.10,
+                angular_damping=0.20,
+                max_linear_velocity=2.0,
+                max_angular_velocity=720.0,
+                max_depenetration_velocity=0.50,
+                max_contact_impulse=0.20,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=4,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
-                contact_offset=0.003,
+                contact_offset=0.001,
                 rest_offset=0.0,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
@@ -385,7 +392,7 @@ G1_BODY_STATE_WRITE_JOINT_NAMES = [
 """Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
 def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
-    if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", True):
+    if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", False):
         return None
     return sim_utils.RigidBodyPropertiesCfg(
         disable_gravity=False,
@@ -394,7 +401,16 @@ def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
         angular_damping=0.0,
         max_linear_velocity=1000.0,
         max_angular_velocity=1000.0,
-        max_depenetration_velocity=_cfg_float("ISAACLAB_G1_RIGID_MAX_DEPENETRATION_VELOCITY", 1.0),
+        max_depenetration_velocity=_cfg_float("ISAACLAB_G1_RIGID_MAX_DEPENETRATION_VELOCITY", 0.5),
+    )
+
+
+def _g1_robot_collision_props() -> sim_utils.CollisionPropertiesCfg:
+    """Use millimetre-scale contact margins for the small finger collision meshes."""
+
+    return sim_utils.CollisionPropertiesCfg(
+        contact_offset=_cfg_float("ISAACLAB_G1_COLLISION_CONTACT_OFFSET", 0.0015),
+        rest_offset=_cfg_float("ISAACLAB_G1_COLLISION_REST_OFFSET", 0.0),
     )
 
 
@@ -405,6 +421,7 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
         activate_contact_sensors=False,
         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
         rigid_props=_g1_robot_rigid_props(),
+        collision_props=_g1_robot_collision_props(),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             fix_root_link=False,
@@ -540,10 +557,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_hand_middle_.*",
                 ".*_hand_thumb_.*",
             ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 25.0),
-            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 6.0),
-            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 80.0),
-            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 8.0),
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 6.0),
+            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 2.5),
+            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 30.0),
+            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 3.0),
             armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.02),
         ),
     },
@@ -588,21 +605,21 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         prim_name="SmallBox1",
         size=SMALL_BOX_SIZE,
         initial_pos=(0.00553, 0.31243, SMALL_BOX_INITIAL_Z),
-        mass=0.08,
+        mass=0.12,
         color=(0.82, 0.66, 0.36),
     )
     small_box_2 = _box_cfg(
         prim_name="SmallBox2",
         size=SMALL_BOX_SIZE,
         initial_pos=(-0.10565, 0.31397, SMALL_BOX_INITIAL_Z),
-        mass=0.08,
+        mass=0.12,
         color=(0.88, 0.72, 0.40),
     )
     long_box = _box_cfg(
         prim_name="LongBox",
         size=LONG_BOX_SIZE,
         initial_pos=(-0.04810, 0.41625, LONG_BOX_INITIAL_Z),
-        mass=0.25,
+        mass=0.50,
         color=(0.76, 0.56, 0.28),
     )
 
@@ -634,7 +651,7 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         zmq_pose_source=_isaac_robot_cfg(robot_id, "POSE_SOURCE", "target"),
         state_write_pose_source=_isaac_robot_cfg(robot_id, "STATE_WRITE_POSE_SOURCE", "measured"),
         target_only_pose_source=_isaac_robot_cfg(robot_id, "TARGET_ONLY_POSE_SOURCE", "measured"),
-        hand_pose_source=_isaac_robot_cfg(robot_id, "HAND_POSE_SOURCE", "target"),
+        hand_pose_source=_isaac_robot_cfg(robot_id, "HAND_POSE_SOURCE", "measured"),
         root_zmq_host=_ubuntu_sender_ip(
             robot_id,
             _isaac_robot_cfg(
@@ -666,7 +683,7 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
             "BODY_JOINT_TARGET_SCALE_OVERRIDES",
             {},
         ),
-        hand_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "HAND_JOINT_TARGET_MAX_DELTA", 0.20),
+        hand_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "HAND_JOINT_TARGET_MAX_DELTA", 0.02),
         hold_default_until_first_packet=_isaac_robot_cfg_bool(robot_id, "HOLD_DEFAULT_UNTIL_FIRST_PACKET", True),
         no_packet_debug_interval_s=_isaac_robot_cfg_float(robot_id, "NO_PACKET_DEBUG_INTERVAL_S", 1.0),
         root_motion_mode=_isaac_robot_cfg(robot_id, "ROOT_MOTION_MODE", "source"),
@@ -766,6 +783,17 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
         self.sim.render_interval = 2
+        # Gripping stability: solve dynamic contacts after articulation constraints,
+        # retain small fast-moving finger contacts, and use manipulation-scale
+        # friction thresholds instead of the much larger scene defaults.
+        self.sim.physx.solve_articulation_contact_last = True
+        self.sim.physx.enable_ccd = True
+        self.sim.physx.enable_external_forces_every_iteration = True
+        self.sim.physx.min_position_iteration_count = 4
+        self.sim.physx.min_velocity_iteration_count = 2
+        self.sim.physx.bounce_threshold_velocity = 0.05
+        self.sim.physx.friction_offset_threshold = 0.01
+        self.sim.physx.friction_correlation_distance = 0.00625
         # The default Isaac Lab GPU PhysX buffers target large batched training scenes.
         # This task is a single-env XR mirror, so smaller buffers avoid VRAM exhaustion on 8 GB GPUs.
         self.sim.physx.gpu_max_rigid_contact_count = 2**20
