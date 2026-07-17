@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
 import re
 from pathlib import Path
 
@@ -20,9 +21,10 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import MuJoCoG1MirrorActionCfg
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import ZmqObjectSyncActionCfg
 
 _ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -85,6 +87,26 @@ def _cfg_value(name: str, default: str | None = None) -> str | None:
     return _G1_NETWORK_CONFIG.get(name, default)
 
 
+def _runtime_cfg_value(name: str, default: str | None = None) -> str | None:
+    """Read a process-local override before falling back to the shared env file."""
+
+    return os.environ.get(name, _cfg_value(name, default))
+
+
+def _runtime_cfg_int(name: str, default: int) -> int:
+    try:
+        return int(str(_runtime_cfg_value(name, str(default))).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _runtime_cfg_float(name: str, default: float) -> float:
+    try:
+        return float(str(_runtime_cfg_value(name, str(default))).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _cfg_float(name: str, default: float) -> float:
     try:
         return float(_cfg_value(name, str(default)))
@@ -100,6 +122,78 @@ def _cfg_bool_value(value: str | None, default: bool) -> bool:
 
 def _cfg_bool(name: str, default: bool) -> bool:
     return _cfg_bool_value(_cfg_value(name), default)
+
+
+def _local_robot_id() -> int:
+    """Return the robot whose head and pelvis should anchor the local XR session."""
+
+    raw_value = _runtime_cfg_value("ISAACLAB_LOCAL_ROBOT_ID", "1")
+    try:
+        robot_id = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        print(f"[WARN] Invalid ISAACLAB_LOCAL_ROBOT_ID={raw_value!r}; using robot 1.")
+        return 1
+    if robot_id not in {1, 2}:
+        print(f"[WARN] Unsupported ISAACLAB_LOCAL_ROBOT_ID={raw_value!r}; using robot 1.")
+        robot_id = 1
+    return robot_id
+
+
+def _object_sync_role() -> str:
+    """Resolve the local object synchronization role from runtime configuration."""
+
+    raw_role = str(_runtime_cfg_value("ISAACLAB_OBJECT_SYNC_ROLE", "auto")).strip().lower()
+    if raw_role == "auto":
+        return "publisher" if _local_robot_id() == 1 else "subscriber"
+    if raw_role in {"publisher", "subscriber", "none"}:
+        return raw_role
+    print(f"[WARN] Unsupported ISAACLAB_OBJECT_SYNC_ROLE={raw_role!r}; disabling object sync.")
+    return "none"
+
+
+def _object_sync_endpoint(role: str) -> str:
+    """Return the role-specific bind or connect endpoint."""
+
+    if role == "publisher":
+        return str(
+            _runtime_cfg_value(
+                "ISAACLAB_OBJECT_SYNC_BIND_ENDPOINT",
+                "tcp://0.0.0.0:15555",
+            )
+        )
+    if role == "subscriber":
+        publisher_ip = str(
+            _runtime_cfg_value(
+                "ISAACLAB_OBJECT_SYNC_PUBLISHER_IP",
+                _cfg_value("WINDOWS_ROBOT_1_ISAACLAB_IP", "127.0.0.1"),
+            )
+        )
+        return str(
+            _runtime_cfg_value(
+                "ISAACLAB_OBJECT_SYNC_CONNECT_ENDPOINT",
+                f"tcp://{publisher_ip}:15555",
+            )
+        )
+    return ""
+
+
+_OBJECT_SYNC_ROLE = _object_sync_role()
+_OBJECT_SYNC_ENDPOINT = _object_sync_endpoint(_OBJECT_SYNC_ROLE)
+_BOX_PHYSICS_AUTHORITY = _OBJECT_SYNC_ROLE != "subscriber"
+
+
+def _object_sync_cfg(asset_name: str) -> ZmqObjectSyncActionCfg:
+    """Create a synchronized-object action using the local PUB/SUB role."""
+
+    return ZmqObjectSyncActionCfg(
+        asset_name=asset_name,
+        role=_OBJECT_SYNC_ROLE,
+        endpoint=_OBJECT_SYNC_ENDPOINT,
+        send_hwm=_runtime_cfg_int("ISAACLAB_OBJECT_SYNC_SEND_HWM", 3),
+        receive_hwm=_runtime_cfg_int("ISAACLAB_OBJECT_SYNC_RECEIVE_HWM", 3),
+        stale_timeout_s=_runtime_cfg_float("ISAACLAB_OBJECT_SYNC_STALE_TIMEOUT_S", 0.5),
+        stale_log_interval_s=_runtime_cfg_float("ISAACLAB_OBJECT_SYNC_STALE_LOG_INTERVAL_S", 2.0),
+    )
 
 
 def _cfg_str_list_value(value: str | None, default: list[str]) -> list[str]:
@@ -247,8 +341,9 @@ def _box_cfg(
     initial_pos: tuple[float, float, float],
     mass: float,
     color: tuple[float, float, float],
+    physics_authority: bool,
 ) -> RigidObjectCfg:
-    """Create a graspable box with the requested dimensions in metres."""
+    """Create a dynamic authority box or a non-physical synchronized follower."""
 
     return RigidObjectCfg(
         prim_path=f"{{ENV_REGEX_NS}}/{prim_name}",
@@ -259,12 +354,18 @@ def _box_cfg(
         spawn=sim_utils.CuboidCfg(
             size=size,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,
-                max_depenetration_velocity=3.0,
+                kinematic_enabled=not physics_authority,
+                disable_gravity=not physics_authority,
+                max_depenetration_velocity=3.0 if physics_authority else 0.0,
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                contact_offset=0.003,
-                rest_offset=0.0,
+            collision_props=(
+                sim_utils.CollisionPropertiesCfg(
+                    collision_enabled=True,
+                    contact_offset=0.003,
+                    rest_offset=0.0,
+                )
+                if physics_authority
+                else sim_utils.CollisionPropertiesCfg(collision_enabled=False)
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
             visual_material=sim_utils.PreviewSurfaceCfg(
@@ -552,11 +653,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
 
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
-    """Scene configuration for locomanipulation environment with G1 robot.
+    """Scene configuration for a replicated dual-G1 locomanipulation environment.
 
-    This configuration sets up the G1 humanoid robot for locomanipulation tasks,
-    allowing both locomotion and manipulation capabilities. The robot can move its
-    base and use its arms for manipulation tasks.
+    Both Isaac Lab computers instantiate both robots and subscribe to both GR00T
+    state streams. ``ISAACLAB_LOCAL_ROBOT_ID`` only selects the local XR anchor.
     """
 
     # Table
@@ -577,10 +677,14 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
     #     ),
     # )
-    # Single humanoid from the GR00T sim2sim viewer asset.
+    # Two independent humanoids instantiated from the same GR00T G1 asset.
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 0.0, 0.78)),
+    )
+    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot_2",
+        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(1.0, 0.0, 0.78)),
     )
 
     # Two 5 cm cubes and one 20 x 5 x 10 cm rectangular box on the table.
@@ -590,6 +694,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         initial_pos=(0.00553, 0.31243, SMALL_BOX_INITIAL_Z),
         mass=0.08,
         color=(0.82, 0.66, 0.36),
+        physics_authority=_BOX_PHYSICS_AUTHORITY,
     )
     small_box_2 = _box_cfg(
         prim_name="SmallBox2",
@@ -597,6 +702,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         initial_pos=(-0.10565, 0.31397, SMALL_BOX_INITIAL_Z),
         mass=0.08,
         color=(0.88, 0.72, 0.40),
+        physics_authority=_BOX_PHYSICS_AUTHORITY,
     )
     long_box = _box_cfg(
         prim_name="LongBox",
@@ -604,6 +710,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         initial_pos=(-0.04810, 0.41625, LONG_BOX_INITIAL_Z),
         mass=0.25,
         color=(0.76, 0.56, 0.28),
+        physics_authority=_BOX_PHYSICS_AUTHORITY,
     )
 
     # Ground plane
@@ -693,9 +800,13 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
 
 @configclass
 class ActionsCfg:
-    """Single-G1 GR00T/MuJoCo mirror with physical Isaac Lab arms and hands."""
+    """Independent G1 mirrors plus authoritative three-box synchronization."""
 
     mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
+    mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
+    small_box_1_object_sync = _object_sync_cfg("small_box_1")
+    small_box_2_object_sync = _object_sync_cfg("small_box_2")
+    long_box_object_sync = _object_sync_cfg("long_box")
 
 
 @configclass
@@ -777,8 +888,19 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_heap_capacity = 2**24
         self.sim.physx.gpu_temp_buffer_capacity = 2**22
 
-        self.xr.anchor_prim_path = "/World/envs/env_0/Robot_1/head_link"
-        self.xr.anchor_rotation_prim_path = "/World/envs/env_0/Robot_1/pelvis"
+        local_robot_id = _local_robot_id()
+        local_robot_prim_path = f"/World/envs/env_0/Robot_{local_robot_id}"
+        self.xr.anchor_prim_path = f"{local_robot_prim_path}/head_link"
+        self.xr.anchor_rotation_prim_path = f"{local_robot_prim_path}/pelvis"
+        print(
+            f"[INFO] Isaac Lab local robot ID: {local_robot_id}; "
+            f"XR anchor={self.xr.anchor_prim_path}"
+        )
+        print(
+            f"[INFO] Isaac Lab object sync: role={_OBJECT_SYNC_ROLE}, "
+            f"endpoint={_OBJECT_SYNC_ENDPOINT or 'disabled'}, "
+            f"box_physics_authority={_BOX_PHYSICS_AUTHORITY}"
+        )
         self.xr.fixed_anchor_height = False
         # Anchor XR to the robot head position, but use the pelvis as the stable robot yaw reference.
         self.xr.anchor_rotation_mode = XrAnchorRotationMode.FOLLOW_PRIM_SMOOTHED
