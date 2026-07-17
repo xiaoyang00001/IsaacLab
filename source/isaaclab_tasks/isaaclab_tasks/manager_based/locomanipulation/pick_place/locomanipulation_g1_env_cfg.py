@@ -744,27 +744,30 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
-        # 叠放在 cart_box4 顶面：cart_box4 中心 z=0.90，箱子半高 0.075 → 顶面 z=0.975；
-        # test_box 半高 0.12 → 中心 z=1.095。x/y 对齐 cart_box4，rot 沿用推车朝向。
+        # 属性对齐 晓阳全身005 a61191017 的 long_box（尺寸/质量/材质/碰撞参数），
+        # 仅位置沿用本场景原 test_box 摆放（cart_box4 上方，x/y 对齐、rot 沿用推车朝向）。
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=[-5.4, 19.39363, 1.095],
             rot=[0.0, 0.0, 0.0, 1.0],
         ),
         spawn=sim_utils.CuboidCfg(
-            size=(0.32, 0.22, 0.24),
+            size=(0.20, 0.05, 0.10),
             rigid_props=(
-                sim_utils.RigidBodyPropertiesCfg()
+                sim_utils.RigidBodyPropertiesCfg(
+                    disable_gravity=False,
+                    max_depenetration_velocity=3.0,
+                )
                 if ZMQ_SYNC_ROLE != "subscriber"
                 else sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.25),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.003, rest_offset=0.0),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=1.2,
-                dynamic_friction=1.0,
+                dynamic_friction=0.9,
                 restitution=0.0,
             ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.36, 0.18), roughness=0.7),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.76, 0.56, 0.28), roughness=0.70),
         ),
     )
     test_box_2 = _grasp_box_cfg("TestBox_2", 1)
