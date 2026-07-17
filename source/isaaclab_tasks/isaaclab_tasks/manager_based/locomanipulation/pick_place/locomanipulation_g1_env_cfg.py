@@ -676,18 +676,18 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
         spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
-    cart_box3 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/CartBox3",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.75], rot=[0.0, 0.0, 0.0, 1.0]),
-        # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
-        spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
-    )
-    cart_box4 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/CartBox4",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.90], rot=[0.0, 0.0, 0.0, 1.0]),
-        # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
-        spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
-    )
+    # cart_box3 = RigidObjectCfg(
+    #     prim_path="{ENV_REGEX_NS}/CartBox3",
+    #     init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.75], rot=[0.0, 0.0, 0.0, 1.0]),
+    #     # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
+    #     spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
+    # )
+    # cart_box4 = RigidObjectCfg(
+    #     prim_path="{ENV_REGEX_NS}/CartBox4",
+    #     init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.90], rot=[0.0, 0.0, 0.0, 1.0]),
+    #     # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
+    #     spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
+    # )
     # worktable_tote = RigidObjectCfg(
     #     prim_path="{ENV_REGEX_NS}/WorkTableTote",
     #     init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.15, 18.19363, 0.0], rot=[0.707107, 0.0, 0.0, 0.707107]),
@@ -937,8 +937,8 @@ class ActionsCfg:
     pushcart_sync = ZmqObjectSyncActionCfg(asset_name="pushcart", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box1_sync = ZmqObjectSyncActionCfg(asset_name="cart_box1", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     cart_box2_sync = ZmqObjectSyncActionCfg(asset_name="cart_box2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    cart_box3_sync = ZmqObjectSyncActionCfg(asset_name="cart_box3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    # cart_box3_sync = ZmqObjectSyncActionCfg(asset_name="cart_box3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
+    # cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     object_sync_2 = ZmqObjectSyncActionCfg(asset_name="test_box_2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     object_sync_3 = ZmqObjectSyncActionCfg(asset_name="test_box_3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
     object_sync_4 = ZmqObjectSyncActionCfg(asset_name="test_box_4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
