@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # ---------- 可按需修改的配置（均可用同名环境变量在外部覆盖） ----------
-ISAACLAB_DIR="${ISAACLAB_DIR:-/home/nolo/xiaoyang_IssacLab/IsaacLab}"
+# 运行目录默认就是当前目录（须是 IsaacLab 检出）；要跑别的检出用 ISAACLAB_DIR=... 指定
 
 # 碰撞可视化测试模式
 _COLLISION_TEST=false
@@ -36,7 +36,7 @@ export ISAACLAB_G1_ROOT_ZMQ_HOST="${ISAACLAB_G1_ROOT_ZMQ_HOST:-$ISAACLAB_G1_ZMQ_
 # export ISAACLAB_G1_TRANSPORT=zmq
 
 TASK="${TASK:-Isaac-PickPlace-Locomanipulation-G1-Abs-v0}"
-DEVICE="${DEVICE:-cuda:0}"
+DEVICE="${DEVICE:-cpu}"
 
 export PYTHONUNBUFFERED=1
 
@@ -57,23 +57,63 @@ fi
 NVJITLINK="$CONDA_PREFIX/lib/python3.11/site-packages/nvidia/nvjitlink/lib/libnvJitLink.so.12"
 [[ -f "$NVJITLINK" ]] && export LD_PRELOAD="$NVJITLINK${LD_PRELOAD:+:$LD_PRELOAD}"
 
-cd "$ISAACLAB_DIR"
+[[ -n "${ISAACLAB_DIR:-}" ]] && cd "$ISAACLAB_DIR"
+if [[ ! -f ./isaaclab.sh ]]; then
+  echo "[start_teleop_g1] ✗ 当前目录 $(pwd) 不是 IsaacLab 检出（缺 isaaclab.sh）" >&2
+  echo "[start_teleop_g1]   请 cd 进 IsaacLab 目录再跑，或用 ISAACLAB_DIR=... 指定" >&2
+  exit 1
+fi
 
 # ---------- OpenXR runtime（--xr 必需，勿删） ----------
-# Kit 只通过 XR_RUNTIME_JSON 找 CloudXR runtime（4 个系统级 active_runtime.json 位置全空）。
-# 不 source 这个 env 就启动会报 "Cannot start OpenXR! No valid active runtime is set"，
-# XR 视口黑屏无响应。详见 KB: NVIDIA/IsaacLab/IsaacSim-StartAR-OpenXR经CloudXR-runtime启动指南.md
-CLOUDXR_ENV="$HOME/.cloudxr/run/cloudxr.env"
-if [[ -f "$CLOUDXR_ENV" ]]; then
-  # shellcheck disable=SC1090
-  source "$CLOUDXR_ENV"
-else
-  echo "[start_teleop_g1] ⚠️ 未找到 $CLOUDXR_ENV，CloudXR runtime 可能没启动，--xr 会黑屏" >&2
-fi
-if [[ ! -S "$HOME/.cloudxr/run/ipc_cloudxr" ]]; then
-  echo "[start_teleop_g1] ⚠️ CloudXR runtime 的 ipc socket 不存在，请先启动 runtime（isaacteleop.cloudxr.runtime）" >&2
-fi
+# 两条 XR 通路，二选一，由 ISAACLAB_XR_RUNTIME 决定（默认 steamvr）：
+#
+#   steamvr : Isaac Sim → SteamVR(OpenXR runtime) → NOLO driver → PICO 无线串流
+#             KB: NVIDIA/CloudXR-OpenXR/NOLO-XRLink-SteamVR-driver部署实战.md
+#   cloudxr : Isaac Sim → NVIDIA CloudXR runtime → WebXR/WebRTC → 头显（原通路）
+#             KB: NVIDIA/IsaacLab/IsaacSim-StartAR-OpenXR经CloudXR-runtime启动指南.md
+#
+# Kit 只在**进程启动时**读一次 XR_RUNTIME_JSON；该环境变量的优先级高于系统的
+# ~/.config/openxr/1/active_runtime.json。不设或设错都会报
+# "Cannot start OpenXR! No valid active runtime is set"，XR 视口黑屏无响应。
+XR_BACKEND="${ISAACLAB_XR_RUNTIME:-steamvr}"
 
+case "$XR_BACKEND" in
+  steamvr)
+    STEAMVR_XR_JSON="$HOME/.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json"
+    if [[ -f "$STEAMVR_XR_JSON" ]]; then
+      export XR_RUNTIME_JSON="$STEAMVR_XR_JSON"
+    else
+      echo "[start_teleop_g1] ⚠️ 未找到 SteamVR 的 OpenXR manifest：$STEAMVR_XR_JSON" >&2
+      echo "[start_teleop_g1]    SteamVR 装了吗？--xr 会黑屏。" >&2
+    fi
+    # SteamVR 必须已在运行：vrclient.so 要连 vrserver，没起来 OpenXR 会话建不起来
+    if ! pgrep -x vrserver >/dev/null 2>&1; then
+      echo "[start_teleop_g1] ⚠️ SteamVR(vrserver) 未运行 —— --xr 会黑屏。先启动它：" >&2
+      echo "[start_teleop_g1]    env -u http_proxy -u https_proxy -u all_proxy DISPLAY=:0 setsid /usr/games/steam steam://run/250820" >&2
+      echo "[start_teleop_g1]    （必须走 steam:// 让它跑在 sniper 容器里，裸跑 vrstartup 会崩）" >&2
+    fi
+    ;;
+
+  cloudxr)
+    CLOUDXR_ENV="$HOME/.cloudxr/run/cloudxr.env"
+    if [[ -f "$CLOUDXR_ENV" ]]; then
+      # shellcheck disable=SC1090
+      source "$CLOUDXR_ENV"
+    else
+      echo "[start_teleop_g1] ⚠️ 未找到 $CLOUDXR_ENV，CloudXR runtime 可能没启动，--xr 会黑屏" >&2
+    fi
+    if [[ ! -S "$HOME/.cloudxr/run/ipc_cloudxr" ]]; then
+      echo "[start_teleop_g1] ⚠️ CloudXR runtime 的 ipc socket 不存在，请先启动 runtime（isaacteleop.cloudxr.runtime）" >&2
+    fi
+    ;;
+
+  *)
+    echo "[start_teleop_g1] ✗ ISAACLAB_XR_RUNTIME 只能是 steamvr 或 cloudxr，当前：$XR_BACKEND" >&2
+    exit 1
+    ;;
+esac
+
+echo "[start_teleop_g1] XR 通路           = $XR_BACKEND$([[ "$XR_BACKEND" == steamvr ]] && echo '（默认；切回 CloudXR: ISAACLAB_XR_RUNTIME=cloudxr）')"
 echo "[start_teleop_g1] XR_RUNTIME_JSON    = ${XR_RUNTIME_JSON:-<未设置>}"
 echo "[start_teleop_g1] GR00T_WBC_ROOT     = $GR00T_WBC_ROOT"
 echo "[start_teleop_g1] ZMQ_HOST           = $ISAACLAB_G1_ZMQ_HOST (root: $ISAACLAB_G1_ROOT_ZMQ_HOST)"
