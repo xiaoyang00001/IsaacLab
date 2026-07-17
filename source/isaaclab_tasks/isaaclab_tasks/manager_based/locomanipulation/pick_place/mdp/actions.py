@@ -116,6 +116,10 @@ RIGHT_HAND_JOINT_NAMES = [
 class _MirrorSample:
     joint_pos_mujoco: np.ndarray | None = None
     joint_vel_mujoco: np.ndarray | None = None
+    joint_pos_state_mujoco: np.ndarray | None = None
+    joint_vel_state_mujoco: np.ndarray | None = None
+    joint_pos_target_mujoco: np.ndarray | None = None
+    joint_vel_target_mujoco: np.ndarray | None = None
     left_hand_pos: np.ndarray | None = None
     right_hand_pos: np.ndarray | None = None
     left_hand_vel: np.ndarray | None = None
@@ -379,6 +383,16 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._write_root_state = bool(cfg.write_root_state)
         self._write_body_joint_state = bool(cfg.write_body_joint_state)
         self._write_hand_joint_state = bool(cfg.write_hand_joint_state)
+        self._state_write_pose_source = str(cfg.state_write_pose_source or cfg.zmq_pose_source).lower()
+        self._target_only_pose_source = str(cfg.target_only_pose_source or cfg.zmq_pose_source).lower()
+        self._hand_pose_source = str(cfg.hand_pose_source or cfg.zmq_pose_source).lower()
+        for source_name, source_value in (
+            ("state_write_pose_source", self._state_write_pose_source),
+            ("target_only_pose_source", self._target_only_pose_source),
+            ("hand_pose_source", self._hand_pose_source),
+        ):
+            if source_value not in {"measured", "target", "action", "auto"}:
+                raise ValueError(f"Unsupported {source_name}={source_value!r}")
         if self._write_root_state and not self._write_body_joint_state:
             print(
                 "[WARN] MuJoCo G1 mirror is configured as root-state write without body-joint state write. "
@@ -502,6 +516,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 f"mode={self._locomotion_sync_mode}, "
                 f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
                 f"write_hands={self._write_hand_joint_state}, "
+                f"state_source={self._state_write_pose_source}, "
+                f"target_source={self._target_only_pose_source}, hand_source={self._hand_pose_source}, "
                 f"body_source={sample.body_source}, root_source={sample.root_source}"
             )
             self._printed_first_sample = True
@@ -511,16 +527,50 @@ class MuJoCoG1MirrorAction(ActionTerm):
         joint_pos = self._asset.data.joint_pos.clone()
         joint_vel = self._asset.data.joint_vel.clone()
 
-        if sample.joint_pos_mujoco is not None:
-            q = torch.tensor(sample.joint_pos_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
-            q = q * self._body_target_scales
-            joint_pos[:, self._body_isaac_ids] = q.unsqueeze(0)
-        if sample.joint_vel_mujoco is not None and self.cfg.use_source_joint_velocity:
-            dq = torch.tensor(sample.joint_vel_mujoco[self._body_mujoco_ids], dtype=torch.float32, device=self.device)
-            dq = dq * self._body_target_scales
-            joint_vel[:, self._body_isaac_ids] = dq.unsqueeze(0)
-        elif sample.joint_pos_mujoco is not None:
-            joint_vel[:, self._body_isaac_ids] = 0.0
+        state_q = (
+            sample.joint_pos_state_mujoco
+            if sample.joint_pos_state_mujoco is not None
+            else sample.joint_pos_mujoco
+        )
+        state_dq = (
+            sample.joint_vel_state_mujoco
+            if sample.joint_vel_state_mujoco is not None
+            else sample.joint_vel_mujoco
+        )
+        target_q = (
+            sample.joint_pos_target_mujoco
+            if sample.joint_pos_target_mujoco is not None
+            else sample.joint_pos_mujoco
+        )
+        target_dq = (
+            sample.joint_vel_target_mujoco
+            if sample.joint_vel_target_mujoco is not None
+            else sample.joint_vel_mujoco
+        )
+
+        def assign_body_subset(
+            local_ids: list[int],
+            source_q: np.ndarray | None,
+            source_dq: np.ndarray | None,
+        ) -> None:
+            if not local_ids or source_q is None:
+                return
+            mujoco_ids = [self._body_mujoco_ids[i] for i in local_ids]
+            isaac_ids = [self._body_isaac_ids[i] for i in local_ids]
+            scales = self._body_target_scales[local_ids]
+            q = torch.tensor(source_q[mujoco_ids], dtype=torch.float32, device=self.device) * scales
+            joint_pos[:, isaac_ids] = q.unsqueeze(0)
+            if source_dq is not None and self.cfg.use_source_joint_velocity:
+                dq = torch.tensor(source_dq[mujoco_ids], dtype=torch.float32, device=self.device) * scales
+                joint_vel[:, isaac_ids] = dq.unsqueeze(0)
+            else:
+                joint_vel[:, isaac_ids] = 0.0
+
+        if self._write_body_joint_state:
+            assign_body_subset(self._body_state_write_local_ids, state_q, state_dq)
+            assign_body_subset(self._body_target_only_local_ids, target_q, target_dq)
+        else:
+            assign_body_subset(list(range(len(self._body_isaac_ids))), target_q, target_dq)
 
         mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
         self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
@@ -614,6 +664,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"write_root={self._write_root_state}, write_body={self._write_body_joint_state}, "
             f"hard_write_body_joints={len(self._body_state_write_isaac_ids)}/{len(self._body_isaac_ids)}, "
             f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
+            f"state_source={self._state_write_pose_source}, target_source={self._target_only_pose_source}, "
+            f"hand_source={self._hand_pose_source}, "
             f"zero_target_only_body_velocity={self.cfg.zero_target_only_body_velocity}, "
             f"zero_target_only_hand_velocity={self.cfg.zero_target_only_hand_velocity}, "
             f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
@@ -867,6 +919,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         body_msg = root_msg if self._has_body_state(root_msg) else debug_msg
         if body_msg is None:
             return None
+        target_body_msg = debug_msg if self._has_body_state(debug_msg) else body_msg
 
         using_root_full_state = body_msg is root_msg
         fresh = (
@@ -880,34 +933,65 @@ class MuJoCoG1MirrorAction(ActionTerm):
             print(f"[WARN] MuJoCo G1 mirror {self._transport.upper()} stream is stale; holding last mirrored pose.")
             self._warned_stale = True
 
-        q = self._select_body_q(body_msg)
-        dq = self._select_body_dq(body_msg)
-        msg_order = str(body_msg.get("target_order", body_msg.get("joint_order", self.cfg.zmq_joint_order))).lower()
-        if msg_order not in {"mujoco", "isaaclab"}:
-            msg_order = self.cfg.zmq_joint_order
+        state_msg_order = str(
+            body_msg.get("measured_order", body_msg.get("joint_order", self.cfg.zmq_joint_order))
+        ).lower()
+        if state_msg_order not in {"mujoco", "isaaclab"}:
+            state_msg_order = self.cfg.zmq_joint_order
+        target_msg_order = str(
+            target_body_msg.get(
+                "target_order", target_body_msg.get("joint_order", self.cfg.zmq_joint_order)
+            )
+        ).lower()
+        if target_msg_order not in {"mujoco", "isaaclab"}:
+            target_msg_order = self.cfg.zmq_joint_order
+
+        state_q = self._select_body_q(body_msg, self._state_write_pose_source)
+        state_dq = self._select_body_dq(body_msg, self._state_write_pose_source)
+        target_q = self._select_body_q(target_body_msg, self._target_only_pose_source)
+        target_dq = self._select_body_dq(target_body_msg, self._target_only_pose_source)
 
         sample = _MirrorSample(
             fresh=fresh,
             body_source=self._root_topic if using_root_full_state else self._body_topic,
         )
-        if q is not None:
-            sample.joint_pos_mujoco = _body_q_to_mujoco_order(q, msg_order)
+        if state_q is not None:
+            sample.joint_pos_state_mujoco = _body_q_to_mujoco_order(state_q, state_msg_order)
         elif self._last_sample is not None:
-            sample.joint_pos_mujoco = self._last_sample.joint_pos_mujoco
-        if dq is not None and dq.size >= 29:
-            sample.joint_vel_mujoco = _body_q_to_mujoco_order(dq, msg_order)
+            sample.joint_pos_state_mujoco = self._last_sample.joint_pos_state_mujoco
+        if state_dq is not None and state_dq.size >= 29:
+            sample.joint_vel_state_mujoco = _body_q_to_mujoco_order(state_dq, state_msg_order)
         elif self._last_sample is not None:
-            sample.joint_vel_mujoco = self._last_sample.joint_vel_mujoco
+            sample.joint_vel_state_mujoco = self._last_sample.joint_vel_state_mujoco
+        if target_q is not None:
+            sample.joint_pos_target_mujoco = _body_q_to_mujoco_order(target_q, target_msg_order)
+        elif self._last_sample is not None:
+            sample.joint_pos_target_mujoco = self._last_sample.joint_pos_target_mujoco
+        if target_dq is not None and target_dq.size >= 29:
+            sample.joint_vel_target_mujoco = _body_q_to_mujoco_order(target_dq, target_msg_order)
+        elif self._last_sample is not None:
+            sample.joint_vel_target_mujoco = self._last_sample.joint_vel_target_mujoco
 
-        sample.left_hand_pos = self._select_hand_q(body_msg, "left")
-        sample.right_hand_pos = self._select_hand_q(body_msg, "right")
-        sample.left_hand_vel = self._select_hand_dq(body_msg, "left")
-        sample.right_hand_vel = self._select_hand_dq(body_msg, "right")
+        sample.joint_pos_mujoco = (
+            sample.joint_pos_state_mujoco
+            if sample.joint_pos_state_mujoco is not None
+            else sample.joint_pos_target_mujoco
+        )
+        sample.joint_vel_mujoco = (
+            sample.joint_vel_state_mujoco
+            if sample.joint_vel_state_mujoco is not None
+            else sample.joint_vel_target_mujoco
+        )
+
+        sample.left_hand_pos = self._select_hand_q(target_body_msg, "left", self._hand_pose_source)
+        sample.right_hand_pos = self._select_hand_q(target_body_msg, "right", self._hand_pose_source)
+        sample.left_hand_vel = self._select_hand_dq(target_body_msg, "left")
+        sample.right_hand_vel = self._select_hand_dq(target_body_msg, "right")
         if debug_msg is not None and body_msg is not debug_msg:
             if sample.left_hand_pos is None:
-                sample.left_hand_pos = self._select_hand_q(debug_msg, "left")
+                sample.left_hand_pos = self._select_hand_q(debug_msg, "left", self._hand_pose_source)
             if sample.right_hand_pos is None:
-                sample.right_hand_pos = self._select_hand_q(debug_msg, "right")
+                sample.right_hand_pos = self._select_hand_q(debug_msg, "right", self._hand_pose_source)
             if sample.left_hand_vel is None:
                 sample.left_hand_vel = self._select_hand_dq(debug_msg, "left")
             if sample.right_hand_vel is None:
@@ -941,7 +1025,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             sample.root_source = root_source_name
             sample.root_fresh = root_fresh
 
-        if sample.joint_pos_mujoco is None:
+        if sample.joint_pos_state_mujoco is None and sample.joint_pos_target_mujoco is None:
             return None
         return sample
 
@@ -962,29 +1046,41 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     return arr
         return None
 
-    def _select_body_q(self, msg: dict[str, Any]) -> np.ndarray | None:
-        if self.cfg.zmq_pose_source == "target":
+    def _select_body_q(self, msg: dict[str, Any], pose_source: str | None = None) -> np.ndarray | None:
+        pose_source = str(pose_source or self.cfg.zmq_pose_source).lower()
+        if pose_source == "action":
+            action = self._first_array(msg, ("last_action", "body_q_command", "joint_pos_command"))
+            return action if action is not None else self._first_array(
+                msg, ("body_q_target", "body_q_measured", "body_q")
+            )
+        if pose_source == "target":
             target = self._first_array(msg, ("body_q_target", "joint_pos", "q", "dof_pos"))
             return target if target is not None else self._first_array(msg, ("body_q_measured", "body_q"))
-        if self.cfg.zmq_pose_source == "measured":
+        if pose_source == "measured":
             return self._first_array(msg, ("body_q_measured", "body_q", "joint_pos", "q", "dof_pos"))
         target = self._first_array(msg, ("body_q_target",))
         if target is not None and float(np.max(np.abs(target[: min(target.size, 29)]))) > 1.0e-4:
             return target
         return self._first_array(msg, ("body_q_measured", "body_q", "joint_pos", "q", "dof_pos"))
 
-    def _select_body_dq(self, msg: dict[str, Any]) -> np.ndarray | None:
-        if self.cfg.zmq_pose_source == "target":
+    def _select_body_dq(self, msg: dict[str, Any], pose_source: str | None = None) -> np.ndarray | None:
+        pose_source = str(pose_source or self.cfg.zmq_pose_source).lower()
+        if pose_source == "action":
+            return self._first_array(msg, ("body_dq_command", "joint_vel_command", "body_dq_target"))
+        if pose_source == "target":
             target = self._first_array(msg, ("body_dq_target", "joint_vel", "dq", "dof_vel"))
             return target if target is not None else self._first_array(msg, ("body_dq_measured", "body_dq"))
         return self._first_array(msg, ("body_dq_measured", "body_dq", "joint_vel", "dq", "dof_vel"))
 
-    def _select_hand_q(self, msg: dict[str, Any], side: str) -> np.ndarray | None:
+    def _select_hand_q(
+        self, msg: dict[str, Any], side: str, pose_source: str | None = None
+    ) -> np.ndarray | None:
+        pose_source = str(pose_source or self.cfg.zmq_pose_source).lower()
         measured_keys = (f"{side}_hand_q", f"{side}_hand_q_measured")
         target_keys = (f"{side}_hand_q_target", f"last_{side}_hand_action")
-        if self.cfg.zmq_pose_source == "target":
+        if pose_source == "target":
             return self._first_array(msg, target_keys + measured_keys)
-        if self.cfg.zmq_pose_source == "measured":
+        if pose_source == "measured":
             return self._first_array(msg, measured_keys + target_keys)
         target = self._first_array(msg, target_keys)
         if target is not None and target.size >= 7 and float(np.max(np.abs(target[:7]))) > 1.0e-4:

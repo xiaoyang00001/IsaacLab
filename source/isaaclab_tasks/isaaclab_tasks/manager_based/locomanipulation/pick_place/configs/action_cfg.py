@@ -64,6 +64,24 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     zmq_pose_source: str = "measured"
     """Which pose fields to mirror: ``measured``, ``target``, or ``auto``."""
 
+    state_write_pose_source: str | None = None
+    """Pose source for joints hard-written to PhysX state.
+
+    ``None`` preserves the legacy behavior and uses :attr:`zmq_pose_source`. Set this to
+    ``"measured"`` to mirror the MuJoCo lower-body state while other joints use targets.
+    """
+
+    target_only_pose_source: str | None = None
+    """Pose source for joints driven through actuator targets instead of state writes.
+
+    ``None`` preserves the legacy behavior and uses :attr:`zmq_pose_source`. Use
+    ``"target"`` for reference-motion joint targets, or ``"action"`` for the final
+    scaled WBC motor position command published as ``last_action``.
+    """
+
+    hand_pose_source: str | None = None
+    """Pose source for mirrored hand joints; ``None`` uses :attr:`zmq_pose_source`."""
+
     locomotion_sync_mode: str = "mirror"
     """How MuJoCo locomotion is applied in Isaac Lab.
 

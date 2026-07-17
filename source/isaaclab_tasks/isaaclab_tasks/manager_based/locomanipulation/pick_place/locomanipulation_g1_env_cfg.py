@@ -538,10 +538,10 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
                 ".*_elbow_joint",
                 ".*_wrist_.*_joint",
             ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_ARM_EFFORT_LIMIT", 80.0),
+            effort_limit_sim=_cfg_float("ISAACLAB_G1_ARM_EFFORT_LIMIT", 60.0),
             velocity_limit_sim=_cfg_float("ISAACLAB_G1_ARM_VELOCITY_LIMIT", 12.0),
-            stiffness=_cfg_float("ISAACLAB_G1_ARM_STIFFNESS", 600.0),
-            damping=_cfg_float("ISAACLAB_G1_ARM_DAMPING", 30.0),
+            stiffness=_cfg_float("ISAACLAB_G1_ARM_STIFFNESS", 700.0),
+            damping=_cfg_float("ISAACLAB_G1_ARM_DAMPING", 20.0),
             armature=_cfg_float("ISAACLAB_G1_ARM_ARMATURE", 0.01),
         ),
         "hands": ImplicitActuatorCfg(
@@ -803,7 +803,11 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         zmq_host=_ubuntu_sender_ip(robot_id, _isaac_robot_cfg(robot_id, "ZMQ_HOST", default_sender_ip)),
         zmq_port=_isaac_robot_cfg_int(robot_id, "ZMQ_PORT", default_body_port),
         zmq_topic=_isaac_robot_cfg(robot_id, "ZMQ_TOPIC", f"g1_{robot_id}_debug"),
+        zmq_joint_order=_isaac_robot_cfg(robot_id, "JOINT_ORDER", "mujoco"),
         zmq_pose_source=_isaac_robot_cfg(robot_id, "POSE_SOURCE", "target"),
+        state_write_pose_source=_isaac_robot_cfg(robot_id, "STATE_WRITE_POSE_SOURCE", "measured"),
+        target_only_pose_source=_isaac_robot_cfg(robot_id, "TARGET_ONLY_POSE_SOURCE", "measured"),
+        hand_pose_source=_isaac_robot_cfg(robot_id, "HAND_POSE_SOURCE", "target"),
         root_zmq_host=_ubuntu_sender_ip(
             robot_id,
             _isaac_robot_cfg(
@@ -827,7 +831,7 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         write_body_joint_state=_isaac_robot_write_body_joint_state(robot_id),
         write_hand_joint_state=_isaac_robot_write_hand_joint_state(robot_id),
         use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
-        body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.08),
+        body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.20),
         zero_target_only_body_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_BODY_VELOCITY", False),
         zero_target_only_hand_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_HAND_VELOCITY", False),
         body_joint_target_scale_overrides=_isaac_robot_cfg_pattern_float_dict(
