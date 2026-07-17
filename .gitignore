@@ -13,6 +13,7 @@
 **/*.usda
 **/*.usdc
 **/*.usdz
+!source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/assets/grasp_box.usda
 
 # Python
 .DS_Store

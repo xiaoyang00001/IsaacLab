@@ -7,10 +7,13 @@ import os
 import re
 from pathlib import Path
 
+import torch
+
 import isaaclab.envs.mdp as base_mdp
 import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
 from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
@@ -259,6 +262,133 @@ def _robot_prim_name(robot_id: int) -> str:
 
 def _peer_robot_id(robot_id: int) -> int:
     return 2 if robot_id == 1 else 1
+
+
+# The packing-table asset top was at world z=0.6996 when the table was spawned
+# at z=-0.3. The table now spawns at z=0, so its top is at z=0.9996.
+TABLE_TOP_Z = 0.9996
+SMALL_BOX_HEIGHT = 0.05
+LONG_BOX_HEIGHT = 0.10
+SMALL_BOX_INITIAL_Z = TABLE_TOP_Z + 0.5 * SMALL_BOX_HEIGHT + 0.002
+LONG_BOX_INITIAL_Z = TABLE_TOP_Z + 0.5 * LONG_BOX_HEIGHT + 0.002
+
+# The three boxes use the poses measured in the reference Isaac Sim screenshots.
+# The long side of the rectangular box is along X.
+SMALL_BOX_SIZE = (0.05, 0.05, SMALL_BOX_HEIGHT)
+LONG_BOX_SIZE = (0.20, 0.05, LONG_BOX_HEIGHT)
+BOX_NAMES = ("small_box_1", "small_box_2", "long_box")
+BOX_SIZES = (SMALL_BOX_SIZE, SMALL_BOX_SIZE, LONG_BOX_SIZE)
+
+# Inner bounds of the tray/bin on the right side of the packing table. These
+# X/Y limits match the target area used by the existing Isaac Lab pick-place
+# task for this packing-table asset. Z bounds ensure the complete box is below
+# the rim instead of merely passing over the bin.
+TARGET_BIN_MIN = (0.40, 0.35, TABLE_TOP_Z - 0.01)
+TARGET_BIN_MAX = (0.85, 0.60, TABLE_TOP_Z + 0.15)
+TARGET_BIN_CLEARANCE = 0.005
+MAX_SETTLED_LINEAR_SPEED = 0.15
+MAX_SETTLED_ANGULAR_SPEED = 1.0
+
+# Reset as soon as a box has clearly left the tabletop. This catches a falling
+# box well before it can remain on the ground until the episode ends.
+BOX_DROP_HEIGHT = TABLE_TOP_Z - 0.10
+
+
+def _box_cfg(
+    prim_name: str,
+    size: tuple[float, float, float],
+    initial_pos: tuple[float, float, float],
+    mass: float,
+    color: tuple[float, float, float],
+) -> RigidObjectCfg:
+    """Create a graspable box with the requested dimensions in metres."""
+
+    return RigidObjectCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/{prim_name}",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=initial_pos,
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=sim_utils.CuboidCfg(
+            size=size,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                max_depenetration_velocity=3.0,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.003,
+                rest_offset=0.0,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=color,
+                roughness=0.70,
+            ),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.2,
+                dynamic_friction=0.9,
+                restitution=0.0,
+            ),
+        ),
+    )
+
+
+def _boxes_inside_target_bin(
+    env,
+    box_names: tuple[str, ...],
+    box_sizes: tuple[tuple[float, float, float], ...],
+    target_min: tuple[float, float, float] = TARGET_BIN_MIN,
+    target_max: tuple[float, float, float] = TARGET_BIN_MAX,
+    clearance: float = TARGET_BIN_CLEARANCE,
+    max_linear_speed: float = MAX_SETTLED_LINEAR_SPEED,
+    max_angular_speed: float = MAX_SETTLED_ANGULAR_SPEED,
+) -> torch.Tensor:
+    """Return true when every box is fully inside the target bin and settled."""
+
+    if len(box_names) != len(box_sizes):
+        raise ValueError("box_names and box_sizes must contain the same number of entries.")
+
+    target_min_tensor = torch.tensor(target_min, device=env.device)
+    target_max_tensor = torch.tensor(target_max, device=env.device)
+    all_inside = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    for box_name, box_size in zip(box_names, box_sizes, strict=True):
+        box: RigidObject = env.scene[box_name]
+        box_pos = box.data.root_pos_w - env.scene.env_origins
+
+        # Project the oriented half extents onto the world axes so that the
+        # complete box, rather than only its centre, must be inside the bin.
+        rotation = math_utils.matrix_from_quat(box.data.root_quat_w)
+        local_half_extents = 0.5 * torch.tensor(box_size, device=env.device, dtype=box_pos.dtype)
+        world_half_extents = torch.matmul(torch.abs(rotation), local_half_extents)
+        box_min = box_pos - world_half_extents
+        box_max = box_pos + world_half_extents
+
+        inside = torch.all(box_min >= target_min_tensor + clearance, dim=1)
+        inside = torch.logical_and(inside, torch.all(box_max <= target_max_tensor - clearance, dim=1))
+
+        linear_speed = torch.linalg.vector_norm(box.data.root_lin_vel_w, dim=1)
+        angular_speed = torch.linalg.vector_norm(box.data.root_ang_vel_w, dim=1)
+        inside = torch.logical_and(inside, linear_speed < max_linear_speed)
+        inside = torch.logical_and(inside, angular_speed < max_angular_speed)
+        all_inside = torch.logical_and(all_inside, inside)
+
+    return all_inside
+
+
+def _any_box_dropped(
+    env,
+    box_names: tuple[str, ...],
+    minimum_height: float = BOX_DROP_HEIGHT,
+) -> torch.Tensor:
+    """Return true when any box falls below the tabletop drop threshold."""
+
+    any_dropped = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    for box_name in box_names:
+        box: RigidObject = env.scene[box_name]
+        relative_height = box.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+        any_dropped = torch.logical_or(any_dropped, relative_height < minimum_height)
+    return any_dropped
 
 
 def _grasp_object_rigid_props() -> sim_utils.RigidBodyPropertiesCfg:
@@ -772,6 +902,29 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     test_box_4 = _grasp_box_cfg("TestBox_4", 3)
     test_box_5 = _grasp_box_cfg("TestBox_5", 4)
 
+    # Two 5 cm cubes and one 20 x 5 x 10 cm rectangular box on the table.
+    small_box_1 = _box_cfg(
+        prim_name="SmallBox1",
+        size=SMALL_BOX_SIZE,
+        initial_pos=(0.00553, 0.31243, SMALL_BOX_INITIAL_Z),
+        mass=0.08,
+        color=(0.82, 0.66, 0.36),
+    )
+    small_box_2 = _box_cfg(
+        prim_name="SmallBox2",
+        size=SMALL_BOX_SIZE,
+        initial_pos=(-0.10565, 0.31397, SMALL_BOX_INITIAL_Z),
+        mass=0.08,
+        color=(0.88, 0.72, 0.40),
+    )
+    long_box = _box_cfg(
+        prim_name="LongBox",
+        size=LONG_BOX_SIZE,
+        initial_pos=(-0.04810, 0.41625, LONG_BOX_INITIAL_Z),
+        mass=0.25,
+        color=(0.76, 0.56, 0.28),
+    )
+
     # Ground plane
     # ground = AssetBaseCfg(
     #     prim_path="/World/GroundPlane",
@@ -963,6 +1116,20 @@ class TerminationsCfg:
     #     func=manip_mdp.task_done_pick_place,
     #     params={"task_link_name": "right_wrist_yaw_link", "robot_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
     # )
+
+    # 三小箱桌面任务的终止条件（来自 a61191017「提交添加三个小箱子」）。
+    success = DoneTerm(
+        func=_boxes_inside_target_bin,
+        params={
+            "box_names": BOX_NAMES,
+            "box_sizes": BOX_SIZES,
+        },
+    )
+
+    box_dropped = DoneTerm(
+        func=_any_box_dropped,
+        params={"box_names": BOX_NAMES},
+    )
 
 
 ##

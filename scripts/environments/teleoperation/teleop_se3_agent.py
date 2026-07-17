@@ -330,8 +330,20 @@ def main() -> None:
 
                 # Only apply teleop commands when active
                 if teleoperation_active:
-                    # process actions
-                    actions = action.repeat(env.num_envs, 1)
+                    # The single-G1 GR00T/MuJoCo mirror is a zero-dimensional
+                    # background action term. OpenXR remains active for the XR
+                    # anchor/recenter path, but its device payload (often a dict
+                    # when no retargeters are configured) is not an environment
+                    # action. Let the mirror term consume UDP data internally.
+                    if args_cli.task == G1_LOCOMANIP_TASK_ID and env.action_space.shape[-1] == 0:
+                        actions = torch.zeros(
+                            env.action_space.shape,
+                            dtype=torch.float32,
+                            device=env.unwrapped.device,
+                        )
+                    else:
+                        # process actions
+                        actions = action.repeat(env.num_envs, 1)
                     # apply actions
                     env.step(actions)
                 else:
