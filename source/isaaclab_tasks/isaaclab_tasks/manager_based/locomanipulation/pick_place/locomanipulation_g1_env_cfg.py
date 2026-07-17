@@ -413,7 +413,6 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
     spawn=UsdFileCfg(
         usd_path=_find_gr00t_g1_43dof_usd(),
         activate_contact_sensors=False,
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
         rigid_props=_g1_robot_rigid_props(),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
