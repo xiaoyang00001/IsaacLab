@@ -7,23 +7,20 @@ import os
 import re
 from pathlib import Path
 
-import torch
-
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import MuJoCoG1MirrorActionCfg
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.box_success_reset import BoxSuccessResetActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.box_drop_reset import BoxDropResetActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import (
     ZmqEnvResetSyncActionCfg,
     ZmqSceneStateSyncActionCfg,
@@ -346,7 +343,6 @@ LONG_BOX_INITIAL_Z = TABLE_TOP_Z + 0.5 * LONG_BOX_HEIGHT + 0.002
 SMALL_BOX_SIZE = (0.05, 0.05, SMALL_BOX_HEIGHT)
 LONG_BOX_SIZE = (0.20, 0.05, LONG_BOX_HEIGHT)
 BOX_NAMES = ("small_box_1", "small_box_2", "long_box")
-BOX_SIZES = (SMALL_BOX_SIZE, SMALL_BOX_SIZE, LONG_BOX_SIZE)
 
 # Reset as soon as a box has clearly left the tabletop. This catches a falling
 # box well before it can remain on the ground until the episode ends.
@@ -397,21 +393,6 @@ def _box_cfg(
             ),
         ),
     )
-
-
-def _any_box_dropped(
-    env,
-    box_names: tuple[str, ...],
-    minimum_height: float = BOX_DROP_HEIGHT,
-) -> torch.Tensor:
-    """Return true when any box falls below the tabletop drop threshold."""
-
-    any_dropped = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    for box_name in box_names:
-        box: RigidObject = env.scene[box_name]
-        relative_height = box.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
-        any_dropped = torch.logical_or(any_dropped, relative_height < minimum_height)
-    return any_dropped
 
 
 ##
@@ -795,19 +776,14 @@ class ActionsCfg:
 
     mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
     mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
-    scene_state_sync = _scene_state_sync_cfg()
-    env_reset_sync = _env_reset_sync_cfg()
-    box_success_reset = BoxSuccessResetActionCfg(
+    box_drop_reset = BoxDropResetActionCfg(
         asset_name="small_box_1",
         enabled=_SCENE_SYNC_ROLE == "publisher",
         box_names=BOX_NAMES,
-        box_sizes=BOX_SIZES,
-        container_prim_name="container_h20",
-        clearance=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_CLEARANCE", 0.005),
-        hold_time_s=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_HOLD_TIME_S", 0.25),
-        max_linear_speed=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_MAX_LINEAR_SPEED", 0.15),
-        max_angular_speed=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_MAX_ANGULAR_SPEED", 1.0),
+        minimum_height=BOX_DROP_HEIGHT,
     )
+    scene_state_sync = _scene_state_sync_cfg()
+    env_reset_sync = _env_reset_sync_cfg()
 
 
 @configclass
@@ -821,12 +797,9 @@ class ObservationsCfg:
 
 @configclass
 class TerminationsCfg:
-    """Keep the existing full-env reset when any box falls off the table."""
+    """No automatic full-environment termination conditions."""
 
-    box_dropped = DoneTerm(
-        func=_any_box_dropped,
-        params={"box_names": BOX_NAMES},
-    )
+    pass
 
 
 ##
