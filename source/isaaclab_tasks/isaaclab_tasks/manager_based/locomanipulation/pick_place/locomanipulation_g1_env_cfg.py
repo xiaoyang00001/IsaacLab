@@ -979,13 +979,22 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # ID 1 keeps the base config pose (banyun 工位，推车旁，面向 +Y)；ID 2 在其右侧 1.5 m（避开 x=-5.4 的推车）。
+    # 双机夹抬工位：以塑料筐拖车 (-5.4, 19.39363) 为中心，沿 X 轴左右两侧各 0.65 m
+    # 对称站位，面对面（robot_1 在 +X 侧朝 -X，robot_2 在 -X 侧朝 +X）。
+    # robot_2 与纸箱推车 (x=-6.8) 之间仍留约 0.45 m 间隙。
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
+        init_state=G1_43DOF_GR00T_CFG.init_state.replace(
+            pos=(-4.75, 19.39363, 0.78),
+            rot=(0.0, 0.0, 0.0, 1.0),
+        ),
     )
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
+        init_state=G1_43DOF_GR00T_CFG.init_state.replace(
+            pos=(-6.05, 19.39363, 0.78),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
     )
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
