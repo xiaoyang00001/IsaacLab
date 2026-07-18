@@ -840,18 +840,25 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     When ``syncable`` is set, the tote switches to kinematic + no-gravity on the ZMQ
     subscriber side so it purely follows the publisher's synced pose instead of
     fighting local physics (same pattern as the cart boxes).
+
+    抓取调参照抄 test_box_2~5 的 ISAACLAB_GRASP_OBJECT_* 参数组：刚体阻尼/求解器
+    迭代/角速度限幅（_grasp_object_rigid_props）、接触偏移、质量（1.0→0.45 kg）；
+    高摩擦材质（2.0/1.6，combine=min）绑定在 tote_b04_physics.usda 内。
     """
 
     is_sync_subscriber = syncable and ZMQ_SYNC_ROLE == "subscriber"
     return UsdFileCfg(
         usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
         scale=(0.01, 0.01, 0.01),
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            rigid_body_enabled=True,
-            kinematic_enabled=is_sync_subscriber,
-            disable_gravity=is_sync_subscriber,
-            solver_position_iteration_count=8,
-            max_depenetration_velocity=5.0,
+        mass_props=sim_utils.MassPropertiesCfg(mass=_cfg_float("ISAACLAB_GRASP_OBJECT_MASS", 0.45)),
+        rigid_props=(
+            sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
+            if is_sync_subscriber
+            else _grasp_object_rigid_props()
+        ),
+        collision_props=sim_utils.CollisionPropertiesCfg(
+            contact_offset=_cfg_float("ISAACLAB_GRASP_OBJECT_CONTACT_OFFSET", 0.006),
+            rest_offset=_cfg_float("ISAACLAB_GRASP_OBJECT_REST_OFFSET", 0.0),
         ),
     )
 
