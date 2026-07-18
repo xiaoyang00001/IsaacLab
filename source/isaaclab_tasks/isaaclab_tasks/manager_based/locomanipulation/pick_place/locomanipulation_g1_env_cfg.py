@@ -241,7 +241,7 @@ def _scene_state_sync_cfg() -> ZmqSceneStateSyncActionCfg:
         endpoint=_SCENE_SYNC_ENDPOINT,
         topic=str(_runtime_cfg_value("ISAACLAB_SCENE_SYNC_TOPIC", "scene_state")),
         robot_names=("robot_1", "robot_2"),
-        object_names=("small_box_1", "small_box_2", "long_box"),
+        object_names=("cart_box1", "cart_box2", "test_box"),
         send_hwm=_runtime_cfg_int("ISAACLAB_SCENE_SYNC_SEND_HWM", 3),
         receive_hwm=_runtime_cfg_int("ISAACLAB_SCENE_SYNC_RECEIVE_HWM", 3),
         stale_timeout_s=_runtime_cfg_float("ISAACLAB_SCENE_SYNC_STALE_TIMEOUT_S", 0.5),
@@ -1118,90 +1118,9 @@ class ActionsCfg:
     # Body/root streams are mirrored independently for both robot IDs.
     mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
     mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
-    local_gripper = G1GripperSyncActionCfg(
-        asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
-        mode="local_publish",
-        robot_id=ISAACLAB_LOCAL_ROBOT_ID,
-        transport=_cfg_value("ISAACLAB_G1_GRIPPER_TRANSPORT", "zmq"),
-        zmq_host=_isaac_robot_cfg(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_HOST",
-            _windows_isaaclab_ip(ISAACLAB_LOCAL_ROBOT_ID, "127.0.0.1"),
-        ),
-        zmq_port=_isaac_robot_cfg_int(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_PORT",
-            5571 if ISAACLAB_LOCAL_ROBOT_ID == 1 else 5572,
-        ),
-        zmq_topic=_isaac_robot_cfg(
-            ISAACLAB_LOCAL_ROBOT_ID,
-            "GRIPPER_ZMQ_TOPIC",
-            f"g1_{ISAACLAB_LOCAL_ROBOT_ID}_gripper",
-        ),
-        timeout=_cfg_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
-        controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
-        controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
-        controller_gripper_thumb_1_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_1_ANGLE", 1.1),
-        controller_gripper_thumb_2_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_2_ANGLE", 1.8),
-        controller_gripper_action_alpha=_cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 1.0),
-        controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
-        write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
-        target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
-        publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
-        debug_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_DEBUG_INTERVAL_S", 0.0),
-    )
-    remote_gripper = G1GripperSyncActionCfg(
-        asset_name=ISAACLAB_PEER_ROBOT_NAME,
-        mode="remote_subscribe",
-        robot_id=ISAACLAB_PEER_ROBOT_ID,
-        transport=_cfg_value("ISAACLAB_G1_GRIPPER_TRANSPORT", "zmq"),
-        zmq_host=_isaac_robot_cfg(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_HOST",
-            _windows_isaaclab_ip(ISAACLAB_PEER_ROBOT_ID, "127.0.0.1"),
-        ),
-        zmq_port=_isaac_robot_cfg_int(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_PORT",
-            5571 if ISAACLAB_PEER_ROBOT_ID == 1 else 5572,
-        ),
-        zmq_topic=_isaac_robot_cfg(
-            ISAACLAB_PEER_ROBOT_ID,
-            "GRIPPER_ZMQ_TOPIC",
-            f"g1_{ISAACLAB_PEER_ROBOT_ID}_gripper",
-        ),
-        timeout=_cfg_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
-        controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
-        write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
-        target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
-        publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
-        debug_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_DEBUG_INTERVAL_S", 0.0),
-    )
-    object_sync = ZmqObjectSyncActionCfg(asset_name="test_box", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    pushcart_sync = ZmqObjectSyncActionCfg(asset_name="pushcart", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    cart_box1_sync = ZmqObjectSyncActionCfg(asset_name="cart_box1", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    cart_box2_sync = ZmqObjectSyncActionCfg(asset_name="cart_box2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    # cart_box3_sync = ZmqObjectSyncActionCfg(asset_name="cart_box3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    # cart_box4_sync = ZmqObjectSyncActionCfg(asset_name="cart_box4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_2 = ZmqObjectSyncActionCfg(asset_name="test_box_2", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_3 = ZmqObjectSyncActionCfg(asset_name="test_box_3", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_4 = ZmqObjectSyncActionCfg(asset_name="test_box_4", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-    object_sync_5 = ZmqObjectSyncActionCfg(asset_name="test_box_5", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT)
-
     # 晓阳0007：双机固定场景同步（双 G1 + 三小箱单帧 scene_state）、PC1→PC2 复位事件、装箱成功检测复位。
     scene_state_sync = _scene_state_sync_cfg()
     env_reset_sync = _env_reset_sync_cfg()
-    box_success_reset = BoxSuccessResetActionCfg(
-        asset_name="small_box_1",
-        enabled=_SCENE_SYNC_ROLE == "publisher",
-        box_names=BOX_NAMES,
-        box_sizes=BOX_SIZES,
-        container_prim_name="container_h20",
-        clearance=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_CLEARANCE", 0.005),
-        hold_time_s=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_HOLD_TIME_S", 0.25),
-        max_linear_speed=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_MAX_LINEAR_SPEED", 0.15),
-        max_angular_speed=_runtime_cfg_float("ISAACLAB_BOX_SUCCESS_MAX_ANGULAR_SPEED", 1.0),
-    )
 
 
 @configclass
