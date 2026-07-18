@@ -171,6 +171,14 @@ def main() -> None:
     # Flags for controlling teleoperation flow
     should_reset_recording_instance = False
     teleoperation_active = True
+    local_robot_id = int(getattr(env_cfg, "local_robot_id", 1))
+    env_reset_sync_term = None
+    scene_state_sync_term = None
+    pending_local_reset_id = None
+    if args_cli.task == G1_LOCOMANIP_TASK_ID and "env_reset_sync" in env.action_manager.active_terms:
+        env_reset_sync_term = env.action_manager.get_term("env_reset_sync")
+    if args_cli.task == G1_LOCOMANIP_TASK_ID and "scene_state_sync" in env.action_manager.active_terms:
+        scene_state_sync_term = env.action_manager.get_term("scene_state_sync")
 
     # Callback handlers
     def reset_recording_instance() -> None:
@@ -185,6 +193,14 @@ def main() -> None:
         nonlocal should_reset_recording_instance
         should_reset_recording_instance = True
         print("Reset triggered - Environment will reset on next step")
+
+    def request_synchronized_g1_reset() -> None:
+        """Queue PC1's reset event, then reset the local environment at the safe step boundary."""
+
+        nonlocal pending_local_reset_id
+        if env_reset_sync_term is not None:
+            pending_local_reset_id = env_reset_sync_term.request_local_reset()
+        reset_recording_instance()
 
     def start_teleoperation() -> None:
         """
@@ -217,8 +233,13 @@ def main() -> None:
         "R": reset_recording_instance,
         "START": start_teleoperation,
         "STOP": stop_teleoperation,
-        "RESET": reset_recording_instance,
     }
+    if args_cli.task != G1_LOCOMANIP_TASK_ID:
+        teleoperation_callbacks["RESET"] = reset_recording_instance
+    elif local_robot_id == 1:
+        # OpenXR maps RESET to the left controller X button. Robot 2 does not
+        # register this callback, so its local X button intentionally has no effect.
+        teleoperation_callbacks["RESET"] = request_synchronized_g1_reset
 
     # For hand tracking devices, add additional callbacks
     if args_cli.xr and not _is_g1_locomanip_task(args_cli.task):
@@ -318,7 +339,10 @@ def main() -> None:
     env.reset()
     teleop_interface.reset()
 
-    print("Teleoperation started. Press 'R' to reset the environment.")
+    if args_cli.task == G1_LOCOMANIP_TASK_ID and local_robot_id == 1:
+        print("Teleoperation started. Press robot-1 left-controller X to reset both Isaac Lab environments.")
+    else:
+        print("Teleoperation started. Press 'R' to reset the environment.")
 
     # simulate environment
     while simulation_app.is_running():
@@ -349,8 +373,22 @@ def main() -> None:
                 else:
                     env.sim.render()
 
+                remote_reset_id = (
+                    env_reset_sync_term.consume_remote_reset_request()
+                    if env_reset_sync_term is not None
+                    else None
+                )
+                if remote_reset_id is not None:
+                    if scene_state_sync_term is not None:
+                        scene_state_sync_term.expect_reset_id(remote_reset_id)
+                    should_reset_recording_instance = True
+                    print(f"Remote reset received ({remote_reset_id}) - Environment will reset now")
+
                 if should_reset_recording_instance:
                     env.reset()
+                    if scene_state_sync_term is not None and pending_local_reset_id is not None:
+                        scene_state_sync_term.set_publisher_reset_id(pending_local_reset_id)
+                    pending_local_reset_id = None
                     teleop_interface.reset()
                     should_reset_recording_instance = False
                     print("Environment reset complete")

@@ -22,6 +22,8 @@ INSTALL_REQUIRES = [
     "torch>=2.7",
     "torchvision>=0.14.1",  # ensure compatibility with torch 1.13.1
     "protobuf>=4.25.8,!=5.26.0",
+    "msgpack>=1.0",
+    "pyzmq>=25.0",
     # basic logger
     "tensorboard",
     "numba",

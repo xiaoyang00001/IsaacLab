@@ -178,6 +178,9 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     root_position_mode: str = "relative"
     """Root position mapping: ``relative`` applies MuJoCo displacement to the Isaac start pose; ``absolute`` copies it."""
 
+    root_orientation_mode: str = "relative"
+    """Root orientation mapping: ``relative`` applies MuJoCo rotation from the Isaac reset orientation."""
+
     root_debug_interval_s: float = 2.0
     """Seconds between root mirror status prints. Non-positive disables periodic root status prints."""
 

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+import isaaclab.utils.math as math_utils
 from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils.assets import retrieve_file_path
@@ -406,7 +407,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._root_pose = self._asset.data.default_root_state[:, :7].clone()
         self._root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
         self._source_root_pos0: torch.Tensor | None = None
+        self._source_root_quat0: torch.Tensor | None = None
         self._target_root_pos0 = self._root_pose[:, :3].clone()
+        self._target_root_quat0 = self._root_pose[:, 3:7].clone()
+        self._root_frame_alignment: torch.Tensor | None = None
         self._foot_min_z: float | None = None
         self._source_origin_xy: torch.Tensor | None = None
         self._source_root_is_moving = False
@@ -416,6 +420,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._warned_stale = False
         self._warned_root_missing = False
         self._warned_root_position_mode = False
+        self._warned_root_orientation_mode = False
         self._warned_gripper_unavailable = False
         self._printed_first_sample = False
         self._printed_mirror_config = False
@@ -475,7 +480,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     @property
     def action_dim(self) -> int:
-        return 4 if self.cfg.controller_gripper_enabled else 0
+        return 4 if self.cfg.enabled and self.cfg.controller_gripper_enabled else 0
 
     @property
     def raw_actions(self) -> torch.Tensor:
@@ -484,6 +489,30 @@ class MuJoCoG1MirrorAction(ActionTerm):
     @property
     def processed_actions(self) -> torch.Tensor:
         return self._processed_actions
+
+    def reset(self, env_ids=None) -> None:
+        """Clear GR00T baselines so the next packet starts from the Isaac default pose."""
+
+        # This mirror intentionally only supports a single environment. Resetting
+        # any environment therefore resets the complete network-to-Isaac mapping.
+        self._raw_actions.zero_()
+        self._processed_actions.zero_()
+        self._last_sample = None
+        self._root_pose = self._asset.data.default_root_state[:, :7].clone()
+        self._root_velocity.zero_()
+        self._source_root_pos0 = None
+        self._source_root_quat0 = None
+        self._target_root_pos0 = self._root_pose[:, :3].clone()
+        self._target_root_quat0 = self._root_pose[:, 3:7].clone()
+        self._root_frame_alignment = None
+        self._foot_min_z = None
+        self._source_origin_xy = None
+        self._source_root_is_moving = False
+        self._stance_slot = None
+        self._anchor_xy = None
+        self._warned_stale = False
+        self._warned_root_missing = False
+        self._no_packet_start_time = time.monotonic()
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions = actions
@@ -495,6 +524,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._processed_actions = self._processed_actions + alpha * (target_actions - self._processed_actions)
 
     def apply_actions(self):
+        # PC2 is a scene-state follower. A disabled GR00T term must not hold the
+        # default pose or write actuator targets over the authoritative PC1 frame.
+        if not self.cfg.enabled:
+            return
         if not self._enabled or self._subscriber is None:
             self._hold_default_until_first_packet("mirror disabled or subscriber unavailable")
             self._apply_controller_gripper_targets()
@@ -727,15 +760,20 @@ class MuJoCoG1MirrorAction(ActionTerm):
             source_root_pos = torch.tensor(sample.root_pos_w, dtype=torch.float32, device=self.device).view(1, 3)
             self._root_pose[:, :3] = self._map_source_root_position(source_root_pos)
         if sample.root_quat_w is not None:
-            self._root_pose[:, 3:7] = torch.tensor(sample.root_quat_w, dtype=torch.float32, device=self.device)
+            source_root_quat = torch.tensor(
+                sample.root_quat_w, dtype=torch.float32, device=self.device
+            ).view(1, 4)
+            self._root_pose[:, 3:7] = self._map_source_root_orientation(source_root_quat)
         if sample.root_lin_vel_w is not None:
-            self._root_velocity[:, :3] = torch.tensor(
+            source_linear_velocity = torch.tensor(
                 sample.root_lin_vel_w, dtype=torch.float32, device=self.device
             ).view(1, 3)
+            self._root_velocity[:, :3] = self._map_source_root_vector(source_linear_velocity)
         if sample.root_ang_vel_w is not None:
-            self._root_velocity[:, 3:6] = torch.tensor(
+            source_angular_velocity = torch.tensor(
                 sample.root_ang_vel_w, dtype=torch.float32, device=self.device
             ).view(1, 3)
+            self._root_velocity[:, 3:6] = self._map_source_root_vector(source_angular_velocity)
 
         self._source_root_is_moving |= self._detect_source_root_motion(self._root_pose)
         if not self._write_root_state:
@@ -750,7 +788,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if self._source_root_pos0 is None:
                 self._source_root_pos0 = source_root_pos.clone()
                 self._target_root_pos0 = self._root_pose[:, :3].clone()
-            return self._target_root_pos0 + (source_root_pos - self._source_root_pos0)
+            source_delta = source_root_pos - self._source_root_pos0
+            if self._root_frame_alignment is not None:
+                source_delta = math_utils.quat_apply(self._root_frame_alignment, source_delta)
+            return self._target_root_pos0 + source_delta
         if mode in {"absolute", "source"}:
             return source_root_pos
         if not self._warned_root_position_mode:
@@ -763,6 +804,44 @@ class MuJoCoG1MirrorAction(ActionTerm):
             self._source_root_pos0 = source_root_pos.clone()
             self._target_root_pos0 = self._root_pose[:, :3].clone()
         return self._target_root_pos0 + (source_root_pos - self._source_root_pos0)
+
+    def _map_source_root_orientation(self, source_root_quat: torch.Tensor) -> torch.Tensor:
+        """Map the GR00T root orientation into the robot's Isaac reset frame."""
+
+        mode = str(self.cfg.root_orientation_mode).lower()
+        if mode in {"relative", "delta"}:
+            if self._source_root_quat0 is None:
+                self._source_root_quat0 = source_root_quat.clone()
+                self._target_root_quat0 = self._root_pose[:, 3:7].clone()
+                self._root_frame_alignment = math_utils.quat_mul(
+                    self._target_root_quat0,
+                    math_utils.quat_inv(self._source_root_quat0),
+                )
+            return math_utils.quat_mul(self._root_frame_alignment, source_root_quat)
+        if mode in {"absolute", "source"}:
+            return source_root_quat
+        if not self._warned_root_orientation_mode:
+            print(
+                f"[WARN] MuJoCo G1 mirror unknown root_orientation_mode={self.cfg.root_orientation_mode!r}; "
+                "using relative root orientation."
+            )
+            self._warned_root_orientation_mode = True
+        if self._source_root_quat0 is None:
+            self._source_root_quat0 = source_root_quat.clone()
+            self._target_root_quat0 = self._root_pose[:, 3:7].clone()
+            self._root_frame_alignment = math_utils.quat_mul(
+                self._target_root_quat0,
+                math_utils.quat_inv(self._source_root_quat0),
+            )
+        return math_utils.quat_mul(self._root_frame_alignment, source_root_quat)
+
+    def _map_source_root_vector(self, source_vector: torch.Tensor) -> torch.Tensor:
+        """Rotate source world-frame velocity into the robot's Isaac reset frame."""
+
+        if str(self.cfg.root_orientation_mode).lower() in {"relative", "delta"}:
+            if self._root_frame_alignment is not None:
+                return math_utils.quat_apply(self._root_frame_alignment, source_vector)
+        return source_vector
 
     def _warn_missing_root_once(self) -> None:
         if self._warned_root_missing:
