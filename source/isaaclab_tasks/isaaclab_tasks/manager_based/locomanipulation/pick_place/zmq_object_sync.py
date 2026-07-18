@@ -350,7 +350,7 @@ class ZmqSceneStateSyncActionCfg(ActionTermCfg):
     robot_names: tuple[str, str] = ("robot_1", "robot_2")
     """Fixed articulation names included in every frame."""
 
-    object_names: tuple[str, str, str] = ("small_box_1", "small_box_2", "long_box")
+    object_names: tuple[str, ...] = ("small_box_1", "small_box_2", "long_box")
     """Fixed rigid-object names included in every frame."""
 
     send_hwm: int = 3

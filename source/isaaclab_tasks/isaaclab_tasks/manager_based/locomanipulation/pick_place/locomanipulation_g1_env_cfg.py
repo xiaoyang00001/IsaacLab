@@ -233,7 +233,11 @@ _GR00T_RECEIVER_ENABLED = _SCENE_SYNC_ROLE != "subscriber"
 
 
 def _scene_state_sync_cfg() -> ZmqSceneStateSyncActionCfg:
-    """Create the fixed dual-G1/three-box scene-state synchronization action."""
+    """Create the fixed dual-G1 scene-state synchronization action.
+
+    Synced rigid objects: the pushcart boxes (cart_box1/2 + test_box) plus the
+    second trailer with its two plastic totes (pushcart_2 + cart2_tote1/2).
+    """
 
     return ZmqSceneStateSyncActionCfg(
         asset_name="robot_1",
@@ -241,7 +245,7 @@ def _scene_state_sync_cfg() -> ZmqSceneStateSyncActionCfg:
         endpoint=_SCENE_SYNC_ENDPOINT,
         topic=str(_runtime_cfg_value("ISAACLAB_SCENE_SYNC_TOPIC", "scene_state")),
         robot_names=("robot_1", "robot_2"),
-        object_names=("cart_box1", "cart_box2", "test_box"),
+        object_names=("cart_box1", "cart_box2", "test_box", "pushcart_2", "cart2_tote1", "cart2_tote2"),
         send_hwm=_runtime_cfg_int("ISAACLAB_SCENE_SYNC_SEND_HWM", 3),
         receive_hwm=_runtime_cfg_int("ISAACLAB_SCENE_SYNC_RECEIVE_HWM", 3),
         stale_timeout_s=_runtime_cfg_float("ISAACLAB_SCENE_SYNC_STALE_TIMEOUT_S", 0.5),
@@ -830,6 +834,28 @@ def _make_pushcart_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     )
 
 
+def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
+    """Create the plastic tote (Tote_B04) with rigid physics available at spawn time.
+
+    When ``syncable`` is set, the tote switches to kinematic + no-gravity on the ZMQ
+    subscriber side so it purely follows the publisher's synced pose instead of
+    fighting local physics (same pattern as the cart boxes).
+    """
+
+    is_sync_subscriber = syncable and ZMQ_SYNC_ROLE == "subscriber"
+    return UsdFileCfg(
+        usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
+        scale=(0.01, 0.01, 0.01),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            rigid_body_enabled=True,
+            kinematic_enabled=is_sync_subscriber,
+            disable_gravity=is_sync_subscriber,
+            solver_position_iteration_count=8,
+            max_depenetration_velocity=5.0,
+        ),
+    )
+
+
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """Warehouse 双 G1 场景：PC1 为物理权威，PC2 可经 scene_state 同步镜像（含三小箱任务）。"""
@@ -915,29 +941,25 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         ),
     #     ),
     # )
+    # 第二台拖车 + 两个塑料筐（原 USD /Root/MyCart2 + MyCart2_Tote1/2 组合），
+    # 整组从原位 (-8.947, 20.144) 挪到现有推车工作位旁边（x 向左偏 1.4 m，同排同朝向）。
+    # 静态视觉件 /Root/MyCart2 已在背景 USD 中停用（备份 .bak4），由本物理拖车替代。
+    # 三件都进 scene_state 同步（订阅端切 kinematic 跟随发布端位姿）。
+    pushcart_2 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Pushcart2",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=_make_pushcart_spawn_cfg(syncable=True),
+    )
+    # 拖车顶面 z≈0.3774，筐原点在底面、高 0.30 → 逐层 +2 mm 间隙避免初始穿透
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-8.94726, 20.14363, 0.3774], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=8,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.3794], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
     cart2_tote2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-8.94726, 20.14363, 0.6774], rot=[0.0, 0.0, 0.0, 1.0]),
-        spawn=UsdFileCfg(
-            usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
-            scale=(0.01, 0.01, 0.01),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=8,
-                max_depenetration_velocity=5.0,
-            ),
-        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.6814], rot=[0.0, 0.0, 0.0, 1.0]),
+        spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
 
     # 本地仓库背景
@@ -1118,7 +1140,8 @@ class ActionsCfg:
     # Body/root streams are mirrored independently for both robot IDs.
     mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
     mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
-    # 晓阳0007：双机固定场景同步（双 G1 + 三小箱单帧 scene_state）、PC1→PC2 复位事件、装箱成功检测复位。
+    # 晓阳0007：双机固定场景同步（双 G1 + 推车三箱 + 第二拖车两塑料筐，单帧 scene_state）、
+    # PC1→PC2 复位事件、装箱成功检测复位。
     scene_state_sync = _scene_state_sync_cfg()
     env_reset_sync = _env_reset_sync_cfg()
 
