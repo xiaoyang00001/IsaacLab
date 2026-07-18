@@ -899,21 +899,22 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # ------------------------------------------------------------------
     pushcart = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart",
-        # 对齐 ConveyorBelt（场景位置 y=14.39363，绕 Z 90°），再叠加 +90°Z = 180°Z 总旋转
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
+        # 对齐 ConveyorBelt（场景位置 y=14.39363，绕 Z 90°），再叠加 +90°Z = 180°Z 总旋转。
+        # 与塑料筐拖车组对调后在外侧位 x=-6.8。
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         # syncable=True：跨机 ZMQ 同步推车（订阅端切换为 kinematic，跟随发布端位姿）
         spawn=_make_pushcart_spawn_cfg(syncable=True),
     )
     cart_box1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox1",
         # 推车顶面 z≈0.377，箱子半高 0.0745 → 中心 z
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.45], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.45], rot=[0.0, 0.0, 0.0, 1.0]),
         # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
         spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
     cart_box2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/CartBox2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.60], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.60], rot=[0.0, 0.0, 0.0, 1.0]),
         # syncable=True：跨机 ZMQ 同步该箱子（订阅端切换为 kinematic，跟随发布端位姿）
         spawn=_make_graspable_cart_box_spawn_cfg(syncable=True),
     )
@@ -942,23 +943,23 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # 第二台拖车 + 两个塑料筐（原 USD /Root/MyCart2 + MyCart2_Tote1/2 组合），
-    # 整组从原位 (-8.947, 20.144) 挪到现有推车工作位旁边（x 向左偏 1.4 m，同排同朝向）。
+    # 与纸箱推车组位置对调后占工作位 x=-5.4（同排同朝向）。
     # 静态视觉件 /Root/MyCart2 已在背景 USD 中停用（备份 .bak4），由本物理拖车替代。
     # 三件都进 scene_state 同步（订阅端切 kinematic 跟随发布端位姿）。
     pushcart_2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_pushcart_spawn_cfg(syncable=True),
     )
     # 拖车顶面 z≈0.3774，筐原点在底面、高 0.30 → 逐层 +2 mm 间隙避免初始穿透
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.3794], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.3794], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
     cart2_tote2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-6.8, 19.39363, 0.6814], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.6814], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
 
@@ -983,8 +984,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/TestBox",
         # 属性对齐 晓阳全身005 a61191017 的 long_box（尺寸/质量/材质/碰撞参数），
         # 仅位置沿用本场景原 test_box 摆放（cart_box4 上方，x/y 对齐、rot 沿用推车朝向）。
+        # x 随纸箱推车组对调到 -6.8。
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[-5.4, 19.39363, 1.095],
+            pos=[-6.8, 19.39363, 1.095],
             rot=[0.0, 0.0, 0.0, 1.0],
         ),
         spawn=sim_utils.CuboidCfg(
