@@ -22,6 +22,7 @@ from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.io.torchscript import load_torchscript_model
 
 if TYPE_CHECKING:
+    from isaaclab.controllers.pink_ik import PinkIKController
     from isaaclab.envs import ManagerBasedEnv
 
     from .configs.action_cfg import AgileBasedLowerBodyActionCfg
@@ -378,6 +379,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._enabled = cfg.enabled and self.num_envs == 1
 
         self._body_mujoco_ids, self._body_isaac_ids = self._build_body_joint_ids(cfg.mirror_joint_names)
+        if cfg.wrist_ik_enabled:
+            # The local wrist IK solve owns these joints' targets; drop them from the mirrored set
+            # entirely so the mirror and the IK solve never write competing targets in the same step.
+            self._body_mujoco_ids, self._body_isaac_ids = self._exclude_wrist_from_mirror(
+                self._body_mujoco_ids, self._body_isaac_ids, cfg.wrist_ik_joint_names
+            )
         (
             self._body_state_write_local_ids,
             self._body_state_write_isaac_ids,
@@ -389,6 +396,13 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
         self._hand_tracking_signs = self._build_hand_tracking_signs()
+
+        self._wrist_ik_controller: PinkIKController | None = None
+        self._wrist_isaac_ids: list[int] = []
+        self._wrist_body_ids: list[int] = []
+        self._pelvis_body_id: int | None = None
+        if cfg.wrist_ik_enabled:
+            self._initialize_wrist_ik()
 
         self._transport = str(cfg.transport).lower()
         self._locomotion_sync_mode = str(cfg.locomotion_sync_mode).strip().lower()
@@ -1022,8 +1036,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if self._hand_tracking_is_stale():
             return
 
-        # Drop the leading wrist poses: the arms keep following the MuJoCo mirror, so only the
-        # trailing hand-joint block is consumed. It is already ordered to match _all_hand_ids.
+        self._apply_wrist_ik()
+
+        # Drop the leading wrist poses: shoulder/elbow keep following the MuJoCo mirror (wrist too,
+        # unless wrist_ik_enabled just solved it above), so only the trailing hand-joint block is
+        # consumed here. It is already ordered to match _all_hand_ids.
         target = self._processed_actions[:, _HAND_TRACKING_WRIST_DIM:]
         if self._hand_tracking_signs is not None:
             target = target * self._hand_tracking_signs
@@ -1446,6 +1463,125 @@ class MuJoCoG1MirrorAction(ActionTerm):
     def _build_body_ids(self, body_names: list[str]) -> list[int]:
         body_name_to_id = {name: idx for idx, name in enumerate(self._asset.body_names)}
         return [body_name_to_id[name] for name in body_names if name in body_name_to_id]
+
+    def _build_joint_ids_by_pattern(self, patterns: list[str]) -> list[int]:
+        compiled = [re.compile(pattern) for pattern in patterns]
+        return [idx for idx, name in enumerate(self._asset.joint_names) if any(p.fullmatch(name) for p in compiled)]
+
+    def _exclude_wrist_from_mirror(
+        self, mujoco_ids: list[int], isaac_ids: list[int], wrist_patterns: list[str]
+    ) -> tuple[list[int], list[int]]:
+        compiled = [re.compile(pattern) for pattern in wrist_patterns]
+        kept_mujoco: list[int] = []
+        kept_isaac: list[int] = []
+        for mujoco_id, isaac_id in zip(mujoco_ids, isaac_ids):
+            name = self._asset.joint_names[isaac_id]
+            if any(pattern.fullmatch(name) for pattern in compiled):
+                continue
+            kept_mujoco.append(mujoco_id)
+            kept_isaac.append(isaac_id)
+        return kept_mujoco, kept_isaac
+
+    def _initialize_wrist_ik(self) -> None:
+        """Build the local Pink IK controller that solves wrist orientation only.
+
+        Lazily imports pink/pinocchio so environments that never set ``wrist_ik_enabled`` are
+        unaffected if those optional dependencies are unavailable. Any failure here disables the
+        feature with a warning instead of raising, matching how the rest of this action term treats
+        optional transports (see the ZMQ/UDP subscriber setup in ``__init__``).
+        """
+        wrist_isaac_ids = self._build_joint_ids_by_pattern(self.cfg.wrist_ik_joint_names)
+        if not wrist_isaac_ids:
+            print("[WARN] Wrist IK disabled; wrist_ik_joint_names matched no joints.")
+            return
+        if not self.cfg.hand_tracking_enabled:
+            print(
+                "[WARN] Wrist IK disabled; it needs hand_tracking_enabled to source a tracked wrist "
+                "orientation."
+            )
+            return
+
+        try:
+            from isaaclab.controllers.pink_ik import PinkIKController
+        except Exception as exc:
+            print(f"[WARN] Wrist IK disabled; pink/pinocchio unavailable: {exc}")
+            return
+
+        pelvis_ids = self._build_body_ids(["pelvis"])
+        wrist_body_ids = self._build_body_ids(["left_wrist_yaw_link", "right_wrist_yaw_link"])
+        if not pelvis_ids or len(wrist_body_ids) != 2:
+            print("[WARN] Wrist IK disabled; pelvis/wrist_yaw_link bodies not found on this asset.")
+            return
+
+        controller_cfg = self.cfg.wrist_ik_controller.copy()
+        controller_cfg.joint_names = [self._asset.joint_names[i] for i in wrist_isaac_ids]
+        controller_cfg.all_joint_names = list(self._asset.joint_names)
+
+        robot_cfg = getattr(self._env.scene.cfg, self.cfg.asset_name)
+        try:
+            self._wrist_ik_controller = PinkIKController(
+                cfg=controller_cfg,
+                robot_cfg=robot_cfg,
+                device=self.device,
+                controlled_joint_indices=wrist_isaac_ids,
+            )
+        except Exception as exc:
+            print(f"[WARN] Wrist IK disabled; controller init failed: {exc}")
+            return
+
+        self._wrist_isaac_ids = wrist_isaac_ids
+        self._pelvis_body_id = pelvis_ids[0]
+        self._wrist_body_ids = wrist_body_ids
+        print(f"[INFO] Wrist IK enabled for joints: {controller_cfg.joint_names}")
+
+    def _apply_wrist_ik(self) -> None:
+        """Drive wrist orientation locally via Pink IK; shoulder/elbow keep following the mirror.
+
+        Only orientation is tracked (``position_cost=0`` on the controller's frame tasks): three
+        wrist joints cannot reach an arbitrary wrist *position* on their own, that still comes from
+        the mirrored shoulder/elbow chain, which also supplies the live forward-kinematics base this
+        solve reads through ``PinkIKController.compute``'s full current joint state. The task's
+        position target is set to the wrist's own current position, so it always reports zero
+        position error regardless of the unused cost weight.
+
+        Must be called after :meth:`_hand_tracking_is_stale` has already run for this step (from
+        ``_apply_hand_tracking_targets``) so tracking staleness is only evaluated once per step.
+        """
+        if self._wrist_ik_controller is None or not self._wrist_isaac_ids:
+            return
+
+        import pinocchio as pin
+
+        wrist_pose = self._raw_actions[:, :_HAND_TRACKING_WRIST_DIM]
+        target_quats = (
+            torch.nn.functional.normalize(wrist_pose[:, 3:7], dim=-1),
+            torch.nn.functional.normalize(wrist_pose[:, 10:14], dim=-1),
+        )
+
+        pelvis_pose_w = self._asset.data.body_link_state_w[:, self._pelvis_body_id, :7]
+        pelvis_pos = pelvis_pose_w[:, :3] - self._env.scene.env_origins
+        pelvis_pose = math_utils.make_pose(pelvis_pos, math_utils.matrix_from_quat(pelvis_pose_w[:, 3:7]))
+        pelvis_pose_inv = math_utils.pose_inv(pelvis_pose)
+
+        for wrist_body_id, target_quat, task in zip(
+            self._wrist_body_ids, target_quats, self._wrist_ik_controller.cfg.variable_input_tasks
+        ):
+            current_pos_w = self._asset.data.body_link_state_w[:, wrist_body_id, :3] - self._env.scene.env_origins
+            target_pose_w = math_utils.make_pose(current_pos_w, math_utils.matrix_from_quat(target_quat))
+            local_pose = math_utils.pose_in_A_to_pose_in_B(target_pose_w, pelvis_pose_inv)
+            pos, rot = math_utils.unmake_pose(local_pose)
+            task.set_target(pin.SE3(rot[0].cpu().numpy().astype(np.float64), pos[0].cpu().numpy().astype(np.float64)))
+
+        current_joint_pos = self._asset.data.joint_pos.cpu().numpy()[0]
+        target = self._wrist_ik_controller.compute(current_joint_pos, self._env.sim.get_physics_dt())
+        target = target.unsqueeze(0).to(self.device)
+        target = _limit_joint_position_delta(
+            self._asset.data.joint_pos[:, self._wrist_isaac_ids],
+            target,
+            float(self.cfg.wrist_ik_target_max_delta),
+        )
+        self._asset.set_joint_position_target(target, joint_ids=self._wrist_isaac_ids)
+        self._asset.set_joint_velocity_target(torch.zeros_like(target), joint_ids=self._wrist_isaac_ids)
 
     def _detect_source_root_motion(self, root_pose: torch.Tensor) -> bool:
         source_xy = root_pose[0, :2].detach().clone()

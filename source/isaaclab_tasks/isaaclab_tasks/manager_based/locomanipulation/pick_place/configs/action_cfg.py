@@ -5,10 +5,12 @@
 
 from dataclasses import MISSING
 
+from isaaclab.controllers.pink_ik.pink_ik_cfg import PinkIKControllerCfg
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
 from ..mdp.actions import AgileBasedLowerBodyAction, G1GripperSyncAction, MuJoCoG1MirrorAction
+from .pink_controller_cfg import G1_WRIST_IK_CONTROLLER_CFG
 
 
 @configclass
@@ -248,11 +250,13 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     """Whether the action consumes OpenXR hand-tracking retargeter output for the G1 hands.
 
     When enabled, the action dimension is 28 and matches the ``G1TriHandUpperBodyRetargeter``
-    output layout: ``[left_wrist_pose(7), right_wrist_pose(7), hand_joints(14)]``. Only the
-    trailing 14 hand-joint values are consumed -- the wrist poses are ignored because the arms
-    keep following the MuJoCo mirror. Those 14 values are ordered as
-    ``LEFT_HAND_JOINT_NAMES + RIGHT_HAND_JOINT_NAMES``, which matches ``_all_hand_ids``, so the
-    retargeter output maps onto the hand joints without any reordering.
+    output layout: ``[left_wrist_pose(7), right_wrist_pose(7), hand_joints(14)]``. Normally only the
+    trailing 14 hand-joint values are consumed -- the leading wrist poses are ignored because the
+    arms keep following the MuJoCo mirror. If ``wrist_ik_enabled`` is also set, the wrist-pose block
+    stops being ignored: its orientation drives a local Pink IK solve for the wrist joints instead.
+    Those 14 hand-joint values are ordered as ``LEFT_HAND_JOINT_NAMES + RIGHT_HAND_JOINT_NAMES``,
+    which matches ``_all_hand_ids``, so the retargeter output maps onto the hand joints without any
+    reordering.
 
     This takes precedence over both ``mirror_hands`` and ``controller_gripper_enabled``.
     """
@@ -304,6 +308,33 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
 
     hand_tracking_debug_interval_s: float = 0.0
     """Seconds between hand-tracking debug prints. Non-positive disables periodic prints."""
+
+    wrist_ik_enabled: bool = False
+    """Whether wrist orientation is solved locally with Pink IK instead of following the MuJoCo mirror.
+
+    Shoulder and elbow keep following the mirror either way; this only takes over the three wrist
+    joints (roll/pitch/yaw) per arm and drives them toward the wrist orientation carried in the
+    hand-tracking retargeter's output (see ``HAND_TRACKING_ACTION_DIM``'s leading wrist-pose block).
+    Requires ``hand_tracking_enabled`` -- that is the only source of a tracked wrist orientation.
+    """
+
+    wrist_ik_controller: PinkIKControllerCfg = G1_WRIST_IK_CONTROLLER_CFG
+    """Pink IK controller configuration used when ``wrist_ik_enabled`` is true.
+
+    ``urdf_path`` is left for the environment config to fill in with ``retrieve_file_path`` (matching
+    :data:`G1_UPPER_BODY_IK_ACTION_CFG`'s setup) since it involves Nucleus/network I/O that should not
+    run at import time.
+    """
+
+    wrist_ik_joint_names: list[str] = [".*_wrist_.*_joint"]
+    """Regex list of wrist joints solved by :attr:`wrist_ik_controller` instead of the mirror.
+
+    These are excluded from the mirrored joint set entirely (not just from the hard-state-write
+    subset) so the mirror and the local IK solve never fight over the same actuator target.
+    """
+
+    wrist_ik_target_max_delta: float = 0.20
+    """Maximum per-step wrist-IK target change in radians. Non-positive disables limiting."""
 
     foot_body_names: list[str] = ["left_ankle_roll_link", "right_ankle_roll_link"]
     """Foot bodies used for stance-root estimation and ground locking."""

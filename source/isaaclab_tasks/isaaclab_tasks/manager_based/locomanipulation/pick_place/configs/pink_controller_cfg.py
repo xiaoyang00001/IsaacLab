@@ -73,6 +73,47 @@ manipulation tasks.
 
 
 ##
+# Pink IK Controller Configuration for G1 -- wrist orientation only
+##
+
+G1_WRIST_IK_CONTROLLER_CFG = PinkIKControllerCfg(
+    articulation_name="robot",
+    base_link_name="pelvis",
+    num_hand_joints=0,
+    show_ik_warnings=True,
+    fail_on_joint_limit_violation=False,
+    variable_input_tasks=[
+        LocalFrameTask(
+            "g1_29dof_with_hand_rev_1_0_left_wrist_yaw_link",
+            base_link_frame_name="g1_29dof_with_hand_rev_1_0_pelvis",
+            position_cost=0.0,  # orientation-only: 3 wrist joints cannot reach an arbitrary position
+            orientation_cost=2.0,  # [cost] / [rad]
+            lm_damping=10,  # dampening for solver for step jumps
+            gain=0.5,
+        ),
+        LocalFrameTask(
+            "g1_29dof_with_hand_rev_1_0_right_wrist_yaw_link",
+            base_link_frame_name="g1_29dof_with_hand_rev_1_0_pelvis",
+            position_cost=0.0,
+            orientation_cost=2.0,
+            lm_damping=10,
+            gain=0.5,
+        ),
+    ],
+    fixed_input_tasks=[],
+)
+"""Wrist-only Pink IK controller for G1.
+
+Unlike :data:`G1_UPPER_BODY_IK_CONTROLLER_CFG`, this only optimizes the three wrist joints
+(roll/pitch/yaw) per arm. Shoulder/elbow are assumed to be driven by something else -- the MuJoCo
+mirror, in the locomanipulation task -- and enter the solve only as the live forward-kinematics base
+the wrist chain hangs off of (see ``PinkKinematicsConfiguration``'s controlled/full model split).
+Position is left untracked (``position_cost=0``) because a 3-DoF wrist cannot reach an arbitrary
+wrist position on its own; only the mirrored shoulder/elbow chain can do that.
+"""
+
+
+##
 # Pink IK Action Configuration for G1
 ##
 

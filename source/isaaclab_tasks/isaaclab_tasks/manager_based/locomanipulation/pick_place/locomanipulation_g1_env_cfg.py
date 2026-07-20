@@ -1158,6 +1158,8 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         hand_tracking_scale=_isaac_robot_cfg_float(robot_id, "HAND_TRACKING_SCALE", 1.0),
         hand_tracking_stale_frames=_isaac_robot_cfg_int(robot_id, "HAND_TRACKING_STALE_FRAMES", 0),
         hand_tracking_joint_signs=_isaac_robot_cfg(robot_id, "HAND_TRACKING_JOINT_SIGNS", ""),
+        wrist_ik_enabled=_isaac_robot_cfg_bool(robot_id, "WRIST_IK_ENABLED", False),
+        wrist_ik_target_max_delta=_isaac_robot_cfg_float(robot_id, "WRIST_IK_TARGET_MAX_DELTA", 0.20),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
         controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
         controller_gripper_thumb_1_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_1_ANGLE", 1.1),
@@ -1331,6 +1333,14 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                 ),
             }
         )
+
+        wrist_ik_urdf = (
+            f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/"
+            "g1_29dof_with_hand_only_kinematics.urdf"
+        )
+        for term in (self.actions.mujoco_g1_mirror_1, self.actions.mujoco_g1_mirror_2):
+            if term.wrist_ik_enabled:
+                term.wrist_ik_controller.urdf_path = retrieve_file_path(wrist_ik_urdf)
 
         self._validate_teleop_action_width()
 
