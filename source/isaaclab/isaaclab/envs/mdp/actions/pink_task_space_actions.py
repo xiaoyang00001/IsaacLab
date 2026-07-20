@@ -204,7 +204,10 @@ class PinkInverseKinematicsAction(ActionTerm):
 
         # Process controlled frame poses (pass original actions, no clone needed)
         controlled_frame_poses = self._extract_controlled_frame_poses(actions)
-        transformed_poses = self._transform_poses_to_base_link_frame(controlled_frame_poses)
+        if self.cfg.input_poses_are_base_relative:
+            transformed_poses = self._extract_pose_components(controlled_frame_poses)
+        else:
+            transformed_poses = self._transform_poses_to_base_link_frame(controlled_frame_poses)
 
         # Set targets for all tasks
         self._set_task_targets(transformed_poses)
@@ -278,6 +281,11 @@ class PinkInverseKinematicsAction(ActionTerm):
         positions, rotation_matrices = math_utils.unmake_pose(transformed_poses)
 
         return positions, rotation_matrices
+
+    def _extract_pose_components(self, poses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Extract already base-relative pose components without another frame transform."""
+
+        return math_utils.unmake_pose(poses)
 
     def _set_task_targets(self, transformed_poses: tuple[torch.Tensor, torch.Tensor]) -> None:
         """Set targets for all tasks across all environments.

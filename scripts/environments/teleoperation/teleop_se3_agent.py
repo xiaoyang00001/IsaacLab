@@ -44,13 +44,17 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
 G1_LOCOMANIP_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-Abs-v0"
+G1_LOCOMANIP_UDP_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-UDP-Abs-v0"
 G1_LOCOMANIP_HYBRID_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-Hybrid-Abs-v0"
 G1_LOCOMANIP_TASK_ALIASES = {
     "Isaac-PickPlace-Locomanipulation-G1-Abs": G1_LOCOMANIP_TASK_ID,
     G1_LOCOMANIP_TASK_ID: G1_LOCOMANIP_TASK_ID,
+    "Isaac-PickPlace-Locomanipulation-G1-UDP-Abs": G1_LOCOMANIP_UDP_TASK_ID,
+    G1_LOCOMANIP_UDP_TASK_ID: G1_LOCOMANIP_UDP_TASK_ID,
     "Isaac-PickPlace-Locomanipulation-G1-Hybrid-Abs": G1_LOCOMANIP_HYBRID_TASK_ID,
     G1_LOCOMANIP_HYBRID_TASK_ID: G1_LOCOMANIP_HYBRID_TASK_ID,
 }
+G1_LOCOMANIP_TASK_IDS = {G1_LOCOMANIP_TASK_ID, G1_LOCOMANIP_UDP_TASK_ID, G1_LOCOMANIP_HYBRID_TASK_ID}
 G1_PINK_LOCOMANIP_TASK_IDS = {G1_LOCOMANIP_TASK_ID, G1_LOCOMANIP_HYBRID_TASK_ID}
 
 
@@ -61,7 +65,7 @@ def _cli_flag_present(flag: str) -> bool:
 args_cli.task = G1_LOCOMANIP_TASK_ALIASES.get(args_cli.task, args_cli.task)
 
 if (
-    args_cli.task in G1_PINK_LOCOMANIP_TASK_IDS
+    args_cli.task in G1_LOCOMANIP_TASK_IDS
     and not _cli_flag_present("--teleop_device")
     and args_cli.teleop_device == "keyboard"
 ):
@@ -102,8 +106,10 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.manager_based.manipulation.lift import mdp
 from isaaclab_tasks.utils import parse_env_cfg
 
-if args_cli.enable_pinocchio:
+if args_cli.task in G1_LOCOMANIP_TASK_IDS:
     import isaaclab_tasks.manager_based.locomanipulation.pick_place  # noqa: F401
+
+if args_cli.enable_pinocchio:
     import isaaclab_tasks.manager_based.manipulation.pick_place  # noqa: F401
 
 # import logger
@@ -161,9 +167,9 @@ def main() -> None:
     env_reset_sync_term = None
     scene_state_sync_term = None
     pending_local_reset_id = None
-    if args_cli.task == G1_LOCOMANIP_TASK_ID and "env_reset_sync" in env.action_manager.active_terms:
+    if args_cli.task == G1_LOCOMANIP_UDP_TASK_ID and "env_reset_sync" in env.action_manager.active_terms:
         env_reset_sync_term = env.action_manager.get_term("env_reset_sync")
-    if args_cli.task == G1_LOCOMANIP_TASK_ID and "scene_state_sync" in env.action_manager.active_terms:
+    if args_cli.task == G1_LOCOMANIP_UDP_TASK_ID and "scene_state_sync" in env.action_manager.active_terms:
         scene_state_sync_term = env.action_manager.get_term("scene_state_sync")
 
     # Callback handlers
@@ -220,7 +226,7 @@ def main() -> None:
         "START": start_teleoperation,
         "STOP": stop_teleoperation,
     }
-    if args_cli.task != G1_LOCOMANIP_TASK_ID:
+    if args_cli.task != G1_LOCOMANIP_UDP_TASK_ID:
         teleoperation_callbacks["RESET"] = reset_recording_instance
     elif local_robot_id == 1:
         # OpenXR maps RESET to the left controller X button. Robot 2 does not
@@ -228,7 +234,7 @@ def main() -> None:
         teleoperation_callbacks["RESET"] = request_synchronized_g1_reset
 
     # For hand tracking devices, add additional callbacks
-    if args_cli.xr and args_cli.task not in G1_PINK_LOCOMANIP_TASK_IDS:
+    if args_cli.xr and args_cli.task not in G1_LOCOMANIP_TASK_IDS:
         # Default to inactive for hand tracking
         teleoperation_active = False
     else:
@@ -295,7 +301,7 @@ def main() -> None:
     env.reset()
     teleop_interface.reset()
 
-    if args_cli.task == G1_LOCOMANIP_TASK_ID and local_robot_id == 1:
+    if args_cli.task == G1_LOCOMANIP_UDP_TASK_ID and local_robot_id == 1:
         print("Teleoperation started. Press robot-1 left-controller X to reset both Isaac Lab environments.")
     else:
         print("Teleoperation started. Press 'R' to reset the environment.")
@@ -315,7 +321,7 @@ def main() -> None:
                     # anchor/recenter path, but its device payload (often a dict
                     # when no retargeters are configured) is not an environment
                     # action. Let the mirror term consume UDP data internally.
-                    if args_cli.task == G1_LOCOMANIP_TASK_ID and env.action_space.shape[-1] == 0:
+                    if args_cli.task == G1_LOCOMANIP_UDP_TASK_ID and env.action_space.shape[-1] == 0:
                         actions = torch.zeros(
                             env.action_space.shape,
                             dtype=torch.float32,

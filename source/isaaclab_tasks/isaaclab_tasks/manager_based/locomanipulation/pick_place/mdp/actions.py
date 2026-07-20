@@ -125,6 +125,7 @@ class _MirrorSample:
     right_hand_pos: np.ndarray | None = None
     left_hand_vel: np.ndarray | None = None
     right_hand_vel: np.ndarray | None = None
+    wrist_pose_b: np.ndarray | None = None
     root_pos_w: np.ndarray | None = None
     root_quat_w: np.ndarray | None = None
     root_lin_vel_w: np.ndarray | None = None
@@ -133,6 +134,28 @@ class _MirrorSample:
     root_source: str = "none"
     root_fresh: bool = False
     fresh: bool = False
+
+
+_GROOT_WRIST_POSE_CACHE: dict[str, tuple[np.ndarray, float, str]] = {}
+
+
+def get_groot_wrist_pose(
+    cache_key: str = "robot", timeout_s: float = 0.5
+) -> tuple[np.ndarray | None, str]:
+    """Return the latest GR00T dual-wrist world pose published by a mirror action.
+
+    The returned array is ``[left_pos(3), left_quat_wxyz(4),
+    right_pos(3), right_quat_wxyz(4)]``. UDP/ZMQ sockets remain owned by the
+    mirror action so OpenXR retargeters never compete for the same packets.
+    """
+
+    cached = _GROOT_WRIST_POSE_CACHE.get(cache_key)
+    if cached is None:
+        return None, "missing"
+    wrist_pose, timestamp, source = cached
+    if timeout_s > 0.0 and (time.monotonic() - timestamp) > timeout_s:
+        return None, f"stale:{source}"
+    return wrist_pose.copy(), source
 
 
 def _normalize_quat_wxyz(quat: np.ndarray) -> np.ndarray:
@@ -556,6 +579,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             self._printed_first_sample = True
 
         source_root_applied = self._apply_source_root_state(sample)
+        self._publish_groot_wrist_pose(sample)
 
         joint_pos = self._asset.data.joint_pos.clone()
         joint_vel = self._asset.data.joint_vel.clone()
@@ -1076,6 +1100,20 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if sample.right_hand_vel is None:
                 sample.right_hand_vel = self._select_hand_dq(debug_msg, "right")
 
+        wrist_pose = self._first_array(
+            target_body_msg,
+            ("action.eef", "wrist_pose_target", "target_wrist_pose", "wrist_pose"),
+        )
+        if wrist_pose is None and debug_msg is not None and target_body_msg is not debug_msg:
+            wrist_pose = self._first_array(
+                debug_msg,
+                ("action.eef", "wrist_pose_target", "target_wrist_pose", "wrist_pose"),
+            )
+        if wrist_pose is not None and wrist_pose.size >= 14:
+            sample.wrist_pose_b = wrist_pose[:14].copy()
+        elif self._last_sample is not None:
+            sample.wrist_pose_b = self._last_sample.wrist_pose_b
+
         root_source_name = self._body_topic
         root_fresh = fresh
         if root_msg is not None:
@@ -1107,6 +1145,34 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if sample.joint_pos_state_mujoco is None and sample.joint_pos_target_mujoco is None:
             return None
         return sample
+
+    def _publish_groot_wrist_pose(self, sample: _MirrorSample) -> None:
+        """Convert GR00T pelvis-frame wrist targets to Isaac world poses."""
+
+        if sample.wrist_pose_b is None or sample.wrist_pose_b.size < 14:
+            return
+
+        wrist_pose = torch.tensor(sample.wrist_pose_b[:14], dtype=torch.float32, device=self.device).unsqueeze(0)
+        root_pos = self._root_pose[:, :3]
+        root_quat = self._root_pose[:, 3:7]
+        left_pos_w, left_quat_w = math_utils.combine_frame_transforms(
+            root_pos,
+            root_quat,
+            wrist_pose[:, :3],
+            wrist_pose[:, 3:7],
+        )
+        right_pos_w, right_quat_w = math_utils.combine_frame_transforms(
+            root_pos,
+            root_quat,
+            wrist_pose[:, 7:10],
+            wrist_pose[:, 10:14],
+        )
+        wrist_pose_w = torch.cat((left_pos_w, left_quat_w, right_pos_w, right_quat_w), dim=-1)
+        _GROOT_WRIST_POSE_CACHE[self.cfg.asset_name] = (
+            wrist_pose_w[0].detach().cpu().numpy().astype(np.float32, copy=True),
+            time.monotonic(),
+            self._body_topic,
+        )
 
     @staticmethod
     def _has_body_state(msg: dict[str, Any] | None) -> bool:

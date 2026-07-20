@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
@@ -25,6 +24,8 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync im
     ZmqEnvResetSyncActionCfg,
     ZmqSceneStateSyncActionCfg,
 )
+
+from isaaclab_assets.robots.unitree import G1_29DOF_CFG
 
 _ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -400,39 +401,6 @@ def _box_cfg(
 ##
 
 
-def _find_gr00t_g1_43dof_usd() -> str:
-    """Resolve the GR00T G1 43-DoF USD used by the sim2sim viewer."""
-
-    candidates = []
-    gr00t_root = _cfg_value("GR00T_WBC_ROOT")
-    if gr00t_root:
-        candidates.append(Path(gr00t_root).expanduser())
-    candidates.extend(
-        [
-            Path("F:/ISAACWholeBody/GR00T-WholeBodyControl"),
-            Path(__file__).resolve().parents[6] / "GR00T-WholeBodyControl",
-            Path.cwd() / "GR00T-WholeBodyControl",
-        ]
-    )
-    for root in candidates:
-        for usd_name in (
-            "g1_43dof_isaaclab_nomdl.usd",
-            "g1_43dof.usd",
-            "g1_43dof_isaaclab_no_material.usda",
-            "g1_43dof_isaaclab_nomdl.usda",
-            "g1_43dof_s3.usda",
-        ):
-            usd_path = root / "gear_sonic/data/robots/g1" / usd_name
-            if usd_path.exists():
-                return str(usd_path.resolve())
-    searched = "\n  ".join(str(path) for path in candidates)
-    raise FileNotFoundError(
-        "Could not locate GR00T G1 43-DoF USD. Set GR00T_WBC_ROOT in g1_udp_network.env "
-        "to the GR00T-WholeBodyControl path. "
-        f"Searched:\n  {searched}"
-    )
-
-
 G1_BODY_STATE_WRITE_JOINT_NAMES = [
     ".*_hip_.*_joint",
     ".*_knee_joint",
@@ -441,9 +409,15 @@ G1_BODY_STATE_WRITE_JOINT_NAMES = [
 ]
 """Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
-def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
-    if not _SCENE_PHYSICS_AUTHORITY:
-        return sim_utils.RigidBodyPropertiesCfg(
+
+def _g1_29dof_udp_cfg() -> ArticulationCfg:
+    """Adapt the official G1_29DOF_CFG for the local scene-sync authority role."""
+
+    if _SCENE_PHYSICS_AUTHORITY:
+        rigid_props = G1_29DOF_CFG.spawn.rigid_props
+        collision_props = G1_29DOF_CFG.spawn.collision_props
+    else:
+        rigid_props = sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=True,
             retain_accelerations=False,
             linear_damping=0.0,
@@ -452,175 +426,18 @@ def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
             max_angular_velocity=1000.0,
             max_depenetration_velocity=0.0,
         )
-    if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", True):
-        return None
-    return sim_utils.RigidBodyPropertiesCfg(
-        disable_gravity=False,
-        retain_accelerations=False,
-        linear_damping=0.0,
-        angular_damping=0.0,
-        max_linear_velocity=1000.0,
-        max_angular_velocity=1000.0,
-        max_depenetration_velocity=_cfg_float("ISAACLAB_G1_RIGID_MAX_DEPENETRATION_VELOCITY", 1.0),
+        collision_props = sim_utils.CollisionPropertiesCfg(collision_enabled=False)
+
+    return G1_29DOF_CFG.replace(
+        spawn=G1_29DOF_CFG.spawn.replace(
+            rigid_props=rigid_props,
+            collision_props=collision_props,
+        ),
+        init_state=G1_29DOF_CFG.init_state.replace(pos=(0.0, 0.0, 0.75)),
     )
 
 
-G1_43DOF_GR00T_CFG = ArticulationCfg(
-    prim_path="/World/envs/env_.*/Robot",
-    spawn=UsdFileCfg(
-        usd_path=_find_gr00t_g1_43dof_usd(),
-        activate_contact_sensors=False,
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
-        rigid_props=_g1_robot_rigid_props(),
-        collision_props=(
-            None
-            if _SCENE_PHYSICS_AUTHORITY
-            else sim_utils.CollisionPropertiesCfg(collision_enabled=False)
-        ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
-            fix_root_link=False,
-            solver_position_iteration_count=8,
-            solver_velocity_iteration_count=4,
-        ),
-    ),
-    init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.78),
-        rot=(0.7071, 0.0, 0.0, 0.7071),
-        joint_pos={
-            ".*_hip_pitch_joint": -0.10,
-            ".*_knee_joint": 0.30,
-            ".*_ankle_pitch_joint": -0.20,
-            "left_shoulder_pitch_joint": 0.0,
-            "right_shoulder_pitch_joint": 0.0,
-            "left_shoulder_roll_joint": 0.3,
-            "right_shoulder_roll_joint": -0.3,
-            "left_shoulder_yaw_joint": 0.0,
-            "right_shoulder_yaw_joint": 0.0,
-            "left_elbow_joint": 1.0,
-            "right_elbow_joint": 1.0,
-            "left_wrist_roll_joint": 0.0,
-            "right_wrist_roll_joint": 0.0,
-            "left_wrist_pitch_joint": 0.0,
-            "right_wrist_pitch_joint": 0.0,
-            "left_wrist_yaw_joint": 0.0,
-            "right_wrist_yaw_joint": 0.0,
-        },
-        joint_vel={".*": 0.0},
-    ),
-    soft_joint_pos_limit_factor=0.9,
-    actuators={
-        "legs": DCMotorCfg(
-            joint_names_expr=[
-                ".*_hip_yaw_joint",
-                ".*_hip_roll_joint",
-                ".*_hip_pitch_joint",
-                ".*_knee_joint",
-            ],
-            effort_limit={
-                ".*_hip_yaw_joint": 88.0,
-                ".*_hip_roll_joint": 88.0,
-                ".*_hip_pitch_joint": 88.0,
-                ".*_knee_joint": 139.0,
-            },
-            velocity_limit={
-                ".*_hip_yaw_joint": 32.0,
-                ".*_hip_roll_joint": 32.0,
-                ".*_hip_pitch_joint": 32.0,
-                ".*_knee_joint": 20.0,
-            },
-            stiffness={
-                ".*_hip_yaw_joint": 100.0,
-                ".*_hip_roll_joint": 100.0,
-                ".*_hip_pitch_joint": 100.0,
-                ".*_knee_joint": 200.0,
-            },
-            damping={
-                ".*_hip_yaw_joint": 2.5,
-                ".*_hip_roll_joint": 2.5,
-                ".*_hip_pitch_joint": 2.5,
-                ".*_knee_joint": 5.0,
-            },
-            armature={
-                ".*_hip_.*": 0.03,
-                ".*_knee_joint": 0.03,
-            },
-            saturation_effort=180.0,
-        ),
-        "feet": DCMotorCfg(
-            joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
-            stiffness={
-                ".*_ankle_pitch_joint": 20.0,
-                ".*_ankle_roll_joint": 20.0,
-            },
-            damping={
-                ".*_ankle_pitch_joint": 0.2,
-                ".*_ankle_roll_joint": 0.1,
-            },
-            effort_limit={
-                ".*_ankle_pitch_joint": 50.0,
-                ".*_ankle_roll_joint": 50.0,
-            },
-            velocity_limit={
-                ".*_ankle_pitch_joint": 37.0,
-                ".*_ankle_roll_joint": 37.0,
-            },
-            armature=0.03,
-            saturation_effort=80.0,
-        ),
-        "waist": ImplicitActuatorCfg(
-            joint_names_expr=["waist_.*_joint"],
-            effort_limit_sim={
-                "waist_yaw_joint": 88.0,
-                "waist_roll_joint": 50.0,
-                "waist_pitch_joint": 50.0,
-            },
-            velocity_limit_sim={
-                "waist_yaw_joint": 32.0,
-                "waist_roll_joint": 37.0,
-                "waist_pitch_joint": 37.0,
-            },
-            stiffness={
-                "waist_yaw_joint": 5000.0,
-                "waist_roll_joint": 5000.0,
-                "waist_pitch_joint": 5000.0,
-            },
-            damping={
-                "waist_yaw_joint": 5.0,
-                "waist_roll_joint": 5.0,
-                "waist_pitch_joint": 5.0,
-            },
-            armature=0.001,
-        ),
-        "arms": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_shoulder_pitch_joint",
-                ".*_shoulder_roll_joint",
-                ".*_shoulder_yaw_joint",
-                ".*_elbow_joint",
-                ".*_wrist_.*_joint",
-            ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_ARM_EFFORT_LIMIT", 60.0),
-            velocity_limit_sim=_cfg_float("ISAACLAB_G1_ARM_VELOCITY_LIMIT", 12.0),
-            stiffness=_cfg_float("ISAACLAB_G1_ARM_STIFFNESS", 700.0),
-            damping=_cfg_float("ISAACLAB_G1_ARM_DAMPING", 20.0),
-            armature=_cfg_float("ISAACLAB_G1_ARM_ARMATURE", 0.01),
-        ),
-        "hands": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_hand_index_.*",
-                ".*_hand_middle_.*",
-                ".*_hand_thumb_.*",
-            ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 25.0),
-            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 6.0),
-            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 80.0),
-            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 8.0),
-            armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.02),
-        ),
-    },
-)
-
+G1_29DOF_UDP_CFG = _g1_29dof_udp_cfg()
 
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
@@ -644,15 +461,15 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
     #     ),
     # )
-    # Two independent humanoids instantiated from the same GR00T G1 asset.
-    robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+    # Two independent humanoids instantiated from the official Isaac Lab G1 29-DoF asset.
+    robot_1: ArticulationCfg = G1_29DOF_UDP_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 0.0, 0.78)),
+        init_state=G1_29DOF_UDP_CFG.init_state.replace(pos=(0.0, 0.0, 0.75)),
     )
-    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+    robot_2: ArticulationCfg = G1_29DOF_UDP_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(0.0, 1.23134, 0.78),
+        init_state=G1_29DOF_UDP_CFG.init_state.replace(
+            pos=(0.0, 1.23134, 0.75),
             rot=(0.70710678, 0.0, 0.0, -0.70710678),
         ),
     )

@@ -35,6 +35,15 @@ class PinkInverseKinematicsActionCfg(ActionTermCfg):
     enable_gravity_compensation: bool = True
     """Whether to compensate for gravity in the Pink IK controller."""
 
+    input_poses_are_base_relative: bool = False
+    """Whether end-effector poses are already expressed in the configured base-link frame.
+
+    When false, the normal Pink action contract is preserved: incoming poses are
+    interpreted in the environment world frame and converted to the base-link
+    frame. Set this to true for sources such as GR00T VR 3-point targets that
+    are already calibrated relative to the robot root/pelvis.
+    """
+
     target_eef_link_names: dict[str, str] = MISSING
     """Dictionary mapping task names to controlled link names for the Pink IK controller.
 
