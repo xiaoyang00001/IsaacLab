@@ -1166,6 +1166,10 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
         controller_gripper_write_joint_state=_cfg_bool("ISAACLAB_G1_GRIPPER_WRITE_JOINT_STATE", False),
         controller_gripper_target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20),
+        # Was never wired up: the cfg field and its use in _print_gripper_debug both existed, but
+        # nothing read the env var, so the switch silently did nothing and the gripper debug line
+        # could never be printed.
+        controller_gripper_debug_interval_s=_isaac_robot_cfg_float(robot_id, "GRIPPER_DEBUG_INTERVAL_S", 0.0),
         ground_lock=_isaac_robot_cfg_bool(robot_id, "GROUND_LOCK", False),
     )
 
