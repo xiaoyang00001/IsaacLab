@@ -857,7 +857,8 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     is_sync_subscriber = syncable and ZMQ_SYNC_ROLE == "subscriber"
     return UsdFileCfg(
         usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
-        scale=(0.01, 0.01, 0.01),
+        # 原 0.01 → 0.6×0.4×0.3 m；缩小一半到 0.005 → 0.3×0.2×0.15 m（原点仍在筐底面）。
+        scale=(0.005, 0.005, 0.005),
         mass_props=sim_utils.MassPropertiesCfg(mass=_cfg_float("ISAACLAB_GRASP_OBJECT_MASS", 0.45)),
         rigid_props=(
             sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
@@ -957,24 +958,54 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         ),
     #     ),
     # )
-    # 第二台拖车 + 两个塑料筐（原 USD /Root/MyCart2 + MyCart2_Tote1/2 组合），
-    # 与纸箱推车组位置对调后占工作位 x=-5.4（同排同朝向）。
-    # 静态视觉件 /Root/MyCart2 已在背景 USD 中停用（备份 .bak4），由本物理拖车替代。
-    # 三件都进 scene_state 同步（订阅端切 kinematic 跟随发布端位姿）。
+    # 第二台拖车（原 USD /Root/MyCart2，静态视觉件已在背景 USD 中停用，备份 .bak4，由本物理拖车替代），
+    # 占工作位 x=-5.4。两个塑料筐已从车上挪到流水线滚轮面（见下方 cart2_tote1/2），此车现为空车。
+    # pushcart_2 + cart2_tote1/2 三件仍进 scene_state 同步（订阅端切 kinematic 跟随发布端位姿）。
     pushcart_2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart2",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_pushcart_spawn_cfg(syncable=True),
     )
-    # 拖车顶面 z≈0.3774，筐原点在底面、高 0.30 → 逐层 +2 mm 间隙避免初始穿透
+    # ------------------------------------------------------------------
+    # 流水线（背景 USD /Root/ConveyorBelt，NVIDIA ConveyorBelt_A08 ×3 段）本身只有
+    # 视觉、无物理——箱子放上去会直接穿落。这里补一块静态碰撞面让物体能停在滚轮面上。
+    #
+    # 用不可见 kinematic 碰撞板（同 PackingTable 的静态碰撞思路），顶面对齐滚轮顶
+    # z≈0.772（皮带贴花面 0.731、滚轮顶 0.772、侧护栏顶 1.169，物体落在滚轮上）。
+    # 覆盖滚轮可用宽度 x∈[-6.07,-5.17]（中心 -5.62，宽 0.90）与整条 y 跨度
+    # [10.19,18.22]（中心 14.205，长 8.03）。始终 kinematic，不随 scene_state 同步。
+    # 世界坐标由背景放置变换(pos=[-4.68,14.39363,0],rot=90°Z)换算自 USD 内几何。
+    # ------------------------------------------------------------------
+    # 顶面 0.772、板厚 0.04 → 中心 z = 0.772 - 0.02 = 0.752
+    conveyor_collider = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/ConveyorCollider",
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=[-5.62, 14.205, 0.752],
+            rot=[1.0, 0.0, 0.0, 0.0],
+        ),
+        spawn=sim_utils.CuboidCfg(
+            size=(0.90, 8.03, 0.04),
+            visible=False,  # 只提供碰撞，视觉沿用背景 USD 的流水线模型
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.003, rest_offset=0.0),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.8,
+                dynamic_friction=0.6,
+                restitution=0.0,
+            ),
+        ),
+    )
+    # 两个塑料筐从 pushcart_2 挪到流水线滚轮面上并排放置（缩小一半后 0.3×0.2×0.15 m）。
+    # 筐原点在底面，滚轮顶 z≈0.772 → base 抬到 0.775（+3 mm 间隙避免初始穿透）。
+    # 沿 y 走向前后错开 0.6 m，均在滚轮可用宽度内（x=-5.62）。
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.3794], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 13.9, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
     cart2_tote2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.6814], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 14.5, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
 
