@@ -972,8 +972,9 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #
     # 用不可见 kinematic 碰撞板（同 PackingTable 的静态碰撞思路），顶面对齐滚轮顶
     # z≈0.772（皮带贴花面 0.731、滚轮顶 0.772、侧护栏顶 1.169，物体落在滚轮上）。
-    # 覆盖滚轮可用宽度 x∈[-6.07,-5.17]（中心 -5.62，宽 0.90）与整条 y 跨度
+    # 覆盖滚轮可用宽度 x∈[-5.98,-5.26]（中心 -5.62，宽 0.72）与整条 y 跨度
     # [10.19,18.22]（中心 14.205，长 8.03）。始终 kinematic，不随 scene_state 同步。
+    # 宽度随视觉流水线缩窄 20% 同步（原 0.90→0.72，见 USD 三段 A08 的 scale.y=0.8）。
     # 世界坐标由背景放置变换(pos=[-4.68,14.39363,0],rot=90°Z)换算自 USD 内几何。
     # ------------------------------------------------------------------
     # 顶面 0.772、板厚 0.04 → 中心 z = 0.772 - 0.02 = 0.752
@@ -984,7 +985,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=sim_utils.CuboidCfg(
-            size=(0.90, 8.03, 0.04),
+            size=(0.72, 8.03, 0.04),
             visible=False,  # 只提供碰撞，视觉沿用背景 USD 的流水线模型
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.003, rest_offset=0.0),
