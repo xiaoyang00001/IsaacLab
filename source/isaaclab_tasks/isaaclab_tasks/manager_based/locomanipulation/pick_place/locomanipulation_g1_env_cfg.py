@@ -1018,10 +1018,10 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # 双机夹抬工位：跟随两塑料筐移到流水线旁，以两筐中心 (x≈-5.62, y=16.7) 为工位，
-    # 沿 X 轴左右两侧对称站位，面对面（robot_1 在 +X 侧 x=-4.75 朝 -X，robot_2 在 -X 侧 x=-6.05 朝 +X）。
-    # 注意：流水线(结构占 x[-6.19,-5.04])比原推车宽，robot_2(x=-6.05) 贴近流水线 -X 侧边缘，
-    # viewer 中需留意机身/腿是否蹭到机架侧护栏（背景机架仅视觉无碰撞，碰撞板在 x[-6.07,-5.17]）。
+    # 双机站位：跟随两塑料筐移到流水线旁 (y=16.7)，面对面（robot_1 在 +X 侧 x=-4.75 朝 -X，
+    # robot_2 在 -X 侧 x=-6.7 朝 +X）。
+    # 流水线(结构占 x[-6.19,-5.04])比原推车宽，robot_2 拉到 x=-6.7 越过流水线 -X 侧外缘避免重叠；
+    # 代价是离箱(x=-5.62)约 1.1 m 够不到，此侧为布局/展示站位（robot_1 侧 x=-4.75 仍贴近 +X 边缘）。
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
@@ -1042,7 +1042,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(-6.05, 16.7, 0.78),
+            pos=(-6.7, 16.7, 0.78),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
