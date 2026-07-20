@@ -225,6 +225,15 @@ if getattr(term, "_hand_adaptive_enabled", False):
         err_peak[0] = max(err_peak[0], float(term._ad_err.max()))
         dmin_seen[0] = min(dmin_seen[0], float(term._ad_delta.mean()))
 
+    def _tips():
+        p_t = robot.data.body_pos_w[0, thumb_ids[0]].clone()
+        p_i = robot.data.body_pos_w[0, idx_ids[0]].clone()
+        p_m = robot.data.body_pos_w[0, mid_ids[0]].clone()
+        return p_t, p_i, p_m
+
+    t0, i0, m0 = _tips()
+    print(f"  OPEN  thumb {[round(v,3) for v in t0.tolist()]} index {[round(v,3) for v in i0.tolist()]}"
+          f" mid {[round(v,3) for v in m0.tolist()]} | thumb-to-fingers {float((t0-(i0+m0)/2).norm()):.3f} m")
     start_q = robot.data.joint_pos[:, all_hand_ids].clone()
     for chunk in range(20):
         step_hold(30, cal_cb)
@@ -232,6 +241,12 @@ if getattr(term, "_hand_adaptive_enabled", False):
         if trav > 1.30:
             t_free0 = (chunk + 1) * 30
             break
+    t1, i1, m1 = _tips()
+    gap_closed = float((t1 - (i1 + m1) / 2).norm())
+    print(f"  CLOSED thumb {[round(v,3) for v in t1.tolist()]} index {[round(v,3) for v in i1.tolist()]}"
+          f" mid {[round(v,3) for v in m1.tolist()]} | thumb-to-fingers {gap_closed:.3f} m")
+    print(f"  => single-hand opposed-pinch capacity: an object thinner than ~{gap_closed:.3f} m"
+          f" placed at {[round(v,3) for v in ((t1+(i1+m1)/2)/2).tolist()]} could be pinched")
     print(f"  free close: reached full in {t_free0} steps ({(t_free0 or 600) * 0.005:.2f} s)"
           f" | err_f peak {err_peak[0]:.3f} | mean lead min {dmin_seen[0]:.3f} (DMAX 0.08)")
     hand_goal_raw[0] = torch.zeros_like(hand_goal_raw[0])

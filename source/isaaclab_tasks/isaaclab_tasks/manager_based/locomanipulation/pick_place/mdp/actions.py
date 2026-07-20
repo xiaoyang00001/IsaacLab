@@ -949,10 +949,19 @@ class MuJoCoG1MirrorAction(ActionTerm):
             mat_path = "/World/PhysicsMaterials/G1HandGripMaterial"
             stage = omni.usd.get_context().get_stage()
             if not stage.GetPrimAtPath(mat_path).IsValid():
+                # compliant contact turns the rigid palm-edge LINE contact into
+                # a conforming patch: nominal grip force actually translates
+                # into friction capacity (a 20 N opposed grip slipped off the
+                # box within 50 steps of any lift while rigid)
+                compliant_k = float(os.environ.get("ISAACLAB_G1_HAND_COMPLIANT_STIFFNESS", "5000.0"))
+                compliant_d = float(os.environ.get("ISAACLAB_G1_HAND_COMPLIANT_DAMPING", "50.0"))
                 mat_cfg = sim_utils.RigidBodyMaterialCfg(
                     static_friction=static,
                     dynamic_friction=dynamic,
                     friction_combine_mode="max",
+                    restitution=0.0,
+                    compliant_contact_stiffness=compliant_k,
+                    compliant_contact_damping=compliant_d,
                 )
                 mat_cfg.func(mat_path, mat_cfg)
             robot_root = self._asset.cfg.prim_path.replace("env_.*", "env_0")

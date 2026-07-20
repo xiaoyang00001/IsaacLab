@@ -476,39 +476,75 @@ report["phases"]["station_xy_err"] = _fmt(miss)
 # ---------------------------------------------------------------------------
 # Phase 6: torque-delta squeeze (no helper spring -- the box sits on its stack)
 # ---------------------------------------------------------------------------
-print("Phase 6: squeeze (box-response contact detection)")
-# Shoulder-torque deltas are unusable in this bent-over pose (posture torque
-# drift false-triggered at gap 0.506 and 0.422). Detect contact from the BOX
-# instead: the first palm touch nudges it sideways / tilts it slightly. That
-# signal is noise-free and self-calibrates the true contact gap for this pose.
+print("Phase 6: squeeze (contact-force + tilt closed loop)")
+# Closed-loop clamp using the hand ContactSensor and the box attitude:
+#   - growing tilt = the contact line sits above the box's belly and the
+#     down-slanted palms are prying it over -> crouch 1 cm more to bring the
+#     contact lower on the box face, then resume squeezing
+#   - both palms carrying force (opposed contact, forces cancel) = grip formed
 step_hold(150)
+try:
+    _hc = env.scene.sensors["hand_contact"]
+    _hc_names = _hc.body_names
+    _hc_l = [i for i, n in enumerate(_hc_names) if n.startswith("left")]
+    _hc_r = [i for i, n in enumerate(_hc_names) if n.startswith("right")]
+    print(f"  contact sensor online: {len(_hc_names)} hand bodies")
+except Exception as exc:
+    _hc = None
+    print(f"  [WARN] no hand contact sensor ({exc}); falling back to box-response only")
 box_y0 = float(box.data.root_pos_w[0, 1])
 box_quat0 = box.data.root_quat_w[0].clone()
 tries = 0
-contact_extra = 0
+grip_confirm = 0
+crouch_extra = 0.0
 tilt = 0.0
-while tries < 80:
-    dy = abs(float(box.data.root_pos_w[0, 1]) - box_y0)
-    qd = abs(float((box.data.root_quat_w[0] * box_quat0).sum()))
-    tilt = 2.0 * _math.degrees(_math.acos(min(1.0, qd)))
+f_l = f_r = 0.0
+while tries < 400:
+    qd_dot = abs(float((box.data.root_quat_w[0] * box_quat0).sum()))
+    tilt = 2.0 * _math.degrees(_math.acos(min(1.0, qd_dot)))
+    if _hc is not None:
+        fm = _hc.data.net_forces_w.norm(dim=-1)
+        f_l = float(fm[:, _hc_l].amax()) if _hc_l else 0.0
+        f_r = float(fm[:, _hc_r].amax()) if _hc_r else 0.0
     if tilt > 25.0:
         print(f"  ABORT: box tipped during squeeze (tilt {tilt:.0f} deg)")
         break
-    if dy > 0.006 or tilt > 2.0:
-        contact_extra += 1
-        if contact_extra >= 4:  # 4 increments past first touch = gentle preload
+    if tilt > 2.5 and crouch_extra < 0.06:
+        # prying detected: lower the contact line on the box, don't squeeze
+        root0[:, 2] -= 0.01
+        crouch_extra += 0.01
+        step_hold(60)
+        print(f"  tilt {tilt:.1f} deg -> crouch +{crouch_extra * 100:.0f} cm (contact line too high)")
+        continue
+    if min(f_l, f_r) > 2.0 and tilt < 3.0:
+        grip_confirm += 1
+        if grip_confirm >= 5:
+            print(f"  OPPOSED GRIP formed: F L{f_l:.1f} R{f_r:.1f} N, tilt {tilt:.1f} deg")
             break
+    else:
+        grip_confirm = 0
     if palm_gap() <= GAP_FLOOR_M:
+        print("  gap floor reached")
         break
-    arm_targets[0, jidx("left_shoulder_roll_joint")] += inward_l * 0.01
-    arm_targets[0, jidx("right_shoulder_roll_joint")] += inward_r * 0.01
-    step_hold(40)
+    # asymmetric advance (same physics as the finger compliance): a palm that
+    # already carries force STOPS advancing -- it waits for the other side, so
+    # the first touch cannot pry the box and forces stay in the gentle range
+    # instead of ramping to 345 N as the stiff arms wound up in run 1
+    step_l = 0.003 if f_l < 3.0 else 0.0
+    step_r = 0.003 if f_r < 3.0 else 0.0
+    if step_l == 0.0 and step_r == 0.0:
+        step_l = step_r = 0.0008  # both touching, creep to grip force together
+    arm_targets[0, jidx("left_shoulder_roll_joint")] += inward_l * step_l
+    arm_targets[0, jidx("right_shoulder_roll_joint")] += inward_r * step_r
+    step_hold(15)
     tries += 1
+    if tries % 25 == 0:
+        print(f"    [{tries:3d}] gap {palm_gap():.3f} | F L{f_l:.1f} R{f_r:.1f} N | tilt {tilt:.1f} deg")
 gap_stop = palm_gap()
-print(f"  squeeze stop: gap {gap_stop:.3f} m | box dy {abs(float(box.data.root_pos_w[0, 1]) - box_y0):.3f} m, tilt {tilt:.1f} deg ({tries} increments)")
+print(f"  squeeze stop: gap {gap_stop:.3f} m | F L{f_l:.1f} R{f_r:.1f} N | tilt {tilt:.1f} deg | extra crouch {crouch_extra * 100:.0f} cm ({tries} increments)")
 report["phases"]["squeeze"] = {"gap_stop_m": _fmt(gap_stop), "increments": tries,
-                              "box_dy_m": _fmt(abs(float(box.data.root_pos_w[0, 1]) - box_y0)),
-                              "box_tilt_deg": _fmt(tilt)}
+                              "force_LR_N": [_fmt(f_l), _fmt(f_r)],
+                              "box_tilt_deg": _fmt(tilt), "extra_crouch_m": _fmt(crouch_extra)}
 # grip established -- now curl the thumbs too, wrapping the hold
 finger_goal[0] = half_close
 step_hold(150)
@@ -518,16 +554,49 @@ print("  thumbs curled in to wrap the grip")
 # Phase 7: lift the box off the stack
 # ---------------------------------------------------------------------------
 print("Phase 7: lift")
+# physical constant-force grip: clamp the shoulder-roll effort limit to
+# 12 N*m for the lift. The pitch arc geometrically compresses the palm gap
+# and a position-servo cannot react fast enough (runs 4/5: force spiked past
+# 25 N within ~10 steps and shot the box 1.3 m upward). With the torque cap
+# the roll joints yield physically -- grip force is pinned at ~30 N with zero
+# latency (posture torque budget here is only ~2 N*m, so 12 leaves ~25 N grip).
+try:
+    _rl_ids = [robot.find_joints(["left_shoulder_roll_joint"])[0][0],
+               robot.find_joints(["right_shoulder_roll_joint"])[0][0]]
+    robot.write_joint_effort_limit_to_sim(
+        torch.tensor([[12.0, 12.0]], device=device), joint_ids=_rl_ids)
+    print("  shoulder-roll effort limit clamped to 12 N*m for the lift")
+except Exception as exc:
+    print(f"  [WARN] effort-limit clamp unavailable ({exc}); relying on force servo only")
 zb0 = float(box.data.root_pos_w[0, 2])
 zp0 = float(palm_mid()[2])
-pl0 = float(arm_targets[0, jidx("left_shoulder_pitch_joint")])
-pr0 = float(arm_targets[0, jidx("right_shoulder_pitch_joint")])
+# LIFT WITH THE LEGS AND BACK, NOT THE ARMS: raising via shoulder pitch sweeps
+# the palms along an arc that geometrically compresses the gap and shoots the
+# box out (runs 2-6: no arm-side servo or torque cap could react fast enough).
+# Instead the arm targets stay FROZEN -- palm gap and grip force are untouched
+# -- and the whole torso rises: root un-crouches and the waist straightens.
+z_lift_start = float(root0[0, 2])
+waist_lift_start = waist_target[0]
+waist_return = 0.35 * (waist_lift_start - waist_q0)  # straighten 35% of the lean
 
 
 def _lift(i):
     a = (i + 1) / LIFT_STEPS
-    arm_targets[0, jidx("left_shoulder_pitch_joint")] = pl0 + lift_sign * 0.55 * a
-    arm_targets[0, jidx("right_shoulder_pitch_joint")] = pr0 + lift_sign * 0.55 * a
+    if a <= 0.5:
+        # stage 1: PURE vertical rise, waist & arms frozen -- the box is still
+        # jammed against the stack below; straightening the waist here pulls
+        # the palms backward off the box (run 7: grip lost in the first 50
+        # steps). A pure translation keeps palms and box relatively static.
+        root0[:, 2] = z_lift_start + 0.24 * a
+    else:
+        # stage 2: box is clear of the stack -- keep rising and straighten up
+        root0[:, 2] = z_lift_start + 0.12 + 0.36 * (a - 0.5)
+        waist_target[0] = waist_lift_start - waist_return * (a - 0.5) * 2.0
+    if _hc is not None and (i + 1) % 50 == 0:
+        fm2 = _hc.data.net_forces_w.norm(dim=-1)
+        fl2 = float(fm2[:, _hc_l].amax()) if _hc_l else 0.0
+        fr2 = float(fm2[:, _hc_r].amax()) if _hc_r else 0.0
+        print(f"    lift[{i+1:3d}] box_z {float(box.data.root_pos_w[0, 2]):.3f} | gap {palm_gap():.3f} | F L{fl2:.1f} R{fr2:.1f} N")
 
 
 step_hold(LIFT_STEPS, _lift)
