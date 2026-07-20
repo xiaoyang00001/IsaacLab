@@ -217,6 +217,12 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     ``[left_index, left_middle, right_index, right_middle]``.
     """
 
+    controller_gripper_action_format: str = "ratios4"
+    """Controller input format: four close ratios or Pink-ordered signed 14-joint targets."""
+
+    controller_gripper_joint_names: list[str] = []
+    """Exact hand-joint order used when :attr:`controller_gripper_action_format` is ``pink14``."""
+
     controller_gripper_finger_close_angle: float = 1.0
     """Maximum index/middle finger close angle in radians at full trigger/grip press."""
 

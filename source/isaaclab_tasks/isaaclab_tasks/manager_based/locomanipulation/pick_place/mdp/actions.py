@@ -371,6 +371,18 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._left_hand_ids = self._build_joint_ids(LEFT_HAND_JOINT_NAMES)
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
+        self._controller_gripper_action_format = str(cfg.controller_gripper_action_format).strip().lower()
+        if self._controller_gripper_action_format not in {"ratios4", "pink14"}:
+            raise ValueError(
+                "controller_gripper_action_format must be 'ratios4' or 'pink14'; "
+                f"got {cfg.controller_gripper_action_format!r}"
+            )
+        self._controller_hand_ids = self._build_joint_ids(cfg.controller_gripper_joint_names)
+        if self._controller_gripper_action_format == "pink14" and len(self._controller_hand_ids) != 14:
+            raise RuntimeError(
+                "Pink-ordered controller gripper requires exactly 14 valid hand joints; "
+                f"resolved {len(self._controller_hand_ids)} from {cfg.controller_gripper_joint_names}."
+            )
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
 
         self._transport = str(cfg.transport).lower()
@@ -480,7 +492,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     @property
     def action_dim(self) -> int:
-        return 4 if self.cfg.enabled and self.cfg.controller_gripper_enabled else 0
+        if not self.cfg.enabled or not self.cfg.controller_gripper_enabled:
+            return 0
+        action_format = str(self.cfg.controller_gripper_action_format).strip().lower()
+        return 14 if action_format == "pink14" else 4
 
     @property
     def raw_actions(self) -> torch.Tensor:
@@ -519,7 +534,10 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if self.action_dim == 0:
             self._processed_actions = actions
             return
-        target_actions = torch.clamp(actions, 0.0, 1.0)
+        if self._controller_gripper_action_format == "pink14":
+            target_actions = actions
+        else:
+            target_actions = torch.clamp(actions, 0.0, 1.0)
         alpha = min(max(float(self.cfg.controller_gripper_action_alpha), 0.0), 1.0)
         self._processed_actions = self._processed_actions + alpha * (target_actions - self._processed_actions)
 
@@ -890,46 +908,51 @@ class MuJoCoG1MirrorAction(ActionTerm):
     def _apply_controller_gripper_targets(self) -> None:
         if not self.cfg.controller_gripper_enabled or self.action_dim == 0:
             return
-        if (
-            len(self._left_hand_ids) != len(LEFT_HAND_JOINT_NAMES)
-            or len(self._right_hand_ids) != len(RIGHT_HAND_JOINT_NAMES)
-        ):
+        if self._controller_gripper_action_format == "pink14":
+            hand_ids = self._controller_hand_ids
+            target = self._processed_actions
+        else:
+            hand_ids = self._all_hand_ids
+            target = None
+
+        if len(hand_ids) != 14:
             if not self._warned_gripper_unavailable:
                 print(
                     "[WARN] MuJoCo G1 mirror controller gripper disabled; "
-                    f"left_hand_joints={len(self._left_hand_ids)}, right_hand_joints={len(self._right_hand_ids)}"
+                    f"action_format={self._controller_gripper_action_format}, hand_joints={len(hand_ids)}"
                 )
                 self._warned_gripper_unavailable = True
             return
 
-        left_target = self._compose_hand_target(
-            index_close=self._processed_actions[:, 0],
-            middle_close=self._processed_actions[:, 1],
-            is_left=True,
-        )
-        right_target = self._compose_hand_target(
-            index_close=self._processed_actions[:, 2],
-            middle_close=self._processed_actions[:, 3],
-            is_left=False,
-        )
-        target = torch.cat((left_target, right_target), dim=-1)
+        if target is None:
+            left_target = self._compose_hand_target(
+                index_close=self._processed_actions[:, 0],
+                middle_close=self._processed_actions[:, 1],
+                is_left=True,
+            )
+            right_target = self._compose_hand_target(
+                index_close=self._processed_actions[:, 2],
+                middle_close=self._processed_actions[:, 3],
+                is_left=False,
+            )
+            target = torch.cat((left_target, right_target), dim=-1)
         if self.cfg.controller_gripper_use_soft_limits:
-            limits = self._asset.data.soft_joint_pos_limits[:, self._all_hand_ids, :]
+            limits = self._asset.data.soft_joint_pos_limits[:, hand_ids, :]
         else:
-            limits = self._asset.data.joint_pos_limits[:, self._all_hand_ids, :]
+            limits = self._asset.data.joint_pos_limits[:, hand_ids, :]
         unclamped_target = target.clone()
         target = torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
         if not self.cfg.controller_gripper_write_joint_state:
             target = _limit_joint_position_delta(
-                self._asset.data.joint_pos[:, self._all_hand_ids],
+                self._asset.data.joint_pos[:, hand_ids],
                 target,
                 float(self.cfg.controller_gripper_target_max_delta),
             )
         if self.cfg.controller_gripper_write_joint_state:
             joint_vel = torch.zeros_like(target)
-            self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
-        self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
-        self._print_gripper_debug(unclamped_target, target, limits)
+            self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=hand_ids)
+        self._asset.set_joint_position_target(target, joint_ids=hand_ids)
+        self._print_gripper_debug(unclamped_target, target, limits, hand_ids)
 
     def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
         target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
@@ -963,6 +986,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         unclamped_target: torch.Tensor,
         clamped_target: torch.Tensor,
         limits: torch.Tensor,
+        hand_ids: list[int],
     ) -> None:
         interval = float(self.cfg.controller_gripper_debug_interval_s)
         if interval <= 0.0:
@@ -974,15 +998,14 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._last_gripper_debug_time = now
 
         close = self._processed_actions[0].detach().cpu().numpy()
-        current = self._asset.data.joint_pos[:, self._all_hand_ids][0].detach().cpu().numpy()
+        current = self._asset.data.joint_pos[:, hand_ids][0].detach().cpu().numpy()
         target = clamped_target[0].detach().cpu().numpy()
         raw_target = unclamped_target[0].detach().cpu().numpy()
         limit_np = limits[0].detach().cpu().numpy()
         limit_kind = "soft" if self.cfg.controller_gripper_use_soft_limits else "hard"
         print(
             "[INFO] Controller gripper debug: "
-            f"close=[L_idx={close[0]:.3f}, L_mid={close[1]:.3f}, "
-            f"R_idx={close[2]:.3f}, R_mid={close[3]:.3f}], "
+            f"action_format={self._controller_gripper_action_format}, command={np.round(close, 3).tolist()}, "
             f"limit={limit_kind}, mujoco_hand_mirror={self._last_mirror_hands_from_mujoco}, "
             f"write_joint_state={self.cfg.controller_gripper_write_joint_state}, "
             f"raw_target={np.round(raw_target, 3).tolist()}, "

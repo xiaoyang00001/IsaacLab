@@ -12,6 +12,10 @@ from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
+from isaaclab.devices.openxr.retargeters import (
+    G1_TRIHAND_PINK_JOINT_NAMES,
+    G1TriHandMotionControllerHandRetargeterCfg,
+)
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -757,7 +761,12 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
             G1_BODY_STATE_WRITE_JOINT_NAMES,
         ),
         mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", True),
-        controller_gripper_enabled=_isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False),
+        controller_gripper_enabled=(
+            robot_id == _local_robot_id()
+            and _isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False)
+        ),
+        controller_gripper_action_format="pink14",
+        controller_gripper_joint_names=list(G1_TRIHAND_PINK_JOINT_NAMES),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
         controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
         controller_gripper_thumb_1_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_1_ANGLE", 1.1),
@@ -882,10 +891,19 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.xr.recenter_headset_fallback_axis = (1.0, 0.0, 0.0)
 
         teleop_device = "cpu"
+        local_gripper_cfg = getattr(self.actions, f"mujoco_g1_mirror_{local_robot_id}")
+        controller_retargeters = []
+        if local_gripper_cfg.enabled and local_gripper_cfg.controller_gripper_enabled:
+            controller_retargeters.append(
+                G1TriHandMotionControllerHandRetargeterCfg(
+                    hand_joint_names=list(G1_TRIHAND_PINK_JOINT_NAMES),
+                    sim_device=teleop_device,
+                )
+            )
         self.teleop_devices = DevicesCfg(
             devices={
                 "motion_controllers": OpenXRDeviceCfg(
-                    retargeters=[],
+                    retargeters=controller_retargeters,
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),

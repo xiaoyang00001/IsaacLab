@@ -14,6 +14,11 @@ from .humanoid.unitree.g1_gripper_motion_controller import (
     G1GripperMotionControllerRetargeter,
     G1GripperMotionControllerRetargeterCfg,
 )
+from .humanoid.unitree.trihand.g1_hand_motion_ctrl_retargeter import (
+    G1_TRIHAND_PINK_JOINT_NAMES,
+    G1TriHandMotionControllerHandRetargeter,
+    G1TriHandMotionControllerHandRetargeterCfg,
+)
 from .humanoid.unitree.inspire.g1_upper_body_retargeter import UnitreeG1Retargeter, UnitreeG1RetargeterCfg
 from .humanoid.unitree.trihand.g1_upper_body_motion_ctrl_gripper import (
     G1TriHandUpperBodyMotionControllerGripperRetargeter,

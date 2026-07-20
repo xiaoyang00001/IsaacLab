@@ -70,6 +70,11 @@ with patch.dict(
         G1TriHandUpperBodyMotionControllerGripperRetargeter,
         G1TriHandUpperBodyMotionControllerGripperRetargeterCfg,
     )
+    from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_hand_motion_ctrl_retargeter import (
+        G1_TRIHAND_PINK_JOINT_NAMES,
+        G1TriHandMotionControllerHandRetargeter,
+        G1TriHandMotionControllerHandRetargeterCfg,
+    )
     from isaaclab.devices.openxr.retargeters.humanoid.unitree.trihand.g1_upper_body_motion_ctrl_retargeter import (
         G1TriHandUpperBodyMotionControllerRetargeter,
         G1TriHandUpperBodyMotionControllerRetargeterCfg,
@@ -336,6 +341,32 @@ class TestG1TriHandUpperBodyMotionControllerRetargeter(unittest.TestCase):
         result = retargeter.retarget(data)
         # Output: [left_wrist(7), right_wrist(7), hand_joints(14)]
         self.assertEqual(result.shape, (28,))
+
+
+class TestG1TriHandMotionControllerHandRetargeter(unittest.TestCase):
+    def test_retarget_returns_signed_pink_order(self):
+        cfg = G1TriHandMotionControllerHandRetargeterCfg(sim_device="cpu", enable_visualization=False)
+        retargeter = G1TriHandMotionControllerHandRetargeter(cfg)
+
+        pose = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+        left_inputs = np.zeros(7)
+        right_inputs = np.zeros(7)
+        left_inputs[DeviceBase.MotionControllerInputIndex.TRIGGER.value] = 1.0
+        right_inputs[DeviceBase.MotionControllerInputIndex.SQUEEZE.value] = 1.0
+
+        result = retargeter.retarget(
+            {
+                DeviceBase.TrackingTarget.CONTROLLER_LEFT: [pose, left_inputs],
+                DeviceBase.TrackingTarget.CONTROLLER_RIGHT: [pose, right_inputs],
+            }
+        )
+
+        self.assertEqual(result.shape, (14,))
+        self.assertEqual(cfg.hand_joint_names, G1_TRIHAND_PINK_JOINT_NAMES)
+        np.testing.assert_allclose(
+            result.cpu().numpy(),
+            np.array([-1.0, 0.0, -0.5, 0.0, 1.0, 0.5, -1.0, 0.0, 0.4, 0.0, 1.0, -0.4, 0.7, -0.7]),
+        )
 
 
 class TestG1TriHandUpperBodyRetargeter(unittest.TestCase):
