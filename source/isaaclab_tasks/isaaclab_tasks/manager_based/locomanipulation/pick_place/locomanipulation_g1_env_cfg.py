@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
 import os
 import re
 from pathlib import Path
@@ -15,15 +16,19 @@ from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.retargeters import (
     G1_TRIHAND_PINK_JOINT_NAMES,
     G1TriHandMotionControllerHandRetargeterCfg,
+    G1TriHandUpperBodyMotionControllerRetargeterCfg,
 )
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import MuJoCoG1MirrorActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.pink_controller_cfg import (
+    G1_UPPER_BODY_IK_ACTION_CFG,
+)
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.box_drop_reset import BoxDropResetActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import (
     ZmqEnvResetSyncActionCfg,
@@ -445,6 +450,63 @@ G1_BODY_STATE_WRITE_JOINT_NAMES = [
 ]
 """Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
+G1_LOWER_BODY_AND_WAIST_JOINT_NAMES = [
+    ".*_hip_.*_joint",
+    ".*_knee_joint",
+    ".*_ankle_.*_joint",
+    "waist_.*_joint",
+]
+"""GR00T-owned joints while local shoulder/elbow/wrist control is delegated to Pink IK."""
+
+G1_ALL_BODY_JOINT_NAMES = [
+    *G1_LOWER_BODY_AND_WAIST_JOINT_NAMES,
+    ".*_shoulder_.*_joint",
+    ".*_elbow_joint",
+    ".*_wrist_.*_joint",
+]
+"""Complete 29-DoF GR00T body-joint mirror selection."""
+
+G1_ARMS_ONLY_JOINT_NAMES = [
+    ".*_shoulder_pitch_joint",
+    ".*_shoulder_roll_joint",
+    ".*_shoulder_yaw_joint",
+    ".*_elbow_joint",
+    ".*_wrist_pitch_joint",
+    ".*_wrist_roll_joint",
+    ".*_wrist_yaw_joint",
+]
+"""Shoulder, elbow, and wrist joints owned by the local Pink IK action."""
+
+
+def _pink_upper_body_enabled() -> bool:
+    return _GR00T_RECEIVER_ENABLED and _cfg_bool("ISAACLAB_G1_PINK_UPPER_BODY_ENABLED", True)
+
+
+def _pink_upper_body_action_cfg():
+    if not _pink_upper_body_enabled():
+        return None
+
+    cfg = copy.deepcopy(G1_UPPER_BODY_IK_ACTION_CFG)
+    cfg.asset_name = _robot_name(_local_robot_id())
+    cfg.pink_controlled_joint_names = list(G1_ARMS_ONLY_JOINT_NAMES)
+    cfg.hand_joint_names = list(G1_TRIHAND_PINK_JOINT_NAMES)
+    cfg.enable_gravity_compensation = False
+    cfg.relative_controller_targets = True
+    cfg.controller_position_scale = _cfg_float("ISAACLAB_G1_PINK_CONTROLLER_POSITION_SCALE", 1.0)
+    cfg.hand_action_alpha = _cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 1.0)
+    cfg.hand_joint_target_max_delta = _cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.20)
+    cfg.hand_use_soft_limits = _cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False)
+    cfg.controller.articulation_name = cfg.asset_name
+
+    for task in cfg.controller.variable_input_tasks:
+        controlled_joints = getattr(task, "controlled_joints", None)
+        if controlled_joints is not None:
+            task.controlled_joints = [
+                joint_name for joint_name in controlled_joints if not joint_name.startswith("waist_")
+            ]
+    return cfg
+
+
 def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
     if not _SCENE_PHYSICS_AUTHORITY:
         return sim_utils.RigidBodyPropertiesCfg(
@@ -760,9 +822,15 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
             "BODY_STATE_WRITE_JOINT_NAMES",
             G1_BODY_STATE_WRITE_JOINT_NAMES,
         ),
+        mirror_joint_names=(
+            list(G1_LOWER_BODY_AND_WAIST_JOINT_NAMES)
+            if _pink_upper_body_enabled() and robot_id == _local_robot_id()
+            else list(G1_ALL_BODY_JOINT_NAMES)
+        ),
         mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", True),
         controller_gripper_enabled=(
-            robot_id == _local_robot_id()
+            not _pink_upper_body_enabled()
+            and robot_id == _local_robot_id()
             and _isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False)
         ),
         controller_gripper_action_format="pink14",
@@ -785,6 +853,7 @@ class ActionsCfg:
 
     mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
     mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
+    upper_body_ik = _pink_upper_body_action_cfg()
     box_drop_reset = BoxDropResetActionCfg(
         asset_name="small_box_1",
         enabled=_SCENE_SYNC_ROLE == "publisher",
@@ -891,9 +960,23 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.xr.recenter_headset_fallback_axis = (1.0, 0.0, 0.0)
 
         teleop_device = "cpu"
+        if self.actions.upper_body_ik is not None:
+            urdf_omniverse_path = (
+                f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/"
+                "unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"
+            )
+            self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
+
         local_gripper_cfg = getattr(self.actions, f"mujoco_g1_mirror_{local_robot_id}")
         controller_retargeters = []
-        if local_gripper_cfg.enabled and local_gripper_cfg.controller_gripper_enabled:
+        if self.actions.upper_body_ik is not None:
+            controller_retargeters.append(
+                G1TriHandUpperBodyMotionControllerRetargeterCfg(
+                    hand_joint_names=list(G1_TRIHAND_PINK_JOINT_NAMES),
+                    sim_device=teleop_device,
+                )
+            )
+        elif local_gripper_cfg.enabled and local_gripper_cfg.controller_gripper_enabled:
             controller_retargeters.append(
                 G1TriHandMotionControllerHandRetargeterCfg(
                     hand_joint_names=list(G1_TRIHAND_PINK_JOINT_NAMES),

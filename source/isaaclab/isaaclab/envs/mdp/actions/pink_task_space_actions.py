@@ -58,6 +58,14 @@ class PinkInverseKinematicsAction(ActionTerm):
         # Initialize action tensors
         self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._target_hand_joint_positions = torch.zeros(
+            self.num_envs, self.hand_joint_dim, dtype=torch.float32, device=self.device
+        )
+
+        # Optional controller-to-robot relative pose calibration.
+        self._controller_pose_baselines: torch.Tensor | None = None
+        self._eef_pose_in_base_baselines: torch.Tensor | None = None
+        self._base_quat_baseline: torch.Tensor | None = None
 
         # PhysX Articulation Floating joint indices offset from IsaacLab Articulation joint indices
         self._physx_floating_joint_indices_offset = 6
@@ -91,7 +99,7 @@ class PinkInverseKinematicsAction(ActionTerm):
             self._ik_controllers.append(
                 PinkIKController(
                     cfg=self.cfg.controller.copy(),
-                    robot_cfg=self._env.scene.cfg.robot,
+                    robot_cfg=getattr(self._env.scene.cfg, self.cfg.asset_name),
                     device=self.device,
                     controlled_joint_indices=self._isaaclab_controlled_joint_ids,
                 )
@@ -105,6 +113,9 @@ class PinkInverseKinematicsAction(ActionTerm):
         # Cache base link index to avoid string lookup every time
         articulation_data = self._env.scene[self.cfg.controller.articulation_name].data
         self._base_link_idx = articulation_data.body_names.index(self.cfg.controller.base_link_name)
+        self._target_eef_body_ids = [
+            articulation_data.body_names.index(link_name) for link_name in self.cfg.target_eef_link_names.values()
+        ]
 
         # Pre-allocate working tensors
         # Count only FrameTask instances in variable_input_tasks (not all tasks)
@@ -196,14 +207,20 @@ class PinkInverseKinematicsAction(ActionTerm):
         # Store raw actions
         self._raw_actions[:] = actions
 
-        # Extract hand joint positions directly (no cloning needed)
-        self._target_hand_joint_positions = actions[:, -self.hand_joint_dim :]
+        # Smooth hand targets independently from the task-space pose commands.
+        raw_hand_targets = actions[:, -self.hand_joint_dim :]
+        hand_alpha = min(max(float(self.cfg.hand_action_alpha), 0.0), 1.0)
+        self._target_hand_joint_positions = self._target_hand_joint_positions + hand_alpha * (
+            raw_hand_targets - self._target_hand_joint_positions
+        )
 
         # Get base link frame transformation
         self.base_link_frame_in_world_rf = self._get_base_link_frame_transform()
 
         # Process controlled frame poses (pass original actions, no clone needed)
         controlled_frame_poses = self._extract_controlled_frame_poses(actions)
+        if self.cfg.relative_controller_targets:
+            controlled_frame_poses = self._map_relative_controller_poses(controlled_frame_poses)
         transformed_poses = self._transform_poses_to_base_link_frame(controlled_frame_poses)
 
         # Set targets for all tasks
@@ -261,6 +278,69 @@ class PinkInverseKinematicsAction(ActionTerm):
 
         return self._controlled_frame_poses
 
+    def _map_relative_controller_poses(self, controller_poses: torch.Tensor) -> torch.Tensor:
+        """Map controller deltas onto the robot's initial end-effector poses in the moving base frame."""
+        articulation_data = self._env.scene[self.cfg.controller.articulation_name].data
+        base_pose_w = articulation_data.body_link_state_w[:, self._base_link_idx, :7]
+        eef_pose_w = articulation_data.body_link_state_w[:, self._target_eef_body_ids, :7]
+
+        base_pos_w = base_pose_w[:, :3]
+        base_quat_w = base_pose_w[:, 3:7]
+        eef_pos_w = eef_pose_w[:, :, :3]
+        eef_quat_w = eef_pose_w[:, :, 3:7]
+
+        if (
+            self._controller_pose_baselines is None
+            or self._eef_pose_in_base_baselines is None
+            or self._base_quat_baseline is None
+        ):
+            self._controller_pose_baselines = controller_poses.clone()
+            self._base_quat_baseline = base_quat_w.clone()
+            eef_pos_w = eef_pos_w.permute(1, 0, 2)
+            eef_quat_w = eef_quat_w.permute(1, 0, 2)
+            base_pos_expanded = base_pos_w.unsqueeze(0).expand_as(eef_pos_w)
+            base_quat_expanded = base_quat_w.unsqueeze(0).expand_as(eef_quat_w)
+            eef_pos_b, eef_quat_b = math_utils.subtract_frame_transforms(
+                base_pos_expanded,
+                base_quat_expanded,
+                eef_pos_w,
+                eef_quat_w,
+            )
+            self._eef_pose_in_base_baselines = math_utils.make_pose(
+                eef_pos_b,
+                math_utils.matrix_from_quat(eef_quat_b),
+            )
+
+        controller_pos, controller_rot = math_utils.unmake_pose(controller_poses)
+        controller_quat = math_utils.quat_from_matrix(controller_rot)
+        baseline_pos, baseline_rot = math_utils.unmake_pose(self._controller_pose_baselines)
+        baseline_quat = math_utils.quat_from_matrix(baseline_rot)
+
+        controller_delta_pos_w = (controller_pos - baseline_pos) * float(self.cfg.controller_position_scale)
+        controller_delta_quat_w = math_utils.quat_mul(controller_quat, math_utils.quat_inv(baseline_quat))
+
+        base_quat_at_calibration = self._base_quat_baseline.unsqueeze(0).expand(self._num_frame_tasks, -1, -1)
+        controller_delta_pos_b = math_utils.quat_apply_inverse(base_quat_at_calibration, controller_delta_pos_w)
+        controller_delta_quat_b = math_utils.quat_mul(
+            math_utils.quat_mul(math_utils.quat_inv(base_quat_at_calibration), controller_delta_quat_w),
+            base_quat_at_calibration,
+        )
+
+        baseline_eef_pos_b, baseline_eef_rot_b = math_utils.unmake_pose(self._eef_pose_in_base_baselines)
+        baseline_eef_quat_b = math_utils.quat_from_matrix(baseline_eef_rot_b)
+        target_pos_b = baseline_eef_pos_b + controller_delta_pos_b
+        target_quat_b = math_utils.quat_mul(controller_delta_quat_b, baseline_eef_quat_b)
+
+        current_base_pos = base_pos_w.unsqueeze(0).expand(self._num_frame_tasks, -1, -1)
+        current_base_quat = base_quat_w.unsqueeze(0).expand(self._num_frame_tasks, -1, -1)
+        target_pos_w, target_quat_w = math_utils.combine_frame_transforms(
+            current_base_pos,
+            current_base_quat,
+            target_pos_b,
+            target_quat_b,
+        )
+        return math_utils.make_pose(target_pos_w, math_utils.matrix_from_quat(target_quat_w))
+
     def _transform_poses_to_base_link_frame(self, poses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Transform poses from world frame to base link frame.
 
@@ -309,8 +389,27 @@ class PinkInverseKinematicsAction(ActionTerm):
         # Compute IK solutions for all environments
         ik_joint_positions = self._compute_ik_solutions()
 
+        # Clamp and rate-limit hand targets while retaining actuator-based physical contact.
+        hand_joint_positions = self._target_hand_joint_positions
+        if self.cfg.hand_use_soft_limits:
+            hand_limits = self._asset.data.soft_joint_pos_limits[:, self._hand_joint_ids, :]
+        else:
+            hand_limits = self._asset.data.joint_pos_limits[:, self._hand_joint_ids, :]
+        hand_joint_positions = torch.max(
+            torch.min(hand_joint_positions, hand_limits[..., 1]),
+            hand_limits[..., 0],
+        )
+        max_delta = float(self.cfg.hand_joint_target_max_delta)
+        if max_delta > 0.0:
+            current_hand_positions = self._asset.data.joint_pos[:, self._hand_joint_ids]
+            hand_joint_positions = current_hand_positions + torch.clamp(
+                hand_joint_positions - current_hand_positions,
+                -max_delta,
+                max_delta,
+            )
+
         # Combine IK and hand joint positions
-        all_joint_positions = torch.cat((ik_joint_positions, self._target_hand_joint_positions), dim=1)
+        all_joint_positions = torch.cat((ik_joint_positions, hand_joint_positions), dim=1)
         self._processed_actions = all_joint_positions
 
         # Apply gravity compensation to arm joints
@@ -364,3 +463,7 @@ class PinkInverseKinematicsAction(ActionTerm):
             env_ids: A list of environment IDs to reset. If None, all environments are reset.
         """
         self._raw_actions[env_ids] = torch.zeros(self.action_dim, device=self.device)
+        self._target_hand_joint_positions[env_ids] = 0.0
+        self._controller_pose_baselines = None
+        self._eef_pose_in_base_baselines = None
+        self._base_quat_baseline = None
