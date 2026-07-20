@@ -1293,9 +1293,25 @@ CONVEYOR_Y_STOP = _cfg_float("ISAACLAB_CONVEYOR_Y_STOP", ROBOT_WORKSTATION_Y)
 # 订阅端的筐是 kinematic、纯跟随发布端 scene_state，本地再驱动会和同步打架。
 CONVEYOR_ENABLED = _cfg_bool("ISAACLAB_CONVEYOR_ENABLED", True) and ZMQ_SYNC_ROLE != "subscriber"
 
+# 背景里的分拣料箱：bin_01 在 USD 里已是 kinematic，bin_02 却是动态刚体，开局悬空
+# 1.5 cm、起步即下沉落到桌面（z 0.3918→0.3737）且会被机器人撞飞。统一锁成 kinematic
+# 钉在原始摆位。用 startup 事件而非改 USD：改动留在代码里，好查也好回退。
+BACKGROUND_LOCK_PRIM_NAMES = ("blue_sorting_bin_02",)
+
+
 @configclass
 class EventsCfg:
-    """Runtime events：流水线送筐到工位停住。"""
+    """Runtime events：背景料箱锁 kinematic + 流水线送筐到工位停住。"""
+
+    lock_sorting_bins = EventTerm(
+        func=locomanip_mdp.lock_background_rigid_bodies,
+        mode="startup",
+        params={
+            "prim_names": BACKGROUND_LOCK_PRIM_NAMES,
+            "parent_path": "Background/ConveyorBelt",
+            "kinematic": True,
+        },
+    )
 
     drive_totes = EventTerm(
         func=locomanip_mdp.drive_totes_on_conveyor,

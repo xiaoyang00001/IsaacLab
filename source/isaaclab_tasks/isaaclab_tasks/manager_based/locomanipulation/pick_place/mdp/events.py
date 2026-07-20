@@ -5,9 +5,11 @@
 
 """Runtime events for the warehouse locomanipulation scene.
 
-目前只含流水线驱动：背景 USD 的 ConveyorBelt_A08 三段是纯视觉件（无 PhysX 表面速度、
+流水线驱动：背景 USD 的 ConveyorBelt_A08 三段是纯视觉件（无 PhysX 表面速度、
 无滚轮刚体），物体靠场景里的不可见 kinematic 碰撞板 ``conveyor_collider`` 托住。
 因此"流动"不能靠物理带动，只能由本模块按固定周期覆写筐的 root 线速度来模拟。
+
+另含背景刚体的 kinematic 锁定，见 ``lock_background_rigid_bodies``。
 """
 
 from __future__ import annotations
@@ -15,9 +17,62 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from isaacsim.core.utils.stage import get_current_stage
+from pxr import Usd, UsdPhysics
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
+
+def lock_background_rigid_bodies(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    prim_names: tuple[str, ...] = (),
+    parent_path: str = "Background/ConveyorBelt",
+    kinematic: bool = True,
+):
+    """把背景 USD 里的刚体切成 kinematic，钉在原始摆位上。
+
+    背景里的分拣料箱有两种状态：``blue_sorting_bin_01`` 在 USD 里已是 kinematic
+    （实测 z 恒 0.4355 不动），而 ``blue_sorting_bin_02`` 是**动态**刚体——开局
+    悬空约 1.5 cm，仿真一起步就下沉、回弹后落在 packing table 面上（z 0.3918 →
+    0.3737），y 也漂几毫米，而且之后会被机器人撞飞。这里统一锁成 kinematic。
+
+    只改 ``kinematicEnabled``，不动 collision/visual：料箱仍是可碰撞的实体，只是
+    不再受重力与外力驱动。
+    """
+
+    if not prim_names:
+        return
+
+    stage = get_current_stage()
+    if stage is None:
+        return
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    for env_id in env_ids.tolist():
+        for name in prim_names:
+            root = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/{parent_path}/{name}")
+            if not (root and root.IsValid()):
+                print(f"[locomanip_event] lock_background: prim 不存在 {name}")
+                continue
+
+            locked = 0
+            for prim in Usd.PrimRange(root):
+                if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    continue
+                attr = UsdPhysics.RigidBodyAPI(prim).GetKinematicEnabledAttr()
+                if not attr:
+                    attr = UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr(kinematic)
+                attr.Set(kinematic)
+                locked += 1
+
+            if locked == 0:
+                print(f"[locomanip_event] lock_background: {name} 下没有刚体")
+            else:
+                print(f"[locomanip_event] lock_background: {name} 锁定 {locked} 个刚体 kinematic={kinematic}")
 
 
 def drive_totes_on_conveyor(
