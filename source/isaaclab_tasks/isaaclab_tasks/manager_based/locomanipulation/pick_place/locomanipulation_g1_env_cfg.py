@@ -873,6 +873,22 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     )
 
 
+# 双机工位 y：流水线三段（背景 USD ConveyorBelt_A08_06/_07/_08）实测世界 y 跨度
+#   第一段 15.504~18.222（入料，中心 16.863）
+#   第二段 12.788~15.507（中心 14.148）  ← 工位设在这里
+#   第三段 10.188~12.907（出料，中心 11.548）
+# 机器人原先站在第一段中心（16.7），筐一上带就到工位、几乎看不到流动；挪到第二段
+# 中心后，筐从原起点 16.4/17.0 有 2.3~2.9 m（约 9~11 s）行程可跑，到工位再停住。
+#
+# 配套改动在背景 USD 里（warehouse-simple6_v48.usd，备份 .bak-workstation-shift-20260721）：
+# 第二段两侧的 SM_HeavyDutyPackingTable_C02_01/_03 与 blue_sorting_bin_01/02 已沿世界
+# +Y 平移 0.6 m（y 中心 14.65~14.84 → 15.25~15.44），否则机器人站到 14.148 会插进桌子
+# bbox 里。之所以改 USD 而非用事件运行时挪：sorting bin 带刚体（bin_02 还是非 kinematic
+# 动态体），运行时改 USD xform 后 PhysX 不同步；而 prestartup 事件与本场景必须保留的
+# replicate_physics=True 互斥。
+ROBOT_WORKSTATION_Y = _cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", 14.148)
+
+
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """Warehouse 双 G1 场景：PC1 为物理权威，PC2 可经 scene_state 同步镜像（含三小箱任务）。"""
@@ -998,10 +1014,12 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     )
     # 两个塑料筐从 pushcart_2 挪到流水线滚轮面上（缩小一半后 0.3×0.2×0.15 m，X 半宽≈0.15）。
     # 筐原点在底面，滚轮顶 z≈0.772 → base 抬到 0.775（+3 mm 间隙避免初始穿透）。
-    # 分别贴近各自机器人：沿 X 分到滚轮碰撞带 x[-6.07,-5.17] 两侧边缘（各留 ~3 cm 余量
-    # 不掉出），Y 仍沿走向前后错开 0.6 m（16.4 / 17.0，中心对齐机器人 y=16.7）：
-    #   cart2_tote1 → +X 侧 x=-5.35，靠 robot_1(x=-4.75)，间距 0.92→0.67 m；
-    #   cart2_tote2 → -X 侧 x=-5.89，靠 robot_2(x=-6.70)，间距 1.12→0.86 m。
+    # 沿 X 分到滚轮碰撞带 x[-6.07,-5.17] 两侧边缘（各留 ~3 cm 余量不掉出），各走各的车道：
+    #   cart2_tote1 → +X 侧 x=-5.35，对 robot_1(x=-4.75)，间距 0.67 m；
+    #   cart2_tote2 → -X 侧 x=-5.89，对 robot_2(x=-6.70)，间距 0.86 m。
+    # Y 是**起点**而非终点：两筐在第一段（16.4 / 17.0，前后错开 0.6 m）出发，被
+    # drive_totes_on_conveyor 沿 -Y 送到第二段工位 ROBOT_WORKSTATION_Y 停住，
+    # 各自停在对应机器人正前方。X 车道不同，两筐全程不会互相挡道。
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.35, 16.4, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
@@ -1022,14 +1040,14 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # 双机站位：跟随两塑料筐移到流水线旁 (y=16.7)，面对面（robot_1 在 +X 侧 x=-4.75 朝 -X，
-    # robot_2 在 -X 侧 x=-6.7 朝 +X）。
+    # 双机站位：面对面立在流水线两侧（robot_1 在 +X 侧 x=-4.75 朝 -X，
+    # robot_2 在 -X 侧 x=-6.7 朝 +X），y 移到第二段中心 ROBOT_WORKSTATION_Y。
     # 流水线(结构占 x[-6.19,-5.04])比原推车宽，robot_2 拉到 x=-6.7 越过流水线 -X 侧外缘避免重叠；
     # 代价是离箱(x=-5.62)约 1.1 m 够不到，此侧为布局/展示站位（robot_1 侧 x=-4.75 仍贴近 +X 边缘）。
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(-4.75, 16.7, 0.78),
+            pos=(-4.75, ROBOT_WORKSTATION_Y, 0.78),
             rot=(0.0, 0.0, 0.0, 1.0),
         ),
     )
@@ -1046,7 +1064,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(-6.7, 16.7, 0.78),
+            pos=(-6.7, ROBOT_WORKSTATION_Y, 0.78),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
@@ -1257,21 +1275,27 @@ class TerminationsCfg:
 # 那块不可见 kinematic 碰撞板托着，所以"流动"由 drive_totes_on_conveyor 每
 # 20 ms 覆写筐的水平速度模拟（同 congxian 分支的 drive_object_on_conveyor 思路）。
 #
-# 方向 -Y：从入料端 y=18.0 流过双机工位 y=16.7，到出料端 y=10.6 后瞬移回入料端，
-# 循环往复。速度 0.3 m/s——congxian 用 0.5，这里筐缩了一半又轻（0.45 kg），放慢
-# 一档既不易滑出滚轮带，也给机器人留出抓取窗口。
+# 方向 -Y：两筐从第一段起点（16.4 / 17.0）流向第二段工位 ROBOT_WORKSTATION_Y，
+# 到工位即停住等机器人取料。速度 0.3 m/s——congxian 用 0.5，这里筐缩了一半又轻
+# （0.45 kg），放慢一档既不易滑出滚轮带，也给机器人留出抓取窗口。
+#
+# 摩擦损耗：筐是在**静止**的碰撞板上被拽着滑行（全程动摩擦 μd=0.6，非真传送带的
+# 静摩擦输送），substep 间持续制动，实测平均速度约 0.25 m/s，比设定值低 ~17%。
+# 同一原因还会让筐缓慢自转（convexDecomposition 的多块凸包接触点不对称），已知，
+# 待后续单独处理。
 # ------------------------------------------------------------------
 CONVEYOR_TOTE_NAMES = ("cart2_tote1", "cart2_tote2")
 CONVEYOR_SPEED = _cfg_float("ISAACLAB_CONVEYOR_SPEED", 0.3)
 CONVEYOR_Y_RECYCLE = _cfg_float("ISAACLAB_CONVEYOR_Y_RECYCLE", 10.6)
 CONVEYOR_Y_RESPAWN = _cfg_float("ISAACLAB_CONVEYOR_Y_RESPAWN", 18.0)
+# 筐流到工位即停住（不再驱动，靠 μd=0.6 的摩擦自然停）。设 <=0 可关掉暂停、退回纯循环流。
+CONVEYOR_Y_STOP = _cfg_float("ISAACLAB_CONVEYOR_Y_STOP", ROBOT_WORKSTATION_Y)
 # 订阅端的筐是 kinematic、纯跟随发布端 scene_state，本地再驱动会和同步打架。
 CONVEYOR_ENABLED = _cfg_bool("ISAACLAB_CONVEYOR_ENABLED", True) and ZMQ_SYNC_ROLE != "subscriber"
 
-
 @configclass
 class EventsCfg:
-    """Runtime events：流水线带动两个塑料筐循环流动。"""
+    """Runtime events：流水线送筐到工位停住。"""
 
     drive_totes = EventTerm(
         func=locomanip_mdp.drive_totes_on_conveyor,
@@ -1281,6 +1305,7 @@ class EventsCfg:
             "object_names": CONVEYOR_TOTE_NAMES,
             "velocity_y": -CONVEYOR_SPEED,
             "enabled": CONVEYOR_ENABLED,
+            "y_stop": CONVEYOR_Y_STOP if CONVEYOR_Y_STOP > 0 else None,
             "y_recycle": CONVEYOR_Y_RECYCLE,
             "y_respawn": CONVEYOR_Y_RESPAWN,
         },

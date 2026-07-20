@@ -30,11 +30,12 @@ def drive_totes_on_conveyor(
     z_tolerance: float = 0.15,
     x_range: tuple[float, float] = (-6.17, -5.07),
     y_range: tuple[float, float] = (10.19, 18.22),
+    y_stop: float | None = None,
     y_recycle: float = 10.6,
     y_respawn: float = 18.0,
     respawn_z: float = 0.775,
 ):
-    """把塑料筐沿流水线 -Y 方向匀速送走，到出料端再传回入料端，形成循环流。
+    """把塑料筐沿流水线 -Y 方向匀速送走，到工位停住（或到出料端传回入料端）。
 
     每个 interval tick 只对"确实还躺在滚轮面上"的筐覆写水平速度（Z 速度保留给
     重力/接触，避免把筐按在碰撞板里）。判定用带面几何：
@@ -43,8 +44,13 @@ def drive_totes_on_conveyor(
       或掉到地上就超出窗口 → 立即停止驱动，不会把抓在手里的筐硬拖走。
     * ``x_range`` / ``y_range``：滚轮可用带面（略放宽于碰撞板 x[-6.07,-5.17]）。
 
-    到达 ``y_recycle`` 后瞬移回 ``y_respawn``（保持各自 X 车道、清零速度），下一 tick
-    重新开始往下流。坐标全部是相对 env origin 的局部系，与场景配置里的数值同一套。
+    ``y_stop`` 是机器人工位：筐一旦流到该 y 就不再驱动，靠 μd=0.6 的动摩擦自然
+    停住（约 5 mm 滑行）。这里刻意**不写零速度**——每步硬写零会和机器人的抓取动作
+    对抗，而摩擦本身足够大，停得又快又稳。设为 None 则不停、一路流到出料端。
+
+    到达 ``y_recycle`` 后瞬移回 ``y_respawn``（保持各自 X 车道、清零速度）。设了
+    ``y_stop`` 时筐停在工位、永远到不了出料端，回收逻辑自然不触发。坐标全部是相对
+    env origin 的局部系，与场景配置里的数值同一套。
     """
 
     if not enabled or abs(velocity_y) < 1e-8:
@@ -87,6 +93,9 @@ def drive_totes_on_conveyor(
             )
 
         drive = on_belt & ~recycle
+        if y_stop is not None:
+            # 已到工位的筐不再驱动，交给摩擦停住。
+            drive = drive & (pos_local[:, 1] > y_stop)
         if not drive.any():
             continue
 
