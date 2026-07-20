@@ -125,6 +125,9 @@ reordering on our side.
 _HAND_TRACKING_WRIST_DIM = 14
 HAND_TRACKING_ACTION_DIM = _HAND_TRACKING_WRIST_DIM + len(HAND_TRACKING_JOINT_NAMES)
 
+# G1GripperMotionControllerRetargeter returns [left_index, left_middle, right_index, right_middle].
+CONTROLLER_GRIPPER_ACTION_DIM = 4
+
 
 @dataclass
 class _MirrorSample:
@@ -506,7 +509,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         # instead of synthesising them from two trigger axes.
         if self.cfg.hand_tracking_enabled:
             return HAND_TRACKING_ACTION_DIM
-        return 4 if self.cfg.controller_gripper_enabled else 0
+        return CONTROLLER_GRIPPER_ACTION_DIM if self.cfg.controller_gripper_enabled else 0
 
     @property
     def raw_actions(self) -> torch.Tensor:

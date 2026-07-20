@@ -35,6 +35,7 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg
     MuJoCoG1MirrorActionCfg,
 )
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import (
+    CONTROLLER_GRIPPER_ACTION_DIM,
     HAND_TRACKING_ACTION_DIM,
     HAND_TRACKING_JOINT_NAMES,
 )
@@ -1327,15 +1328,20 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
             }
         )
 
-        self._validate_hand_tracking_action_width()
+        self._validate_teleop_action_width()
 
-    def _validate_hand_tracking_action_width(self) -> None:
-        """Fail loudly when the action space cannot match what the XR device emits.
+    def _validate_teleop_action_width(self) -> None:
+        """Fail loudly when the action space cannot match what the teleop device emits.
 
         teleop_se3_agent feeds the device output straight into ``env.step()``, so the summed action
         width of both mirror terms has to equal the retargeter's output width. Getting this wrong
         otherwise surfaces as a tensor-shape error inside the action manager, which the runner's
         broad ``except`` swallows into a single log line.
+
+        The trap worth knowing about: both mirror terms live in the same env and their widths add
+        up, but a teleop device emits one robot's worth of values per frame. So any switch that both
+        robots inherit -- which is exactly how ISAACLAB_G1_CONTROLLER_GRIPPER_ENABLED is wired in the
+        shipped .env -- doubles the action space and breaks the contract the moment it is turned on.
         """
         terms = [self.actions.mujoco_g1_mirror_1, self.actions.mujoco_g1_mirror_2]
         widths = []
@@ -1345,35 +1351,59 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
             elif getattr(term, "hand_tracking_enabled", False):
                 widths.append(HAND_TRACKING_ACTION_DIM)
             elif getattr(term, "controller_gripper_enabled", False):
-                widths.append(4)
+                widths.append(CONTROLLER_GRIPPER_ACTION_DIM)
             else:
                 widths.append(0)
 
         tracking = [i + 1 for i, t in enumerate(terms) if getattr(t, "hand_tracking_enabled", False)]
-        if not tracking:
+        gripper = [i + 1 for i, t in enumerate(terms) if getattr(t, "controller_gripper_enabled", False)]
+        if not tracking and not gripper:
+            # Hands follow the MuJoCo mirror; no teleop action is consumed and nothing to reconcile.
             return
+
+        if tracking and gripper:
+            raise ValueError(
+                f"Hand tracking (robot(s) {tracking}) and the controller gripper (robot(s) {gripper}) "
+                "cannot both be active: they need different teleop devices and different action "
+                "widths. Turn one of ISAACLAB_G1_HAND_TRACKING_ENABLED / "
+                "ISAACLAB_G1_CONTROLLER_GRIPPER_ENABLED back to 0."
+            )
 
         if not any(getattr(t, "enabled", False) for t in terms):
             # Scene-sync subscriber role disables both mirror terms, so the action space is empty by
             # design here and there is nothing to reconcile. Say it out loud, because the symptom
             # ("hands do not move") is otherwise indistinguishable from a broken setup.
             print(
-                f"[INFO] G1 hand tracking requested for robot(s) {tracking}, but both mirror terms are "
-                "disabled (scene sync role=subscriber). The hands will not be driven by XR here."
+                f"[INFO] G1 teleop hand control requested for robot(s) {tracking or gripper}, but both "
+                "mirror terms are disabled (scene sync role=subscriber). The hands are not driven here."
             )
             return
 
-        print(f"[INFO] G1 hand tracking enabled for robot(s) {tracking}; action widths={widths}, total={sum(widths)}")
-        if len(tracking) > 1:
-            raise ValueError(
-                f"Hand tracking is enabled for robots {tracking}, but the XR device emits a single "
-                f"{HAND_TRACKING_ACTION_DIM}-wide action per frame. Enable it for one robot only "
-                "(set ISAACLAB_G1_2_HAND_TRACKING_ENABLED=0)."
+        robots = tracking or gripper
+        if tracking:
+            mode, expected, device, suffix = "hand tracking", HAND_TRACKING_ACTION_DIM, "handtracking", "HAND_TRACKING"
+        else:
+            mode, expected, device, suffix = (
+                "controller gripper",
+                CONTROLLER_GRIPPER_ACTION_DIM,
+                "motion_controllers",
+                "CONTROLLER_GRIPPER",
             )
-        if sum(widths) != HAND_TRACKING_ACTION_DIM:
+
+        print(
+            f"[INFO] G1 {mode} enabled for robot(s) {robots}; action widths={widths}, "
+            f"total={sum(widths)}; launch with --teleop_device {device}"
+        )
+        if len(robots) > 1:
             raise ValueError(
-                f"Hand tracking needs the total action width to be {HAND_TRACKING_ACTION_DIM}, but the "
-                f"mirror terms sum to {sum(widths)} (per-term: {widths}). The most likely cause is "
-                "ISAACLAB_G1_CONTROLLER_GRIPPER_ENABLED=1 on the other robot; hand tracking and the "
-                "controller gripper cannot be active at the same time."
+                f"{mode} is enabled for robots {robots}, but the teleop device emits a single "
+                f"{expected}-wide action per frame, so the action space would be {sum(widths)}. "
+                f"Enable it for one robot only -- set ISAACLAB_G1_2_{suffix}_ENABLED=0 instead of "
+                "letting robot 2 inherit the shared switch."
+            )
+        if sum(widths) != expected:
+            raise ValueError(
+                f"{mode} needs the total action width to be {expected}, but the mirror terms sum to "
+                f"{sum(widths)} (per-term: {widths}). Check that the other robot is not contributing "
+                "an action of its own."
             )
