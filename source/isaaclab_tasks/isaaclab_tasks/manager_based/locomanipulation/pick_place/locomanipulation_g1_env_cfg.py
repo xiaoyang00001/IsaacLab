@@ -21,6 +21,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -88,6 +89,12 @@ def _load_default_network_config() -> tuple[dict[str, str], Path | None]:
         values = _load_env_file(path)
         if values:
             print(f"[INFO] IsaacLab G1 config loaded: {path}")
+            # mirror the file config into the process environment (without
+            # overriding explicit exports) so runtime modules that read
+            # os.environ (contact-freeze / adaptive-lead / hand-friction knobs
+            # in mdp/actions.py) see the same configuration as this cfg module
+            for key, value in values.items():
+                os.environ.setdefault(key, value)
             return values, path
     print("[WARN] IsaacLab G1 config file was not found; using built-in defaults.")
     return {}, None
@@ -632,7 +639,8 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
     prim_path="/World/envs/env_.*/Robot",
     spawn=UsdFileCfg(
         usd_path=_find_gr00t_g1_43dof_usd(),
-        activate_contact_sensors=False,
+        # required by the hand ContactSensor driving the adaptive finger lead
+        activate_contact_sensors=True,
         rigid_props=_g1_robot_rigid_props(),
         collision_props=(
             None
@@ -988,6 +996,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             pos=(-4.75, 19.39363, 0.78),
             rot=(0.0, 0.0, 0.0, 1.0),
         ),
+    )
+
+    # Net contact forces on robot_1's hand links: the only contact signal that
+    # works for LIGHT objects (a 0.08 kg box never stalls the fingers, so every
+    # kinematic contact cue -- residual/velocity/progress -- is blind to it).
+    # Drives the adaptive finger-lead shrink in mdp/actions.py.
+    hand_contact = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot_1/.*_hand_.*",
+        update_period=0.0,
+        history_length=1,
     )
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",

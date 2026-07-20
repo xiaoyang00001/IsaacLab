@@ -437,26 +437,96 @@ class MuJoCoG1MirrorAction(ActionTerm):
         # the effort limit (the main source of probabilistic teleop grasps).
         self._hand_freeze_enabled = os.environ.get(
             "ISAACLAB_G1_GRIPPER_CONTACT_FREEZE", "1").strip().lower() not in ("0", "false")
-        self._hand_freeze_residual = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_RESIDUAL_RAD", "0.15"))
-        # Contact = ALL finger joints stalled (max |vel| < 0.25) while the
-        # stream still commands a close. A mean-velocity gate misfires: idle
-        # joints (thumb yaw etc.) drag the mean down and freeze the hand right
-        # at trigger-pull ("hand barely reacts"). The 8-step window lets the
-        # free-close spin-up (~3 steps to exceed 0.25) reset the counter.
-        self._hand_freeze_vel = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_VEL_RAD_S", "0.25"))
-        self._hand_freeze_steps = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_STEPS", "8"))
+        # residual 0.08: only 2-3 of the 7 joints per hand actually rest on the
+        # box; the on-target joints dilute the per-hand mean below 0.15 and the
+        # freeze misses by a hair. A fully-closed free hand sits at ~0.03.
+        self._hand_freeze_residual = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_RESIDUAL_RAD", "0.08"))
+        # Contact = the fingers stop ADVANCING along the closing direction.
+        # Velocity gates cannot work here: joints resting on the object carry a
+        # persistent contact jitter that keeps |vel| above any usable threshold
+        # (verified: 600 steps pressed on a box, freeze never fired, box was
+        # catapulted the moment its support vanished). Progress is integrated
+        # over windows of FREEZE_WINDOW steps; fewer than FREEZE_ADVANCE_RAD of
+        # forward travel in FREEZE_STALLS consecutive windows = contact.
+        self._hand_freeze_window = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_WINDOW_STEPS", "20"))
+        self._hand_freeze_advance = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_ADVANCE_RAD", "0.005"))
+        self._hand_freeze_stalls = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_STALLS", "2"))
         self._hand_freeze_preload = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_PRELOAD_RAD", "0.05"))
         self._hand_freeze_close_thresh = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_CLOSE_RAD", "0.5"))
         self._hand_freeze_state: dict[str, dict[str, Any]] = {
-            "left": {"frozen": None, "cmd_at_freeze": 0.0, "count": 0},
-            "right": {"frozen": None, "cmd_at_freeze": 0.0, "count": 0},
+            "left": {"frozen": None, "cmd_at_freeze": 0.0, "prev_q": None, "tick": 0, "stall": 0},
+            "right": {"frozen": None, "cmd_at_freeze": 0.0, "prev_q": None, "tick": 0, "stall": 0},
         }
         if self._hand_freeze_enabled and self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled:
             print(
                 "[INFO] G1 mirrored-hand contact-freeze enabled: "
-                f"residual>{self._hand_freeze_residual} rad, |vel|<{self._hand_freeze_vel} rad/s, "
-                f"{self._hand_freeze_steps} steps, preload {self._hand_freeze_preload} rad"
+                f"residual>{self._hand_freeze_residual} rad, advance<{self._hand_freeze_advance} rad "
+                f"per {self._hand_freeze_window} steps x{self._hand_freeze_stalls}, "
+                f"preload {self._hand_freeze_preload} rad"
             )
+
+        # Adaptive per-joint target lead ("quasi force control"). Replaces the
+        # binary contact-freeze: each finger joint's closing-direction target
+        # lead shrinks CONTINUOUSLY (0.08 -> 0.015) as its low-passed tracking
+        # shortfall grows while the joint is stalled -- the push force falls
+        # from ~100 N to ~20 N per finger with no detection latency, per joint,
+        # so the first finger to touch yields while the others keep closing.
+        # A continuous velocity gate keeps a fast free close at full speed (a
+        # pulled trigger parks the raw goal ~1 rad ahead even in free space, so
+        # shortfall alone cannot distinguish contact from free closing).
+        # Mutually exclusive with the freeze (two nonlinear switches interlock).
+        self._hand_adaptive_enabled = os.environ.get(
+            "ISAACLAB_G1_HAND_ADAPTIVE_DELTA", "0").strip().lower() not in ("0", "false")
+        n_hand = len(self._all_hand_ids)
+        self._ad_dmin = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_DMIN", "0.015"))
+        self._ad_e0 = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_E0", "0.10"))
+        self._ad_e1 = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_E1", "0.25"))
+        self._ad_v0 = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_V0", "0.30"))
+        self._ad_ae = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_ERR_ALPHA", "0.28"))   # tau ~15 ms
+        self._ad_av = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_VEL_ALPHA", "0.39"))   # tau ~10 ms
+        # recover 0.03 rad/s: after the object slips out the contact force
+        # vanishes and the lead re-arms -- at 0.1 rad/s the fingers caught up
+        # with the falling box and swatted it at full push ("parting slap",
+        # 4 m/s exit). Shrink stays instantaneous; only re-arming is slow.
+        self._ad_rstep = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_RECOVER_STEP", "0.00015"))
+        self._ad_err = torch.zeros((self.num_envs, n_hand), device=self.device)
+        self._ad_qd = torch.zeros((self.num_envs, n_hand), device=self.device)
+        self._ad_delta = torch.full(
+            (self.num_envs, n_hand), float(self.cfg.hand_joint_target_max_delta), device=self.device)
+        # thumb opposition (thumb_0) joints keep the full lead: their closing
+        # direction is pose-dependent and the shortfall signal is unreliable
+        self._ad_mask = torch.tensor(
+            [0.0 if "thumb_0" in self._asset.joint_names[i] else 1.0 for i in self._all_hand_ids],
+            device=self.device).view(1, -1)
+        # contact-force channel (the ONLY signal light objects produce: a
+        # 0.08 kg box never stalls the fingers, so kinematic cues are blind)
+        self._ad_f0 = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_F0_N", "0.3"))
+        self._ad_f1 = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_F1_N", "2.0"))
+        # single-sided touch: near-zero push (~3 N) -- ANY net force flings a
+        # light box; the full DMIN grip force is only applied once thumb-side
+        # AND finger-side both carry contact (opposed pinch, forces cancel)
+        self._ad_dmin_touch = float(os.environ.get("ISAACLAB_G1_HAND_ADAPTIVE_DMIN_TOUCH", "0.002"))
+        self._ad_left_joint = torch.tensor(
+            [1.0 if self._asset.joint_names[i].startswith("left") else 0.0 for i in self._all_hand_ids],
+            device=self.device).view(1, -1)
+        self._hc_sensor = None
+        self._hc_tried = False
+        self._hc_left_idx: list[int] = []
+        self._hc_right_idx: list[int] = []
+        if self._hand_adaptive_enabled and self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled:
+            if self._hand_freeze_enabled:
+                print("[WARN] G1 adaptive hand delta: forcing contact-freeze OFF (mutually exclusive)")
+                self._hand_freeze_enabled = False
+            if float(self.cfg.hand_joint_target_max_delta) <= 0.0:
+                print("[WARN] G1 adaptive hand delta requires HAND_JOINT_TARGET_MAX_DELTA > 0; disabling")
+                self._hand_adaptive_enabled = False
+            else:
+                print(
+                    "[INFO] G1 adaptive hand delta enabled: "
+                    f"lead {float(self.cfg.hand_joint_target_max_delta)}->{self._ad_dmin} rad over "
+                    f"err [{self._ad_e0},{self._ad_e1}], vel gate {self._ad_v0} rad/s, "
+                    f"recover {self._ad_rstep / 0.005:.2f} rad/s"
+                )
         self._bind_hand_friction_material()
 
         if self._enabled:
@@ -698,19 +768,22 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if self._write_hand_joint_state:
                 self._asset.write_joint_state_to_sim(hand_target, hand_velocity, joint_ids=self._all_hand_ids)
             else:
-                # keep the PRE-clamp streamed target for contact detection: the
-                # delta clamp caps the visible residual at max_delta (0.08),
-                # which can never reach the 0.15 freeze threshold -- detecting
-                # on the clamped target silently disabled the freeze entirely
+                # keep the PRE-clamp streamed target: the delta clamp caps the
+                # visible residual at max_delta, so every contact signal must be
+                # computed from the raw stream goal (hard-won lesson: detecting
+                # on the clamped target silently disables the protection)
                 raw_hand_target = hand_target
-                hand_target = _limit_joint_position_delta(
-                    self._asset.data.joint_pos[:, self._all_hand_ids],
-                    hand_target,
-                    float(self.cfg.hand_joint_target_max_delta),
-                )
+                if self._hand_adaptive_enabled:
+                    hand_target = self._apply_adaptive_hand_delta(raw_hand_target)
+                else:
+                    hand_target = _limit_joint_position_delta(
+                        self._asset.data.joint_pos[:, self._all_hand_ids],
+                        hand_target,
+                        float(self.cfg.hand_joint_target_max_delta),
+                    )
+                    hand_target = self._apply_hand_contact_freeze(hand_target, raw_hand_target)
                 if self.cfg.zero_target_only_hand_velocity:
                     hand_velocity.zero_()
-                hand_target = self._apply_hand_contact_freeze(hand_target, raw_hand_target)
             self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
             self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
@@ -732,7 +805,6 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if not self._hand_freeze_enabled or self.num_envs != 1:
             return hand_target
         cur = self._asset.data.joint_pos[:, self._all_hand_ids]
-        vel = self._asset.data.joint_vel[:, self._all_hand_ids]
         n_left = len(self._left_hand_ids)
         out = hand_target.clone()
         for hand, sl in (("left", slice(0, n_left)), ("right", slice(n_left, len(self._all_hand_ids)))):
@@ -743,7 +815,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 # release as soon as the streamed close command backs off
                 if close_cmd < st["cmd_at_freeze"] - 0.1:
                     st["frozen"] = None
-                    st["count"] = 0
+                    st["prev_q"] = None
+                    st["stall"] = 0
                     print(f"[INFO] G1 mirrored-hand contact-freeze released: {hand} hand")
                 else:
                     out[0, sl] = st["frozen"]
@@ -751,28 +824,113 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if close_cmd > self._hand_freeze_close_thresh:
                 closing_dir = torch.sign(tgt)
                 resid_close = ((tgt - cur[0, sl]) * closing_dir).clamp(min=0.0)
-                if (
-                    float(resid_close.mean()) > self._hand_freeze_residual
-                    and float(vel[0, sl].abs().max()) < self._hand_freeze_vel
-                ):
-                    st["count"] += 1
-                    if st["count"] >= self._hand_freeze_steps:
+                if st["prev_q"] is None:
+                    st["prev_q"] = cur[0, sl].clone()
+                    st["tick"] = 0
+                    st["stall"] = 0
+                st["tick"] += 1
+                if st["tick"] >= self._hand_freeze_window:
+                    advance = float(((cur[0, sl] - st["prev_q"]) * closing_dir).clamp(min=0.0).mean())
+                    if advance < self._hand_freeze_advance and float(resid_close.mean()) > self._hand_freeze_residual:
+                        st["stall"] += 1
+                    else:
+                        st["stall"] = 0
+                    st["prev_q"] = cur[0, sl].clone()
+                    st["tick"] = 0
+                    if st["stall"] >= self._hand_freeze_stalls:
                         limits = self._asset.data.joint_pos_limits[0, self._all_hand_ids, :][sl]
                         frozen = cur[0, sl] + self._hand_freeze_preload * closing_dir
                         frozen = torch.max(torch.min(frozen, limits[:, 1]), limits[:, 0])
                         st["frozen"] = frozen
                         st["cmd_at_freeze"] = close_cmd
-                        st["count"] = 0
+                        st["stall"] = 0
+                        st["prev_q"] = None
                         out[0, sl] = frozen
                         print(
                             f"[INFO] G1 mirrored-hand contact-freeze engaged: {hand} hand "
                             f"(+{self._hand_freeze_preload} rad preload)"
                         )
-                else:
-                    st["count"] = 0
             else:
-                st["count"] = 0
+                st["prev_q"] = None
+                st["stall"] = 0
         return out
+
+    def _apply_adaptive_hand_delta(self, raw_target: torch.Tensor) -> torch.Tensor:
+        """Per-joint adaptive target lead: quasi force control for the fingers.
+
+        The closing-direction lead shrinks continuously from ``max_delta`` to
+        ``DMIN`` as the low-passed closing shortfall grows while the joint is
+        stalled (velocity gate). Opening direction always gets the full lead so
+        releasing the trigger responds instantly. Shrink is instantaneous,
+        recovery is rate-limited to kill re-grip pump oscillation."""
+        q = self._asset.data.joint_pos[:, self._all_hand_ids]
+        qd = self._asset.data.joint_vel[:, self._all_hand_ids]
+        dmax = float(self.cfg.hand_joint_target_max_delta)
+        # closing direction from the raw stream goal; near-zero goal = opening
+        dirn = torch.sign(raw_target) * (raw_target.abs() >= 0.05)
+        e = ((raw_target - q) * dirn).clamp(min=0.0)
+        self._ad_err += self._ad_ae * (e - self._ad_err)
+        self._ad_qd += self._ad_av * (qd - self._ad_qd)
+        # continuous velocity gate: 1 when stalled, 0 while moving freely
+        g_v = (1.0 - self._ad_qd.abs() / self._ad_v0).clamp(0.0, 1.0)
+        s = ((self._ad_err - self._ad_e0) / (self._ad_e1 - self._ad_e0)).clamp(0.0, 1.0)
+        s = s * g_v
+        # contact-force channel: per-hand max contact force on the hand links,
+        # mapped continuously. No velocity gate here -- a measured force IS
+        # contact, with none of the kinematic ambiguity.
+        if not self._hc_tried:
+            self._hc_tried = True
+            try:
+                sensor = self._env.scene.sensors["hand_contact"]
+                names = sensor.body_names
+                self._hc_groups = {
+                    "lt": [i for i, n in enumerate(names) if n.startswith("left") and "thumb" in n],
+                    "lf": [i for i, n in enumerate(names) if n.startswith("left") and "thumb" not in n],
+                    "rt": [i for i, n in enumerate(names) if n.startswith("right") and "thumb" in n],
+                    "rf": [i for i, n in enumerate(names) if n.startswith("right") and "thumb" not in n],
+                }
+                self._hc_sensor = sensor
+                print(f"[INFO] G1 adaptive hand delta: contact-force channel online ({len(names)} hand bodies, "
+                      f"thumb/finger split L{len(self._hc_groups['lt'])}/{len(self._hc_groups['lf'])} "
+                      f"R{len(self._hc_groups['rt'])}/{len(self._hc_groups['rf'])})")
+            except Exception as exc:
+                print(f"[WARN] G1 adaptive hand delta: no hand_contact sensor ({exc}); kinematic signal only")
+        dmin_eff = torch.full_like(self._ad_delta, self._ad_dmin)
+        if self._hc_sensor is not None:
+            fm = self._hc_sensor.data.net_forces_w.norm(dim=-1)
+
+            def _side(idx):
+                return fm[:, idx].amax(dim=1, keepdim=True) if idx else fm.new_zeros(fm.shape[0], 1)
+
+            def _norm(f):
+                return ((f - self._ad_f0) / (self._ad_f1 - self._ad_f0)).clamp(0.0, 1.0)
+
+            s_lt, s_lf = _norm(_side(self._hc_groups["lt"])), _norm(_side(self._hc_groups["lf"]))
+            s_rt, s_rf = _norm(_side(self._hc_groups["rt"])), _norm(_side(self._hc_groups["rf"]))
+            # any-side contact shrinks the lead; opposed contact restores grip
+            s_force = (torch.maximum(s_lt, s_lf) * self._ad_left_joint
+                       + torch.maximum(s_rt, s_rf) * (1.0 - self._ad_left_joint))
+            s_pair = (torch.minimum(s_lt, s_lf) * self._ad_left_joint
+                      + torch.minimum(s_rt, s_rf) * (1.0 - self._ad_left_joint))
+            dmin_eff = self._ad_dmin_touch + (self._ad_dmin - self._ad_dmin_touch) * s_pair
+            s = torch.maximum(s, s_force)
+        s = s * self._ad_mask * (dirn != 0).float()
+        d_tgt = dmax - (dmax - dmin_eff) * s
+        self._ad_delta = torch.where(
+            d_tgt < self._ad_delta, d_tgt,
+            torch.minimum(self._ad_delta + self._ad_rstep, d_tgt))
+        full = torch.full_like(self._ad_delta, dmax)
+        lo = torch.where(dirn < 0, -self._ad_delta, -full)
+        hi = torch.where(dirn > 0, self._ad_delta, full)
+        return q + torch.clamp(raw_target - q, lo, hi)
+
+    def reset(self, env_ids=None):
+        super().reset(env_ids)
+        if hasattr(self, "_ad_err"):
+            ids = slice(None) if env_ids is None else env_ids
+            self._ad_err[ids] = 0.0
+            self._ad_qd[ids] = 0.0
+            self._ad_delta[ids] = float(self.cfg.hand_joint_target_max_delta)
 
     def _bind_hand_friction_material(self) -> None:
         """Bind an explicit high-friction physics material to the hand collision
