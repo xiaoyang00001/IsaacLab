@@ -15,7 +15,10 @@ from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
-from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
+from isaaclab.devices.openxr.retargeters import (
+    G1GripperMotionControllerRetargeterCfg,
+    G1TriHandUpperBodyRetargeterCfg,
+)
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import SceneEntityCfg
@@ -30,6 +33,10 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.box_success_reset 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
     G1GripperSyncActionCfg,
     MuJoCoG1MirrorActionCfg,
+)
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import (
+    HAND_TRACKING_ACTION_DIM,
+    HAND_TRACKING_JOINT_NAMES,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
@@ -1139,6 +1146,17 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         ),
         mirror_hands=_isaac_robot_cfg_bool(robot_id, "MIRROR_HANDS", False),
         controller_gripper_enabled=_isaac_robot_cfg_bool(robot_id, "CONTROLLER_GRIPPER_ENABLED", False),
+        # All of these resolve ISAACLAB_G1_<id>_<suffix> first and fall back to the global
+        # ISAACLAB_G1_<suffix>, matching how every other per-robot knob in this file behaves.
+        hand_tracking_enabled=_isaac_robot_cfg_bool(robot_id, "HAND_TRACKING_ENABLED", False),
+        hand_tracking_action_alpha=_isaac_robot_cfg_float(robot_id, "HAND_TRACKING_ACTION_ALPHA", 1.0),
+        hand_tracking_use_soft_limits=_isaac_robot_cfg_bool(robot_id, "HAND_TRACKING_USE_SOFT_LIMITS", False),
+        hand_tracking_write_joint_state=_isaac_robot_cfg_bool(robot_id, "HAND_TRACKING_WRITE_JOINT_STATE", False),
+        hand_tracking_target_max_delta=_isaac_robot_cfg_float(robot_id, "HAND_TRACKING_TARGET_MAX_DELTA", 0.20),
+        hand_tracking_debug_interval_s=_isaac_robot_cfg_float(robot_id, "HAND_TRACKING_DEBUG_INTERVAL_S", 0.0),
+        hand_tracking_scale=_isaac_robot_cfg_float(robot_id, "HAND_TRACKING_SCALE", 1.0),
+        hand_tracking_stale_frames=_isaac_robot_cfg_int(robot_id, "HAND_TRACKING_STALE_FRAMES", 0),
+        hand_tracking_joint_signs=_isaac_robot_cfg(robot_id, "HAND_TRACKING_JOINT_SIGNS", ""),
         controller_gripper_finger_close_angle=_cfg_float("ISAACLAB_G1_GRIPPER_FINGER_CLOSE_ANGLE", 1.8),
         controller_gripper_thumb_yaw_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_YAW_ANGLE", 0.5),
         controller_gripper_thumb_1_angle=_cfg_float("ISAACLAB_G1_GRIPPER_THUMB_1_ANGLE", 1.1),
@@ -1290,5 +1308,72 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),
+                # Real finger tracking instead of the trigger-driven gripper abstraction. The
+                # retargeter emits [left_wrist(7), right_wrist(7), hand_joints(14)]; the mirror
+                # action drops the wrist poses because the arms still follow the MuJoCo mirror.
+                # hand_joint_names fixes the output ordering, so it must stay aligned with the
+                # action's _all_hand_ids (left joints then right joints).
+                "handtracking": OpenXRDeviceCfg(
+                    retargeters=[
+                        G1TriHandUpperBodyRetargeterCfg(
+                            sim_device=teleop_device,
+                            hand_joint_names=HAND_TRACKING_JOINT_NAMES,
+                            num_open_xr_hand_joints=2 * 26,
+                        ),
+                    ],
+                    sim_device=teleop_device,
+                    xr_cfg=self.xr,
+                ),
             }
         )
+
+        self._validate_hand_tracking_action_width()
+
+    def _validate_hand_tracking_action_width(self) -> None:
+        """Fail loudly when the action space cannot match what the XR device emits.
+
+        teleop_se3_agent feeds the device output straight into ``env.step()``, so the summed action
+        width of both mirror terms has to equal the retargeter's output width. Getting this wrong
+        otherwise surfaces as a tensor-shape error inside the action manager, which the runner's
+        broad ``except`` swallows into a single log line.
+        """
+        terms = [self.actions.mujoco_g1_mirror_1, self.actions.mujoco_g1_mirror_2]
+        widths = []
+        for term in terms:
+            if not getattr(term, "enabled", False):
+                widths.append(0)
+            elif getattr(term, "hand_tracking_enabled", False):
+                widths.append(HAND_TRACKING_ACTION_DIM)
+            elif getattr(term, "controller_gripper_enabled", False):
+                widths.append(4)
+            else:
+                widths.append(0)
+
+        tracking = [i + 1 for i, t in enumerate(terms) if getattr(t, "hand_tracking_enabled", False)]
+        if not tracking:
+            return
+
+        if not any(getattr(t, "enabled", False) for t in terms):
+            # Scene-sync subscriber role disables both mirror terms, so the action space is empty by
+            # design here and there is nothing to reconcile. Say it out loud, because the symptom
+            # ("hands do not move") is otherwise indistinguishable from a broken setup.
+            print(
+                f"[INFO] G1 hand tracking requested for robot(s) {tracking}, but both mirror terms are "
+                "disabled (scene sync role=subscriber). The hands will not be driven by XR here."
+            )
+            return
+
+        print(f"[INFO] G1 hand tracking enabled for robot(s) {tracking}; action widths={widths}, total={sum(widths)}")
+        if len(tracking) > 1:
+            raise ValueError(
+                f"Hand tracking is enabled for robots {tracking}, but the XR device emits a single "
+                f"{HAND_TRACKING_ACTION_DIM}-wide action per frame. Enable it for one robot only "
+                "(set ISAACLAB_G1_2_HAND_TRACKING_ENABLED=0)."
+            )
+        if sum(widths) != HAND_TRACKING_ACTION_DIM:
+            raise ValueError(
+                f"Hand tracking needs the total action width to be {HAND_TRACKING_ACTION_DIM}, but the "
+                f"mirror terms sum to {sum(widths)} (per-term: {widths}). The most likely cause is "
+                "ISAACLAB_G1_CONTROLLER_GRIPPER_ENABLED=1 on the other robot; hand tracking and the "
+                "controller gripper cannot be active at the same time."
+            )

@@ -112,6 +112,19 @@ RIGHT_HAND_JOINT_NAMES = [
     "right_hand_middle_1_joint",
 ]
 
+HAND_TRACKING_JOINT_NAMES = LEFT_HAND_JOINT_NAMES + RIGHT_HAND_JOINT_NAMES
+"""Hand joint order handed to ``G1TriHandUpperBodyRetargeterCfg.hand_joint_names``.
+
+The retargeter scatters its optimizer output into this exact order (see its ``retarget()``,
+which indexes via ``hand_joint_names.index(name)``), so passing this list makes the returned
+hand-joint block line up with ``_all_hand_ids`` (``_left_hand_ids + _right_hand_ids``) with no
+reordering on our side.
+"""
+
+# G1TriHandUpperBodyRetargeter returns [left_wrist(7), right_wrist(7), hand_joints(14)].
+_HAND_TRACKING_WRIST_DIM = 14
+HAND_TRACKING_ACTION_DIM = _HAND_TRACKING_WRIST_DIM + len(HAND_TRACKING_JOINT_NAMES)
+
 
 @dataclass
 class _MirrorSample:
@@ -372,6 +385,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._right_hand_ids = self._build_joint_ids(RIGHT_HAND_JOINT_NAMES)
         self._all_hand_ids = self._left_hand_ids + self._right_hand_ids
         self._foot_body_ids = self._build_body_ids(cfg.foot_body_names)
+        self._hand_tracking_signs = self._build_hand_tracking_signs()
 
         self._transport = str(cfg.transport).lower()
         self._locomotion_sync_mode = str(cfg.locomotion_sync_mode).strip().lower()
@@ -422,6 +436,12 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._warned_root_position_mode = False
         self._warned_root_orientation_mode = False
         self._warned_gripper_unavailable = False
+        self._warned_hand_tracking_unavailable = False
+        self._warned_hand_tracking_stale = False
+        self._warned_hand_tracking_action_dim = False
+        self._last_hand_tracking_debug_time = 0.0
+        self._last_hand_tracking_action = None
+        self._hand_tracking_repeat_count = 0
         self._printed_first_sample = False
         self._printed_mirror_config = False
         self._last_no_packet_debug_time = 0.0
@@ -480,7 +500,13 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     @property
     def action_dim(self) -> int:
-        return 4 if self.cfg.enabled and self.cfg.controller_gripper_enabled else 0
+        if not self.cfg.enabled:
+            return 0
+        # Hand tracking supersedes the controller gripper: it drives every hand joint directly
+        # instead of synthesising them from two trigger axes.
+        if self.cfg.hand_tracking_enabled:
+            return HAND_TRACKING_ACTION_DIM
+        return 4 if self.cfg.controller_gripper_enabled else 0
 
     @property
     def raw_actions(self) -> torch.Tensor:
@@ -519,6 +545,26 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if self.action_dim == 0:
             self._processed_actions = actions
             return
+        if actions.shape[-1] != self.action_dim and not self._warned_hand_tracking_action_dim:
+            # Almost always means the .env switch and the CLI device disagree: enabling
+            # ISAACLAB_G1_HAND_TRACKING_ENABLED without passing --teleop_device handtracking leaves
+            # the motion-controller retargeter feeding 4 values into a 28-wide action term. Say so
+            # here instead of letting it surface as an opaque shape error deeper in the manager.
+            print(
+                f"[ERROR] MuJoCo G1 mirror action width mismatch: got {actions.shape[-1]}, "
+                f"expected {self.action_dim}. If hand tracking is enabled, launch with "
+                "'--teleop_device handtracking'; the controller gripper device emits 4 values."
+            )
+            self._warned_hand_tracking_action_dim = True
+        if self.cfg.hand_tracking_enabled:
+            # Retargeter output is joint angles in radians and legitimately goes negative, so it
+            # must not be squashed to [0, 1] the way normalised trigger axes are.
+            scaled = actions * float(self.cfg.hand_tracking_scale)
+            alpha = min(max(float(self.cfg.hand_tracking_action_alpha), 0.0), 1.0)
+            if self._processed_actions.shape != scaled.shape:
+                self._processed_actions = torch.zeros_like(scaled)
+            self._processed_actions = self._processed_actions + alpha * (scaled - self._processed_actions)
+            return
         target_actions = torch.clamp(actions, 0.0, 1.0)
         alpha = min(max(float(self.cfg.controller_gripper_action_alpha), 0.0), 1.0)
         self._processed_actions = self._processed_actions + alpha * (target_actions - self._processed_actions)
@@ -530,13 +576,13 @@ class MuJoCoG1MirrorAction(ActionTerm):
             return
         if not self._enabled or self._subscriber is None:
             self._hold_default_until_first_packet("mirror disabled or subscriber unavailable")
-            self._apply_controller_gripper_targets()
+            self._apply_teleop_hand_targets()
             return
 
         sample = self._sample()
         if sample is None:
             self._hold_default_until_first_packet("waiting for valid body packets")
-            self._apply_controller_gripper_targets()
+            self._apply_teleop_hand_targets()
             return
         self._last_sample = sample
         if not self._printed_first_sample:
@@ -605,7 +651,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         else:
             assign_body_subset(list(range(len(self._body_isaac_ids))), target_q, target_dq)
 
-        mirror_hands_from_mujoco = self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled
+        mirror_hands_from_mujoco = (
+            self.cfg.mirror_hands
+            and not self.cfg.controller_gripper_enabled
+            and not self.cfg.hand_tracking_enabled
+        )
         self._last_mirror_hands_from_mujoco = mirror_hands_from_mujoco
         if mirror_hands_from_mujoco:
             if sample.left_hand_pos is not None and len(self._left_hand_ids) == len(LEFT_HAND_JOINT_NAMES):
@@ -678,7 +728,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
                     hand_velocity.zero_()
             self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
             self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
-        self._apply_controller_gripper_targets()
+        self._apply_teleop_hand_targets()
 
         if self.cfg.root_motion_mode in {"stance", "auto"}:
             self._apply_stance_root_if_needed(source_has_root=sample.root_pos_w is not None)
@@ -885,6 +935,139 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"src_xyz=[{src_pos[0]:.3f}, {src_pos[1]:.3f}, {src_pos[2]:.3f}], "
             f"src_delta_xy=[{src_delta_xy[0]:.3f}, {src_delta_xy[1]:.3f}], "
             f"applied_xyz=[{applied_pos[0]:.3f}, {applied_pos[1]:.3f}, {applied_pos[2]:.3f}]"
+        )
+
+    def _build_hand_tracking_signs(self) -> torch.Tensor | None:
+        """Parse the optional per-joint sign correction into a (1, 14) tensor."""
+        raw = str(getattr(self.cfg, "hand_tracking_joint_signs", "") or "").strip()
+        if not raw:
+            return None
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        expected = len(HAND_TRACKING_JOINT_NAMES)
+        if len(parts) != expected:
+            print(
+                f"[WARN] Ignoring hand_tracking_joint_signs: expected {expected} comma-separated "
+                f"values ordered like {HAND_TRACKING_JOINT_NAMES}, got {len(parts)}."
+            )
+            return None
+        try:
+            values = [float(p) for p in parts]
+        except ValueError:
+            print(f"[WARN] Ignoring hand_tracking_joint_signs: not all values are numeric ({raw!r}).")
+            return None
+        print(f"[INFO] Hand tracking joint sign correction active: {values}")
+        return torch.tensor(values, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+    def _hand_tracking_is_stale(self) -> bool:
+        """Detect the all-default OpenXR pose that shows up when the hands are not tracked.
+
+        OpenXR keeps returning its initial pose for every joint when tracking is unavailable, and
+        the wrist key remains present, so the retargeter's own None-guard never fires and DexPilot
+        solves that constant input into a fixed posture. A byte-identical action across many frames
+        is the tell -- real tracking always jitters.
+        """
+        threshold = int(self.cfg.hand_tracking_stale_frames)
+        if threshold <= 0:
+            return False
+        current = self._raw_actions.detach()
+        if self._last_hand_tracking_action is not None and torch.equal(current, self._last_hand_tracking_action):
+            self._hand_tracking_repeat_count += 1
+        else:
+            self._hand_tracking_repeat_count = 0
+            self._warned_hand_tracking_stale = False
+        self._last_hand_tracking_action = current.clone()
+        if self._hand_tracking_repeat_count < threshold:
+            return False
+        if not self._warned_hand_tracking_stale:
+            print(
+                f"[WARN] Hand tracking input unchanged for {self._hand_tracking_repeat_count} frames; "
+                "treating it as not tracked and holding the current finger pose. Check that the "
+                "headset is on and both hands are visible."
+            )
+            self._warned_hand_tracking_stale = True
+        return True
+
+    def _apply_teleop_hand_targets(self) -> None:
+        """Route teleop hand commands to whichever hand control path is active.
+
+        The paths are mutually exclusive. Hand tracking drives every hand joint straight from the
+        OpenXR retargeter; the controller gripper instead synthesises them from two trigger axes.
+        """
+        if self.cfg.hand_tracking_enabled:
+            self._apply_hand_tracking_targets()
+        else:
+            self._apply_controller_gripper_targets()
+
+    def _apply_hand_tracking_targets(self) -> None:
+        if not self.cfg.hand_tracking_enabled or self.action_dim == 0:
+            return
+        if len(self._left_hand_ids) != len(LEFT_HAND_JOINT_NAMES) or len(self._right_hand_ids) != len(
+            RIGHT_HAND_JOINT_NAMES
+        ):
+            if not self._warned_hand_tracking_unavailable:
+                print(
+                    "[WARN] MuJoCo G1 mirror hand tracking disabled; "
+                    f"left_hand_joints={len(self._left_hand_ids)}, right_hand_joints={len(self._right_hand_ids)}"
+                )
+                self._warned_hand_tracking_unavailable = True
+            return
+
+        if self._processed_actions.shape[-1] < HAND_TRACKING_ACTION_DIM:
+            # Width mismatch; process_actions already explained it. Leave the hands alone rather
+            # than writing a truncated slice.
+            return
+        if self._hand_tracking_is_stale():
+            return
+
+        # Drop the leading wrist poses: the arms keep following the MuJoCo mirror, so only the
+        # trailing hand-joint block is consumed. It is already ordered to match _all_hand_ids.
+        target = self._processed_actions[:, _HAND_TRACKING_WRIST_DIM:]
+        if self._hand_tracking_signs is not None:
+            target = target * self._hand_tracking_signs
+        if self.cfg.hand_tracking_use_soft_limits:
+            limits = self._asset.data.soft_joint_pos_limits[:, self._all_hand_ids, :]
+        else:
+            limits = self._asset.data.joint_pos_limits[:, self._all_hand_ids, :]
+        unclamped_target = target.clone()
+        target = torch.max(torch.min(target, limits[..., 1]), limits[..., 0])
+        if not self.cfg.hand_tracking_write_joint_state:
+            target = _limit_joint_position_delta(
+                self._asset.data.joint_pos[:, self._all_hand_ids],
+                target,
+                float(self.cfg.hand_tracking_target_max_delta),
+            )
+        else:
+            joint_vel = torch.zeros_like(target)
+            self._asset.write_joint_state_to_sim(target, joint_vel, joint_ids=self._all_hand_ids)
+        self._asset.set_joint_position_target(target, joint_ids=self._all_hand_ids)
+        self._print_hand_tracking_debug(unclamped_target, target, limits)
+
+    def _print_hand_tracking_debug(
+        self,
+        unclamped_target: torch.Tensor,
+        clamped_target: torch.Tensor,
+        limits: torch.Tensor,
+    ) -> None:
+        interval = float(self.cfg.hand_tracking_debug_interval_s)
+        if interval <= 0.0:
+            return
+
+        now = time.monotonic()
+        if now - self._last_hand_tracking_debug_time < interval:
+            return
+        self._last_hand_tracking_debug_time = now
+
+        current = self._asset.data.joint_pos[:, self._all_hand_ids][0].detach().cpu().numpy()
+        target = clamped_target[0].detach().cpu().numpy()
+        raw_target = unclamped_target[0].detach().cpu().numpy()
+        limit_kind = "soft" if self.cfg.hand_tracking_use_soft_limits else "hard"
+        print(
+            "[INFO] Hand tracking debug: "
+            f"limit={limit_kind}, mujoco_hand_mirror={self._last_mirror_hands_from_mujoco}, "
+            f"write_joint_state={self.cfg.hand_tracking_write_joint_state}, "
+            f"raw_target={np.round(raw_target, 3).tolist()}, "
+            f"target={np.round(target, 3).tolist()}, "
+            f"current={np.round(current, 3).tolist()}"
         )
 
     def _apply_controller_gripper_targets(self) -> None:

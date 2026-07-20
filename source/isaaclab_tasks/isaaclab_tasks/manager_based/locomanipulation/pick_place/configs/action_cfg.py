@@ -244,6 +244,67 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     controller_gripper_debug_interval_s: float = 0.0
     """Seconds between controller gripper debug prints. Non-positive disables periodic prints."""
 
+    hand_tracking_enabled: bool = False
+    """Whether the action consumes OpenXR hand-tracking retargeter output for the G1 hands.
+
+    When enabled, the action dimension is 28 and matches the ``G1TriHandUpperBodyRetargeter``
+    output layout: ``[left_wrist_pose(7), right_wrist_pose(7), hand_joints(14)]``. Only the
+    trailing 14 hand-joint values are consumed -- the wrist poses are ignored because the arms
+    keep following the MuJoCo mirror. Those 14 values are ordered as
+    ``LEFT_HAND_JOINT_NAMES + RIGHT_HAND_JOINT_NAMES``, which matches ``_all_hand_ids``, so the
+    retargeter output maps onto the hand joints without any reordering.
+
+    This takes precedence over both ``mirror_hands`` and ``controller_gripper_enabled``.
+    """
+
+    hand_tracking_action_alpha: float = 1.0
+    """Low-pass smoothing factor applied to incoming hand-tracking joint targets.
+
+    Unlike the controller gripper, the retargeter already low-pass filters its own output
+    (``low_pass_alpha`` in the dexpilot yml), so this defaults to no extra smoothing.
+    """
+
+    hand_tracking_target_max_delta: float = 0.20
+    """Maximum per-step hand-tracking target change in radians. Non-positive disables limiting."""
+
+    hand_tracking_use_soft_limits: bool = False
+    """Whether hand-tracking targets are clamped to soft limits instead of hard joint limits.
+
+    Defaults to hard limits to match the controller-gripper path. Soft limits apply
+    ``soft_joint_pos_limit_factor`` (typically 0.9), which shaves the last 10% off a full fist and
+    shows up as "the fingers never quite close".
+    """
+
+    hand_tracking_joint_signs: str = ""
+    """Optional per-joint sign correction, as 14 comma-separated values (empty means all +1).
+
+    Ordered like ``LEFT_HAND_JOINT_NAMES + RIGHT_HAND_JOINT_NAMES``. This is an escape hatch for
+    the case where the DexPilot URDFs and the Isaac USD disagree on a joint's positive direction:
+    the retargeter solves against ``G1_left/right_hand.urdf`` while the targets are applied to the
+    USD articulation, and nothing guarantees the two agree per joint. Diagnose with
+    ``hand_tracking_debug_interval_s`` -- a joint pinned to one limit while the finger should be
+    moving is the signature.
+    """
+
+    hand_tracking_scale: float = 1.0
+    """Overall scale applied to the retargeted joint angles, for tuning grasp amplitude."""
+
+    hand_tracking_stale_frames: int = 0
+    """Frames of byte-identical action before hand tracking is treated as stale and skipped.
+
+    OpenXR hands out a default all-zero pose for every joint when tracking is absent (headset off,
+    hands out of view, controllers in use). The wrist key still exists, so the retargeter's
+    ``wrist is None`` guard does not fire and DexPilot happily solves the all-zero point cloud into
+    a fixed, physically meaningless posture. Without this guard the fingers snap to that posture and
+    hold it, with no error anywhere. Non-positive disables the check.
+    """
+
+    hand_tracking_write_joint_state: bool = False
+    """Whether hand-tracking targets should also be written directly to the hand joint state."""
+
+    hand_tracking_debug_interval_s: float = 0.0
+    """Seconds between hand-tracking debug prints. Non-positive disables periodic prints."""
+
     foot_body_names: list[str] = ["left_ankle_roll_link", "right_ankle_roll_link"]
     """Foot bodies used for stance-root estimation and ground locking."""
 
