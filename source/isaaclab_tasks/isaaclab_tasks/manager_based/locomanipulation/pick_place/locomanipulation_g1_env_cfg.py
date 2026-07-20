@@ -995,17 +995,20 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             ),
         ),
     )
-    # 两个塑料筐从 pushcart_2 挪到流水线滚轮面上并排放置（缩小一半后 0.3×0.2×0.15 m）。
+    # 两个塑料筐从 pushcart_2 挪到流水线滚轮面上（缩小一半后 0.3×0.2×0.15 m，X 半宽≈0.15）。
     # 筐原点在底面，滚轮顶 z≈0.772 → base 抬到 0.775（+3 mm 间隙避免初始穿透）。
-    # 沿 y 走向前后错开 0.6 m，均在滚轮可用宽度内（x=-5.62）。
+    # 分别贴近各自机器人：沿 X 分到滚轮碰撞带 x[-6.07,-5.17] 两侧边缘（各留 ~3 cm 余量
+    # 不掉出），Y 仍沿走向前后错开 0.6 m（16.4 / 17.0，中心对齐机器人 y=16.7）：
+    #   cart2_tote1 → +X 侧 x=-5.35，靠 robot_1(x=-4.75)，间距 0.92→0.67 m；
+    #   cart2_tote2 → -X 侧 x=-5.89，靠 robot_2(x=-6.70)，间距 1.12→0.86 m。
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 16.4, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.35, 16.4, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
     cart2_tote2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 17.0, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.89, 17.0, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
 
