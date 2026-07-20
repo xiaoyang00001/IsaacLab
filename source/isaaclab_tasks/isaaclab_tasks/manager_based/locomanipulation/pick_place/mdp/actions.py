@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 import re
 import socket
 import time
@@ -430,6 +431,29 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._last_gripper_debug_time = 0.0
         self._last_mirror_hands_from_mujoco = False
 
+        # Contact-freeze for the mirrored-hand path: once closing fingers stall
+        # on an object, freeze the target at contact + preload instead of letting
+        # the streamed full-close pose park ~1 rad past the surface and crush at
+        # the effort limit (the main source of probabilistic teleop grasps).
+        self._hand_freeze_enabled = os.environ.get(
+            "ISAACLAB_G1_GRIPPER_CONTACT_FREEZE", "1").strip().lower() not in ("0", "false")
+        self._hand_freeze_residual = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_RESIDUAL_RAD", "0.15"))
+        self._hand_freeze_vel = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_VEL_RAD_S", "0.6"))
+        self._hand_freeze_steps = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_STEPS", "10"))
+        self._hand_freeze_preload = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_PRELOAD_RAD", "0.05"))
+        self._hand_freeze_close_thresh = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_CLOSE_RAD", "0.5"))
+        self._hand_freeze_state: dict[str, dict[str, Any]] = {
+            "left": {"frozen": None, "cmd_at_freeze": 0.0, "count": 0},
+            "right": {"frozen": None, "cmd_at_freeze": 0.0, "count": 0},
+        }
+        if self._hand_freeze_enabled and self.cfg.mirror_hands and not self.cfg.controller_gripper_enabled:
+            print(
+                "[INFO] G1 mirrored-hand contact-freeze enabled: "
+                f"residual>{self._hand_freeze_residual} rad, |vel|<{self._hand_freeze_vel} rad/s, "
+                f"{self._hand_freeze_steps} steps, preload {self._hand_freeze_preload} rad"
+            )
+        self._bind_hand_friction_material()
+
         if self._enabled:
             try:
                 if self._transport == "udp":
@@ -676,6 +700,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 )
                 if self.cfg.zero_target_only_hand_velocity:
                     hand_velocity.zero_()
+                hand_target = self._apply_hand_contact_freeze(hand_target)
             self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
             self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
@@ -685,6 +710,95 @@ class MuJoCoG1MirrorAction(ActionTerm):
         if self.cfg.ground_lock and not source_root_applied:
             self._apply_ground_lock()
         self._print_root_debug(sample)
+
+    def _apply_hand_contact_freeze(self, hand_target: torch.Tensor) -> torch.Tensor:
+        """Freeze mirrored finger targets at contact + preload while the stream
+        commands a close, so a full-trigger close cannot saturate the finger
+        actuators against the object (probabilistic slip/eject during teleop)."""
+        if not self._hand_freeze_enabled or self.num_envs != 1:
+            return hand_target
+        cur = self._asset.data.joint_pos[:, self._all_hand_ids]
+        vel = self._asset.data.joint_vel[:, self._all_hand_ids]
+        n_left = len(self._left_hand_ids)
+        out = hand_target.clone()
+        for hand, sl in (("left", slice(0, n_left)), ("right", slice(n_left, len(self._all_hand_ids)))):
+            tgt = hand_target[0, sl]
+            close_cmd = float(tgt.abs().mean())
+            st = self._hand_freeze_state[hand]
+            if st["frozen"] is not None:
+                # release once the streamed close command backs off noticeably
+                if close_cmd < st["cmd_at_freeze"] - 0.2:
+                    st["frozen"] = None
+                    st["count"] = 0
+                    print(f"[INFO] G1 mirrored-hand contact-freeze released: {hand} hand")
+                else:
+                    out[0, sl] = st["frozen"]
+                    continue
+            if close_cmd > self._hand_freeze_close_thresh:
+                closing_dir = torch.sign(tgt)
+                resid_close = ((tgt - cur[0, sl]) * closing_dir).clamp(min=0.0)
+                if (
+                    float(resid_close.mean()) > self._hand_freeze_residual
+                    and float(vel[0, sl].abs().mean()) < self._hand_freeze_vel
+                ):
+                    st["count"] += 1
+                    if st["count"] >= self._hand_freeze_steps:
+                        limits = self._asset.data.joint_pos_limits[0, self._all_hand_ids, :][sl]
+                        frozen = cur[0, sl] + self._hand_freeze_preload * closing_dir
+                        frozen = torch.max(torch.min(frozen, limits[:, 1]), limits[:, 0])
+                        st["frozen"] = frozen
+                        st["cmd_at_freeze"] = close_cmd
+                        st["count"] = 0
+                        out[0, sl] = frozen
+                        print(
+                            f"[INFO] G1 mirrored-hand contact-freeze engaged: {hand} hand "
+                            f"(+{self._hand_freeze_preload} rad preload)"
+                        )
+                else:
+                    st["count"] = 0
+            else:
+                st["count"] = 0
+        return out
+
+    def _bind_hand_friction_material(self) -> None:
+        """Bind an explicit high-friction physics material to the hand collision
+        prims. The hands ship with NO material, so contacts fall back to the sim
+        default (0.5) and PhysX averages it with the box material -- roughly
+        halving the intended grip friction."""
+        static = float(os.environ.get("ISAACLAB_G1_HAND_FRICTION_STATIC", "1.2"))
+        dynamic = float(os.environ.get("ISAACLAB_G1_HAND_FRICTION_DYNAMIC", "0.9"))
+        if static <= 0.0:
+            return
+        try:
+            import isaaclab.sim as sim_utils
+            import omni.usd
+            from pxr import UsdPhysics
+
+            mat_path = "/World/PhysicsMaterials/G1HandGripMaterial"
+            stage = omni.usd.get_context().get_stage()
+            if not stage.GetPrimAtPath(mat_path).IsValid():
+                mat_cfg = sim_utils.RigidBodyMaterialCfg(
+                    static_friction=static,
+                    dynamic_friction=dynamic,
+                    friction_combine_mode="max",
+                )
+                mat_cfg.func(mat_path, mat_cfg)
+            robot_root = self._asset.cfg.prim_path.replace("env_.*", "env_0")
+            bound = 0
+            for prim in stage.Traverse():
+                path = str(prim.GetPath())
+                if not path.startswith(robot_root) or not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                if not any(k in path for k in ("palm", "hand", "wrist")):
+                    continue
+                sim_utils.bind_physics_material(path, mat_path)
+                bound += 1
+            print(
+                f"[INFO] G1 hand friction material bound to {bound} collision prims "
+                f"(static={static}, dynamic={dynamic}, combine=max)"
+            )
+        except Exception as exc:
+            print(f"[WARN] G1 hand friction material binding failed: {exc}")
 
     def _print_mirror_config(self) -> None:
         if self._printed_mirror_config:
