@@ -438,11 +438,13 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._hand_freeze_enabled = os.environ.get(
             "ISAACLAB_G1_GRIPPER_CONTACT_FREEZE", "1").strip().lower() not in ("0", "false")
         self._hand_freeze_residual = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_RESIDUAL_RAD", "0.15"))
-        # vel 1.5 / 5 steps: the fingers close at ~0.8 rad/s, so a 0.6 rad/s
-        # gate never opened until well after impact and 10 steps of saturated
-        # crush had already ejected light boxes
-        self._hand_freeze_vel = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_VEL_RAD_S", "1.5"))
-        self._hand_freeze_steps = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_STEPS", "5"))
+        # Contact = ALL finger joints stalled (max |vel| < 0.25) while the
+        # stream still commands a close. A mean-velocity gate misfires: idle
+        # joints (thumb yaw etc.) drag the mean down and freeze the hand right
+        # at trigger-pull ("hand barely reacts"). The 8-step window lets the
+        # free-close spin-up (~3 steps to exceed 0.25) reset the counter.
+        self._hand_freeze_vel = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_VEL_RAD_S", "0.25"))
+        self._hand_freeze_steps = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_STEPS", "8"))
         self._hand_freeze_preload = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_PRELOAD_RAD", "0.05"))
         self._hand_freeze_close_thresh = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_CLOSE_RAD", "0.5"))
         self._hand_freeze_state: dict[str, dict[str, Any]] = {
@@ -738,8 +740,8 @@ class MuJoCoG1MirrorAction(ActionTerm):
             close_cmd = float(tgt.abs().mean())
             st = self._hand_freeze_state[hand]
             if st["frozen"] is not None:
-                # release once the streamed close command backs off noticeably
-                if close_cmd < st["cmd_at_freeze"] - 0.2:
+                # release as soon as the streamed close command backs off
+                if close_cmd < st["cmd_at_freeze"] - 0.1:
                     st["frozen"] = None
                     st["count"] = 0
                     print(f"[INFO] G1 mirrored-hand contact-freeze released: {hand} hand")
@@ -751,7 +753,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 resid_close = ((tgt - cur[0, sl]) * closing_dir).clamp(min=0.0)
                 if (
                     float(resid_close.mean()) > self._hand_freeze_residual
-                    and float(vel[0, sl].abs().mean()) < self._hand_freeze_vel
+                    and float(vel[0, sl].abs().max()) < self._hand_freeze_vel
                 ):
                     st["count"] += 1
                     if st["count"] >= self._hand_freeze_steps:
