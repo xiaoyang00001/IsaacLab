@@ -1000,12 +1000,12 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # 沿 y 走向前后错开 0.6 m，均在滚轮可用宽度内（x=-5.62）。
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 13.9, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 16.4, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
     cart2_tote2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 14.5, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.62, 17.0, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
 
@@ -1018,13 +1018,14 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # 双机夹抬工位：以塑料筐拖车 (-5.4, 19.39363) 为中心，沿 X 轴左右两侧各 0.65 m
-    # 对称站位，面对面（robot_1 在 +X 侧朝 -X，robot_2 在 -X 侧朝 +X）。
-    # robot_2 与纸箱推车 (x=-6.8) 之间仍留约 0.45 m 间隙。
+    # 双机夹抬工位：跟随两塑料筐移到流水线旁，以两筐中心 (x≈-5.62, y=16.7) 为工位，
+    # 沿 X 轴左右两侧对称站位，面对面（robot_1 在 +X 侧 x=-4.75 朝 -X，robot_2 在 -X 侧 x=-6.05 朝 +X）。
+    # 注意：流水线(结构占 x[-6.19,-5.04])比原推车宽，robot_2(x=-6.05) 贴近流水线 -X 侧边缘，
+    # viewer 中需留意机身/腿是否蹭到机架侧护栏（背景机架仅视觉无碰撞，碰撞板在 x[-6.07,-5.17]）。
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(-4.75, 19.39363, 0.78),
+            pos=(-4.75, 16.7, 0.78),
             rot=(0.0, 0.0, 0.0, 1.0),
         ),
     )
@@ -1041,7 +1042,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(-6.05, 19.39363, 0.78),
+            pos=(-6.05, 16.7, 0.78),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
