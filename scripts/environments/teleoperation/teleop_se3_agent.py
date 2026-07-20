@@ -44,10 +44,14 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
 G1_LOCOMANIP_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-Abs-v0"
+G1_LOCOMANIP_HYBRID_TASK_ID = "Isaac-PickPlace-Locomanipulation-G1-Hybrid-Abs-v0"
 G1_LOCOMANIP_TASK_ALIASES = {
     "Isaac-PickPlace-Locomanipulation-G1-Abs": G1_LOCOMANIP_TASK_ID,
     G1_LOCOMANIP_TASK_ID: G1_LOCOMANIP_TASK_ID,
+    "Isaac-PickPlace-Locomanipulation-G1-Hybrid-Abs": G1_LOCOMANIP_HYBRID_TASK_ID,
+    G1_LOCOMANIP_HYBRID_TASK_ID: G1_LOCOMANIP_HYBRID_TASK_ID,
 }
+G1_PINK_LOCOMANIP_TASK_IDS = {G1_LOCOMANIP_TASK_ID, G1_LOCOMANIP_HYBRID_TASK_ID}
 
 
 def _cli_flag_present(flag: str) -> bool:
@@ -57,13 +61,13 @@ def _cli_flag_present(flag: str) -> bool:
 args_cli.task = G1_LOCOMANIP_TASK_ALIASES.get(args_cli.task, args_cli.task)
 
 if (
-    args_cli.task == G1_LOCOMANIP_TASK_ID
+    args_cli.task in G1_PINK_LOCOMANIP_TASK_IDS
     and not _cli_flag_present("--teleop_device")
     and args_cli.teleop_device == "keyboard"
 ):
     args_cli.teleop_device = "motion_controllers"
 
-if args_cli.task == G1_LOCOMANIP_TASK_ID:
+if args_cli.task in G1_PINK_LOCOMANIP_TASK_IDS:
     args_cli.enable_pinocchio = True
 
 app_launcher_args = vars(args_cli)
@@ -224,7 +228,7 @@ def main() -> None:
         teleoperation_callbacks["RESET"] = request_synchronized_g1_reset
 
     # For hand tracking devices, add additional callbacks
-    if args_cli.xr and args_cli.task != G1_LOCOMANIP_TASK_ID:
+    if args_cli.xr and args_cli.task not in G1_PINK_LOCOMANIP_TASK_IDS:
         # Default to inactive for hand tracking
         teleoperation_active = False
     else:
@@ -282,6 +286,10 @@ def main() -> None:
         return
 
     print(f"Using teleop device: {teleop_interface}")
+    print(
+        f"[INFO] Teleoperation control loop: active={teleoperation_active}, "
+        f"action_shape={env.action_space.shape}, active_terms={env.action_manager.active_terms}"
+    )
 
     # reset environment
     env.reset()
