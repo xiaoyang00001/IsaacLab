@@ -438,8 +438,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._hand_freeze_enabled = os.environ.get(
             "ISAACLAB_G1_GRIPPER_CONTACT_FREEZE", "1").strip().lower() not in ("0", "false")
         self._hand_freeze_residual = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_RESIDUAL_RAD", "0.15"))
-        self._hand_freeze_vel = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_VEL_RAD_S", "0.6"))
-        self._hand_freeze_steps = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_STEPS", "10"))
+        # vel 1.5 / 5 steps: the fingers close at ~0.8 rad/s, so a 0.6 rad/s
+        # gate never opened until well after impact and 10 steps of saturated
+        # crush had already ejected light boxes
+        self._hand_freeze_vel = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_VEL_RAD_S", "1.5"))
+        self._hand_freeze_steps = int(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_STEPS", "5"))
         self._hand_freeze_preload = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_PRELOAD_RAD", "0.05"))
         self._hand_freeze_close_thresh = float(os.environ.get("ISAACLAB_G1_GRIPPER_FREEZE_CLOSE_RAD", "0.5"))
         self._hand_freeze_state: dict[str, dict[str, Any]] = {
@@ -693,6 +696,11 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if self._write_hand_joint_state:
                 self._asset.write_joint_state_to_sim(hand_target, hand_velocity, joint_ids=self._all_hand_ids)
             else:
+                # keep the PRE-clamp streamed target for contact detection: the
+                # delta clamp caps the visible residual at max_delta (0.08),
+                # which can never reach the 0.15 freeze threshold -- detecting
+                # on the clamped target silently disabled the freeze entirely
+                raw_hand_target = hand_target
                 hand_target = _limit_joint_position_delta(
                     self._asset.data.joint_pos[:, self._all_hand_ids],
                     hand_target,
@@ -700,7 +708,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
                 )
                 if self.cfg.zero_target_only_hand_velocity:
                     hand_velocity.zero_()
-                hand_target = self._apply_hand_contact_freeze(hand_target)
+                hand_target = self._apply_hand_contact_freeze(hand_target, raw_hand_target)
             self._asset.set_joint_position_target(hand_target, joint_ids=self._all_hand_ids)
             self._asset.set_joint_velocity_target(hand_velocity, joint_ids=self._all_hand_ids)
         self._apply_controller_gripper_targets()
@@ -711,10 +719,14 @@ class MuJoCoG1MirrorAction(ActionTerm):
             self._apply_ground_lock()
         self._print_root_debug(sample)
 
-    def _apply_hand_contact_freeze(self, hand_target: torch.Tensor) -> torch.Tensor:
+    def _apply_hand_contact_freeze(self, hand_target: torch.Tensor, raw_target: torch.Tensor) -> torch.Tensor:
         """Freeze mirrored finger targets at contact + preload while the stream
         commands a close, so a full-trigger close cannot saturate the finger
-        actuators against the object (probabilistic slip/eject during teleop)."""
+        actuators against the object (probabilistic slip/eject during teleop).
+
+        ``raw_target`` is the streamed goal BEFORE the per-step delta clamp:
+        contact shows up there as a large residual (~1 rad), while the clamped
+        ``hand_target`` residual is capped at max_delta and carries no signal."""
         if not self._hand_freeze_enabled or self.num_envs != 1:
             return hand_target
         cur = self._asset.data.joint_pos[:, self._all_hand_ids]
@@ -722,7 +734,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         n_left = len(self._left_hand_ids)
         out = hand_target.clone()
         for hand, sl in (("left", slice(0, n_left)), ("right", slice(n_left, len(self._all_hand_ids)))):
-            tgt = hand_target[0, sl]
+            tgt = raw_target[0, sl]
             close_cmd = float(tgt.abs().mean())
             st = self._hand_freeze_state[hand]
             if st["frozen"] is not None:
