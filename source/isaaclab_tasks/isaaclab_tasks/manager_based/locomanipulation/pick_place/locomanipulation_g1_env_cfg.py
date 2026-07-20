@@ -18,6 +18,7 @@ from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
 from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -1251,6 +1252,41 @@ class TerminationsCfg:
     # )
 
 
+# ------------------------------------------------------------------
+# 流水线驱动参数。背景 USD 的 ConveyorBelt 只有视觉，物体靠 conveyor_collider
+# 那块不可见 kinematic 碰撞板托着，所以"流动"由 drive_totes_on_conveyor 每
+# 20 ms 覆写筐的水平速度模拟（同 congxian 分支的 drive_object_on_conveyor 思路）。
+#
+# 方向 -Y：从入料端 y=18.0 流过双机工位 y=16.7，到出料端 y=10.6 后瞬移回入料端，
+# 循环往复。速度 0.3 m/s——congxian 用 0.5，这里筐缩了一半又轻（0.45 kg），放慢
+# 一档既不易滑出滚轮带，也给机器人留出抓取窗口。
+# ------------------------------------------------------------------
+CONVEYOR_TOTE_NAMES = ("cart2_tote1", "cart2_tote2")
+CONVEYOR_SPEED = _cfg_float("ISAACLAB_CONVEYOR_SPEED", 0.3)
+CONVEYOR_Y_RECYCLE = _cfg_float("ISAACLAB_CONVEYOR_Y_RECYCLE", 10.6)
+CONVEYOR_Y_RESPAWN = _cfg_float("ISAACLAB_CONVEYOR_Y_RESPAWN", 18.0)
+# 订阅端的筐是 kinematic、纯跟随发布端 scene_state，本地再驱动会和同步打架。
+CONVEYOR_ENABLED = _cfg_bool("ISAACLAB_CONVEYOR_ENABLED", True) and ZMQ_SYNC_ROLE != "subscriber"
+
+
+@configclass
+class EventsCfg:
+    """Runtime events：流水线带动两个塑料筐循环流动。"""
+
+    drive_totes = EventTerm(
+        func=locomanip_mdp.drive_totes_on_conveyor,
+        mode="interval",
+        interval_range_s=(0.02, 0.02),
+        params={
+            "object_names": CONVEYOR_TOTE_NAMES,
+            "velocity_y": -CONVEYOR_SPEED,
+            "enabled": CONVEYOR_ENABLED,
+            "y_recycle": CONVEYOR_Y_RECYCLE,
+            "y_respawn": CONVEYOR_Y_RESPAWN,
+        },
+    )
+
+
 ##
 # MDP settings
 ##
@@ -1273,6 +1309,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
     actions: ActionsCfg = ActionsCfg()
     commands = None
     terminations: TerminationsCfg = TerminationsCfg()
+    events: EventsCfg = EventsCfg()
 
     # Unused managers
     rewards = None

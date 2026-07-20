@@ -1,0 +1,97 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Runtime events for the warehouse locomanipulation scene.
+
+目前只含流水线驱动：背景 USD 的 ConveyorBelt_A08 三段是纯视觉件（无 PhysX 表面速度、
+无滚轮刚体），物体靠场景里的不可见 kinematic 碰撞板 ``conveyor_collider`` 托住。
+因此"流动"不能靠物理带动，只能由本模块按固定周期覆写筐的 root 线速度来模拟。
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import torch
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedEnv
+
+
+def drive_totes_on_conveyor(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    object_names: tuple[str, ...] = ("cart2_tote1", "cart2_tote2"),
+    velocity_y: float = -0.3,
+    enabled: bool = True,
+    belt_top_z: float = 0.772,
+    z_tolerance: float = 0.15,
+    x_range: tuple[float, float] = (-6.17, -5.07),
+    y_range: tuple[float, float] = (10.19, 18.22),
+    y_recycle: float = 10.6,
+    y_respawn: float = 18.0,
+    respawn_z: float = 0.775,
+):
+    """把塑料筐沿流水线 -Y 方向匀速送走，到出料端再传回入料端，形成循环流。
+
+    每个 interval tick 只对"确实还躺在滚轮面上"的筐覆写水平速度（Z 速度保留给
+    重力/接触，避免把筐按在碰撞板里）。判定用带面几何：
+
+    * ``belt_top_z`` ± ``z_tolerance``：筐原点在底面，静止时 z≈0.775。被机器人拎起
+      或掉到地上就超出窗口 → 立即停止驱动，不会把抓在手里的筐硬拖走。
+    * ``x_range`` / ``y_range``：滚轮可用带面（略放宽于碰撞板 x[-6.07,-5.17]）。
+
+    到达 ``y_recycle`` 后瞬移回 ``y_respawn``（保持各自 X 车道、清零速度），下一 tick
+    重新开始往下流。坐标全部是相对 env origin 的局部系，与场景配置里的数值同一套。
+    """
+
+    if not enabled or abs(velocity_y) < 1e-8:
+        return
+
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device, dtype=torch.long)
+
+    if len(env_ids) == 0:
+        return
+
+    origins = env.scene.env_origins[env_ids]
+
+    for object_name in object_names:
+        obj = env.scene[object_name]
+
+        pos_local = obj.data.root_pos_w[env_ids] - origins
+
+        on_belt = (
+            (pos_local[:, 2] >= belt_top_z - z_tolerance)
+            & (pos_local[:, 2] <= belt_top_z + z_tolerance)
+            & (pos_local[:, 0] >= x_range[0])
+            & (pos_local[:, 0] <= x_range[1])
+            & (pos_local[:, 1] >= y_range[0])
+            & (pos_local[:, 1] <= y_range[1])
+        )
+        if not on_belt.any():
+            continue
+
+        # 先回收到达出料端的筐，本 tick 不再驱动它们。
+        recycle = on_belt & (pos_local[:, 1] <= y_recycle)
+        if recycle.any():
+            recycle_ids = env_ids[recycle]
+            pose = obj.data.root_state_w[recycle_ids, :7].clone()
+            pose[:, 1] = origins[recycle, 1] + y_respawn
+            pose[:, 2] = origins[recycle, 2] + respawn_z
+            obj.write_root_pose_to_sim(pose, env_ids=recycle_ids)
+            obj.write_root_velocity_to_sim(
+                torch.zeros((len(recycle_ids), 6), device=obj.device), env_ids=recycle_ids
+            )
+
+        drive = on_belt & ~recycle
+        if not drive.any():
+            continue
+
+        drive_ids = env_ids[drive]
+        vel = obj.data.root_vel_w[drive_ids].clone()
+        vel[:, 0] = 0.0
+        vel[:, 1] = velocity_y
+        obj.write_root_velocity_to_sim(vel, env_ids=drive_ids)
