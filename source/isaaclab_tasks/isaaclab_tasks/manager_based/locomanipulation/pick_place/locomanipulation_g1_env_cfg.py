@@ -439,7 +439,9 @@ def _box_cfg(
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=not physics_authority,
                 disable_gravity=not physics_authority,
-                max_depenetration_velocity=3.0 if physics_authority else 0.0,
+                # 跟随端不需要去穿透，但 PhysX 要求该值 > 0（写 0 会被拒并刷
+                # "maxDepenVel must be greater than zero"）。None 才是"不设置"。
+                max_depenetration_velocity=3.0 if physics_authority else None,
             ),
             collision_props=(
                 sim_utils.CollisionPropertiesCfg(
@@ -621,7 +623,9 @@ def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
             angular_damping=0.0,
             max_linear_velocity=1000.0,
             max_angular_velocity=1000.0,
-            max_depenetration_velocity=0.0,
+            # 同 _box_cfg：跟随端的关节由镜像流直写，去穿透无意义，但 PhysX 不接受 0，
+            # 只能不设置（None）而不是写 0，否则每帧刷 "maxDepenVel must be greater than zero"。
+            max_depenetration_velocity=None,
         )
     if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", True):
         return None
