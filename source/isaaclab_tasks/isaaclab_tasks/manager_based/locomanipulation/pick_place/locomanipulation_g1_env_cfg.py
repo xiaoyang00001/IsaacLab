@@ -847,6 +847,36 @@ def _make_pushcart_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     )
 
 
+# ==================================================================
+# 场景布局开关 ISAACLAB_TOTES_ON_CONVEYOR（默认 1）
+#
+#   1 = 流水线布局（当前默认）：两塑料筐缩小一半（scale 0.005）放上流水线滚轮面，
+#       由 drive_totes 事件沿 -Y 从第一段送到第二段工位停住；双机站第二段中心
+#       (x=-4.75 / -6.7, y=14.148)，pushcart_2 空车留在 y=19.39363。
+#   0 = 原布局：两筐恢复原尺寸（scale 0.01）叠放回 pushcart_2 拖车顶面
+#       (x=-5.4, y=19.39363)；双机回到拖车两侧工位 (x=-4.75 / -6.05, y=19.39363)；
+#       流水线驱动事件关闭。
+#
+# 开关只管这三组随布局联动的量（筐的位置+缩放、双机站位、驱动事件），下面两项
+# **不**随开关回退，两套布局共用：
+#   * conveyor_collider 那块不可见碰撞板常驻。原布局的筐/双机都在 y=19.39363，
+#     在碰撞板 y 跨度 [10.19,18.22] 之外，留着没有副作用。
+#   * 背景 USD（warehouse-simple6_v48.usd）里桌子/分拣料箱的平移与镜像改动已经
+#     烘进 USD 文件，代码开关碰不到；要回退得换回 .bak-workstation-shift-20260721
+#     / .bak-symmetric-20260721 备份。同样因为都在 y≈15 附近，不影响原布局。
+#
+# 各条布局量仍保留自己的 ISAACLAB_* 覆写（本开关只改它们的默认值），单独调某一
+# 项时不必动开关。
+#
+# 读法特意用 _runtime_cfg_value：**进程环境变量优先**，其次才是 g1_udp_network.env。
+# 切场景只要启动前 `set ISAACLAB_TOTES_ON_CONVEYOR=0`，不必动两端共享的 env 文件；
+# 想让它常驻就往 env 文件里写一行同名项。注意下面那些分项覆写
+#（ISAACLAB_ROBOT_WORKSTATION_Y / ISAACLAB_ROBOT_2_X / ISAACLAB_CONVEYOR_*）走的是
+# _cfg_*，只认 env 文件——单独微调某一项时得写进 env 文件才生效。
+# ==================================================================
+TOTES_ON_CONVEYOR = _cfg_bool_value(_runtime_cfg_value("ISAACLAB_TOTES_ON_CONVEYOR"), True)
+
+
 def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     """Create the plastic tote (Tote_B04) with rigid physics available at spawn time.
 
@@ -862,8 +892,9 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     is_sync_subscriber = syncable and ZMQ_SYNC_ROLE == "subscriber"
     return UsdFileCfg(
         usd_path=os.path.join(os.path.dirname(__file__), "props", "tote_b04_physics.usda"),
-        # 原 0.01 → 0.6×0.4×0.3 m；缩小一半到 0.005 → 0.3×0.2×0.15 m（原点仍在筐底面）。
-        scale=(0.005, 0.005, 0.005),
+        # 原 0.01 → 0.6×0.4×0.3 m；流水线布局缩小一半到 0.005 → 0.3×0.2×0.15 m
+        #（原点仍在筐底面）。TOTES_ON_CONVEYOR=0 时恢复原尺寸。
+        scale=(0.005, 0.005, 0.005) if TOTES_ON_CONVEYOR else (0.01, 0.01, 0.01),
         mass_props=sim_utils.MassPropertiesCfg(mass=_cfg_float("ISAACLAB_GRASP_OBJECT_MASS", 0.45)),
         rigid_props=(
             sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
@@ -898,7 +929,18 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
 # robot1 两件叠了完整矩阵 override，令其包围盒 = robot2 对应件关于两机中线（Isaac x=-5.725，
 # ConveyorBelt 局部 y=1.045）的镜像（同 Y、同尺寸、镜像 X）。两个料箱再各绕自身竖轴转 90°
 # 让缺口朝各自机器人：bin_02(robot1) 顺时针 -90°、bin_01(robot2) 镜像逆时针 +90°。
-ROBOT_WORKSTATION_Y = _cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", 14.148)
+#
+# 原布局（TOTES_ON_CONVEYOR=0）下工位退回拖车旁：y=19.39363、robot_2 x 回到 -6.05
+#（那时对面是窄推车而非流水线，不必拉到 -6.7）。
+ROBOT_WORKSTATION_Y = _cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", 14.148 if TOTES_ON_CONVEYOR else 19.39363)
+ROBOT_2_X = _cfg_float("ISAACLAB_ROBOT_2_X", -6.7 if TOTES_ON_CONVEYOR else -6.05)
+
+# 两塑料筐的初始摆放（细节见 cart2_tote1/2 处注释）。
+#   流水线布局：躺在滚轮面上，Y 是**起点**不是终点，由 drive_totes 送到工位；
+#   原布局：原尺寸叠放在 pushcart_2 拖车顶面（顶面 z≈0.3774，筐原点在底面、高 0.30
+#           → 逐层 +2 mm 间隙避免初始穿透）。
+CART2_TOTE1_POS = [-5.35, 16.4, 0.775] if TOTES_ON_CONVEYOR else [-5.4, 19.39363, 0.3794]
+CART2_TOTE2_POS = [-5.89, 17.0, 0.775] if TOTES_ON_CONVEYOR else [-5.4, 19.39363, 0.6814]
 
 
 @configclass
@@ -988,7 +1030,8 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # 第二台拖车（原 USD /Root/MyCart2，静态视觉件已在背景 USD 中停用，备份 .bak4，由本物理拖车替代），
-    # 占工作位 x=-5.4。两个塑料筐已从车上挪到流水线滚轮面（见下方 cart2_tote1/2），此车现为空车。
+    # 占工作位 x=-5.4，两套布局都停在这（TOTES_ON_CONVEYOR=1 时筐挪上流水线、此车为空车；
+    # 置 0 则两筐叠回车顶面）。
     # pushcart_2 + cart2_tote1/2 三件仍进 scene_state 同步（订阅端切 kinematic 跟随发布端位姿）。
     pushcart_2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart2",
@@ -1032,14 +1075,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # Y 是**起点**而非终点：两筐在第一段（16.4 / 17.0，前后错开 0.6 m）出发，被
     # drive_totes_on_conveyor 沿 -Y 送到第二段工位 ROBOT_WORKSTATION_Y 停住，
     # 各自停在对应机器人正前方。X 车道不同，两筐全程不会互相挡道。
+    #（以上是 TOTES_ON_CONVEYOR=1 的流水线布局；置 0 则两筐原尺寸叠回拖车顶面，
+    #  坐标见 CART2_TOTE1_POS / CART2_TOTE2_POS。）
     cart2_tote1 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote1",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.35, 16.4, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=CART2_TOTE1_POS, rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
     cart2_tote2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cart2Tote2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.89, 17.0, 0.775], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=CART2_TOTE2_POS, rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_cart2_tote_spawn_cfg(syncable=True),
     )
 
@@ -1052,10 +1097,13 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # 双机站位：面对面立在流水线两侧（robot_1 在 +X 侧 x=-4.75 朝 -X，
-    # robot_2 在 -X 侧 x=-6.7 朝 +X），y 移到第二段中心 ROBOT_WORKSTATION_Y。
-    # 流水线(结构占 x[-6.19,-5.04])比原推车宽，robot_2 拉到 x=-6.7 越过流水线 -X 侧外缘避免重叠；
-    # 代价是离箱(x=-5.62)约 1.1 m 够不到，此侧为布局/展示站位（robot_1 侧 x=-4.75 仍贴近 +X 边缘）。
+    # 双机站位：面对面（robot_1 在 +X 侧 x=-4.75 朝 -X，robot_2 在 -X 侧 x=ROBOT_2_X 朝 +X），
+    # y=ROBOT_WORKSTATION_Y，两者都随 TOTES_ON_CONVEYOR 切换。
+    # 流水线布局：立在流水线两侧、y 为第二段中心 14.148。流水线(结构占 x[-6.19,-5.04])比原
+    #   推车宽，robot_2 拉到 x=-6.7 越过 -X 侧外缘避免重叠；代价是离箱(x=-5.62)约 1.1 m 够不到，
+    #   此侧为布局/展示站位（robot_1 侧 x=-4.75 仍贴近 +X 边缘）。
+    # 原布局：拖车 (x=-5.4, y=19.39363) 两侧各 ~0.65 m 对称站位（robot_2 x=-6.05），
+    #   与纸箱推车 (x=-6.8) 之间仍留约 0.45 m 间隙。
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
@@ -1076,7 +1124,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(-6.7, ROBOT_WORKSTATION_Y, 0.78),
+            pos=(ROBOT_2_X, ROBOT_WORKSTATION_Y, 0.78),
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
@@ -1302,8 +1350,11 @@ CONVEYOR_Y_RECYCLE = _cfg_float("ISAACLAB_CONVEYOR_Y_RECYCLE", 10.6)
 CONVEYOR_Y_RESPAWN = _cfg_float("ISAACLAB_CONVEYOR_Y_RESPAWN", 18.0)
 # 筐流到工位即停住（不再驱动，靠 μd=0.6 的摩擦自然停）。设 <=0 可关掉暂停、退回纯循环流。
 CONVEYOR_Y_STOP = _cfg_float("ISAACLAB_CONVEYOR_Y_STOP", ROBOT_WORKSTATION_Y)
+# 默认随 TOTES_ON_CONVEYOR：原布局的筐在拖车上，不该被流水线拖走。
 # 订阅端的筐是 kinematic、纯跟随发布端 scene_state，本地再驱动会和同步打架。
-CONVEYOR_ENABLED = _cfg_bool("ISAACLAB_CONVEYOR_ENABLED", True) and ZMQ_SYNC_ROLE != "subscriber"
+CONVEYOR_ENABLED = (
+    _cfg_bool("ISAACLAB_CONVEYOR_ENABLED", TOTES_ON_CONVEYOR) and ZMQ_SYNC_ROLE != "subscriber"
+)
 
 # 背景里的分拣料箱：bin_01 在 USD 里已是 kinematic，bin_02 却是动态刚体，开局悬空
 # 1.5 cm、起步即下沉落到桌面（z 0.3918→0.3737）且会被机器人撞飞。统一锁成 kinematic
