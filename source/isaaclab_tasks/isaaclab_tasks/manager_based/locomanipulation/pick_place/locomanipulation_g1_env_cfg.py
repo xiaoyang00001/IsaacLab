@@ -1007,9 +1007,10 @@ def _log_scene_layout() -> None:
         f" | robot_1 x={ROBOT_1_X:.3f} robot_2 x={ROBOT_2_X:.3f} y={ROBOT_WORKSTATION_Y:.3f}"
         f" | 流水线中线 x=-5.620 入料端 y=18.222"
     )
-
-
-_log_scene_layout()
+    drive = "关" if not CONVEYOR_ENABLED else (
+        "开，一路循环不停" if CONVEYOR_Y_STOP <= 0 else f"开，流到 y={CONVEYOR_Y_STOP:.3f} 停住"
+    )
+    print(f"{tag}   流水线驱动: {drive}（{CONVEYOR_SPEED} m/s 沿 -Y，作用于带面 y[10.19,18.22]）")
 
 
 @configclass
@@ -1406,9 +1407,13 @@ class TerminationsCfg:
 # 那块不可见 kinematic 碰撞板托着，所以"流动"由 drive_totes_on_conveyor 每
 # 20 ms 覆写筐的水平速度模拟（同 congxian 分支的 drive_object_on_conveyor 思路）。
 #
-# 方向 -Y：两筐从第一段起点（16.4 / 17.0）流向第二段工位 ROBOT_WORKSTATION_Y，
-# 到工位即停住等机器人取料。速度 0.3 m/s——congxian 用 0.5，这里筐缩了一半又轻
-# （0.45 kg），放慢一档既不易滑出滚轮带，也给机器人留出抓取窗口。
+# 方向 -Y。两套布局共用这套驱动，区别只在筐从哪儿上带、停在哪儿：
+#   流水线布局：筐开局就躺在第一段（16.4 / 17.0），流到第二段工位停住等机器人取料。
+#   原布局：筐开局在拖车上，**由机器人搬上入料端**才进入驱动范围，然后一路流到出料段
+#           停住（CONVEYOR_Y_STOP=11.5），"从车上搬走"这条作业闭环才完整。
+# 速度 0.3 m/s——congxian 用 0.5，这里筐缩了一半又轻（0.45 kg），放慢一档既不易滑出
+# 滚轮带，也给机器人留出抓取窗口。原布局的筐是原尺寸（0.6×0.4×0.3、同样 0.45 kg），
+# 同一速度下更稳，未单独调。
 #
 # 摩擦损耗：筐是在**静止**的碰撞板上被拽着滑行（全程动摩擦 μd=0.6，非真传送带的
 # 静摩擦输送），substep 间持续制动，实测平均速度约 0.25 m/s，比设定值低 ~17%。
@@ -1419,13 +1424,28 @@ CONVEYOR_TOTE_NAMES = ("cart2_tote1", "cart2_tote2")
 CONVEYOR_SPEED = _cfg_float("ISAACLAB_CONVEYOR_SPEED", 0.3)
 CONVEYOR_Y_RECYCLE = _cfg_float("ISAACLAB_CONVEYOR_Y_RECYCLE", 10.6)
 CONVEYOR_Y_RESPAWN = _cfg_float("ISAACLAB_CONVEYOR_Y_RESPAWN", 18.0)
-# 筐流到工位即停住（不再驱动，靠 μd=0.6 的摩擦自然停）。设 <=0 可关掉暂停、退回纯循环流。
-CONVEYOR_Y_STOP = _cfg_float("ISAACLAB_CONVEYOR_Y_STOP", ROBOT_WORKSTATION_Y)
-# 默认随 TOTES_ON_CONVEYOR：原布局的筐在拖车上，不该被流水线拖走。
+# 筐流到该 y 就不再驱动（靠 μd=0.6 的摩擦自然停）。设 <=0 则关掉暂停、退回纯循环流
+#（流到 y_recycle 瞬移回 y_respawn）。
+#   流水线布局：停在机器人工位 ROBOT_WORKSTATION_Y=14.148，等机器人取料。
+#   原布局：停在第三段（出料段 10.188~12.907）中心附近 11.5——机器人把筐从拖车搬上入料端
+#           后，筐一路流到出料段停住，"搬上去→送走"这条闭环才算合上。留 1.3 m 余量给第二
+#           个筐排队，免得两筐挤在带尾互相顶下带。
+CONVEYOR_Y_STOP = _runtime_cfg_float(
+    "ISAACLAB_CONVEYOR_Y_STOP", ROBOT_WORKSTATION_Y if TOTES_ON_CONVEYOR else 11.5
+)
+# 两套布局都开：原布局要的就是"筐一被放上带子就自己流走"。
+# 拖车上的两个筐**不会**被误驱动——drive_totes 的 on_belt 判据要求 y∈[10.19,18.22]，
+# 而车在 y=CART_GROUP_Y（默认 18.75，下限 18.634）之外。⚠️ 注意挡住它们的只有 y 这一项：
+# 上层筐 z=0.6814 落在带面窗口 0.772±0.15 内、x=-5.62 也在带宽内，所以别把拖车挪进
+# y<18.22 的区域，否则车上的筐会被当成带上的货拖走。
 # 订阅端的筐是 kinematic、纯跟随发布端 scene_state，本地再驱动会和同步打架。
 CONVEYOR_ENABLED = (
-    _cfg_bool("ISAACLAB_CONVEYOR_ENABLED", TOTES_ON_CONVEYOR) and ZMQ_SYNC_ROLE != "subscriber"
+    _cfg_bool_value(_runtime_cfg_value("ISAACLAB_CONVEYOR_ENABLED"), True)
+    and ZMQ_SYNC_ROLE != "subscriber"
 )
+
+# 布局坐标 + 驱动参数都算完了，这里统一打印一次生效值（函数定义在上方坐标常量旁）。
+_log_scene_layout()
 
 # 背景里的分拣料箱：bin_01 在 USD 里已是 kinematic，bin_02 却是动态刚体，开局悬空
 # 1.5 cm、起步即下沉落到桌面（z 0.3918→0.3737）且会被机器人撞飞。统一锁成 kinematic
