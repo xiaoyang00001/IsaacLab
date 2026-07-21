@@ -890,6 +890,14 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
 # bbox 里。之所以改 USD 而非用事件运行时挪：sorting bin 带刚体（bin_02 还是非 kinematic
 # 动态体），运行时改 USD xform 后 PhysX 不同步；而 prestartup 事件与本场景必须保留的
 # replicate_physics=True 互斥。
+#
+# 双机工位对称（备份 .bak-symmetric-20260721，改动只在 root warehouse 层，不碰共享
+# payload ConveyorBelt02.usd —— 它还被 warehouse-simple7 引用）：robot1 侧（+X，x=-4.75）
+# 的 Table_01 / bin_02 与 robot2 侧（-X，x=-6.7）的 Table_03 / bin_01 原本基础网格大小/
+# 比例都不同（bin_01≈1.32×1.03 长方，bin_02≈1.23×1.24 近方），Y 位也差 ~0.15 m。现给
+# robot1 两件叠了完整矩阵 override，令其包围盒 = robot2 对应件关于两机中线（Isaac x=-5.725，
+# ConveyorBelt 局部 y=1.045）的镜像（同 Y、同尺寸、镜像 X）。两个料箱再各绕自身竖轴转 90°
+# 让缺口朝各自机器人：bin_02(robot1) 顺时针 -90°、bin_01(robot2) 镜像逆时针 +90°。
 ROBOT_WORKSTATION_Y = _cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", 14.148)
 
 
