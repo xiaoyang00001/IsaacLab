@@ -875,6 +875,7 @@ def _make_pushcart_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
 # _cfg_*，只认 env 文件——单独微调某一项时得写进 env 文件才生效。
 # ==================================================================
 TOTES_ON_CONVEYOR = _cfg_bool_value(_runtime_cfg_value("ISAACLAB_TOTES_ON_CONVEYOR"), True)
+# 生效的布局与坐标在下方常量算完后统一打印（见 _log_scene_layout）。
 
 
 def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
@@ -930,17 +931,82 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
 # ConveyorBelt 局部 y=1.045）的镜像（同 Y、同尺寸、镜像 X）。两个料箱再各绕自身竖轴转 90°
 # 让缺口朝各自机器人：bin_02(robot1) 顺时针 -90°、bin_01(robot2) 镜像逆时针 +90°。
 #
-# 原布局（TOTES_ON_CONVEYOR=0）下工位退回拖车旁：y=19.39363、robot_2 x 回到 -6.05
-#（那时对面是窄推车而非流水线，不必拉到 -6.7）。
-ROBOT_WORKSTATION_Y = _cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", 14.148 if TOTES_ON_CONVEYOR else 19.39363)
-ROBOT_2_X = _cfg_float("ISAACLAB_ROBOT_2_X", -6.7 if TOTES_ON_CONVEYOR else -6.05)
+# ------------------------------------------------------------------
+# 原布局（TOTES_ON_CONVEYOR=0）的搬运工位：整组（拖车 + 两筐 + 双机）对齐流水线中线，
+# 顶在入料端前方，让机器人站着就能把筐从车上搬到流水线入口。
+#
+#   X = -5.62：流水线滚轮中线（滚轮带 x[-6.07,-5.17]，与 conveyor_collider 同轴）。
+#   Y = 18.75：流水线入料端（第一段）到 y=18.222 为止。SM_PushcartA_02 经 scale
+#              (0.5,0.5,1.0) 后 X 宽 0.468、**Y 长 0.824（半长 0.412）**、顶面 z=0.3774
+#              ——顶面高度与筐的落点 0.3774 对得上，可反证资产/缩放无误。
+#              车中心放 18.75 → 前缘 18.338，离带端留 0.116 m 间隙；双机中心离带端
+#              0.53 m，在臂展内。想更贴就调小，**下限 18.634**（再小车头就插进流水线）。
+#   双机 ±0.65：沿用原布局的夹抬间距（robot_1 -4.97 / robot_2 -6.27），推车半宽 0.234、
+#              机器人半宽约 0.22，两侧各留约 0.2 m。
+#
+# 注意三点：
+#   * 机器人 y=18.75 与流水线 y[10.19,18.22] 不重叠才不碰——**站位安全靠的是 Y 而不是 X**
+#     （robot_1 的 x 区间和流水线结构 x[-6.19,-5.04] 本来就有约 0.15 m 交叠），遥操时
+#     往 -Y 走两步就会撞上流水线侧面。
+#   * 机器人朝向没动（仍面对面夹着推车，robot_1 朝 -X / robot_2 朝 +X），搬到流水线
+#     是侧向动作。真要改朝向得连带 deploy 的 relative root 前进方向一起改，未做。
+#   * 纸箱推车组（x=-6.8, y=19.39363）没跟着挪，现在位于 robot_2 斜后方；y 相差 0.64 m
+#     大于两者半深之和，不干涉。
+#
+# 这几个量走 _runtime_cfg_float（进程环境变量优先），方便在 GUI 里边看边用
+# `$env:ISAACLAB_CART_GROUP_Y="18.9"` 试位置，定下来再改默认值。
+# ------------------------------------------------------------------
+CART_GROUP_X = _runtime_cfg_float("ISAACLAB_CART_GROUP_X", -5.62)
+CART_GROUP_Y = _runtime_cfg_float("ISAACLAB_CART_GROUP_Y", 18.75)
+ROBOT_SIDE_OFFSET = _runtime_cfg_float("ISAACLAB_ROBOT_SIDE_OFFSET", 0.65)
+
+ROBOT_WORKSTATION_Y = (
+    _cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", 14.148)
+    if TOTES_ON_CONVEYOR
+    else _runtime_cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", CART_GROUP_Y)
+)
+ROBOT_1_X = _runtime_cfg_float(
+    "ISAACLAB_ROBOT_1_X", -4.75 if TOTES_ON_CONVEYOR else CART_GROUP_X + ROBOT_SIDE_OFFSET
+)
+ROBOT_2_X = _runtime_cfg_float(
+    "ISAACLAB_ROBOT_2_X", -6.7 if TOTES_ON_CONVEYOR else CART_GROUP_X - ROBOT_SIDE_OFFSET
+)
+
+# 第二台拖车。流水线布局下是留在原工作位的空车；原布局下载着两筐顶到流水线入料端。
+PUSHCART_2_POS = [-5.4, 19.39363, 0.0] if TOTES_ON_CONVEYOR else [CART_GROUP_X, CART_GROUP_Y, 0.0]
 
 # 两塑料筐的初始摆放（细节见 cart2_tote1/2 处注释）。
 #   流水线布局：躺在滚轮面上，Y 是**起点**不是终点，由 drive_totes 送到工位；
 #   原布局：原尺寸叠放在 pushcart_2 拖车顶面（顶面 z≈0.3774，筐原点在底面、高 0.30
-#           → 逐层 +2 mm 间隙避免初始穿透）。
-CART2_TOTE1_POS = [-5.35, 16.4, 0.775] if TOTES_ON_CONVEYOR else [-5.4, 19.39363, 0.3794]
-CART2_TOTE2_POS = [-5.89, 17.0, 0.775] if TOTES_ON_CONVEYOR else [-5.4, 19.39363, 0.6814]
+#           → 逐层 +2 mm 间隙避免初始穿透），随车一起顶到流水线入料端。
+CART2_TOTE1_POS = (
+    [-5.35, 16.4, 0.775] if TOTES_ON_CONVEYOR else [CART_GROUP_X, CART_GROUP_Y, 0.3794]
+)
+CART2_TOTE2_POS = (
+    [-5.89, 17.0, 0.775] if TOTES_ON_CONVEYOR else [CART_GROUP_X, CART_GROUP_Y, 0.6814]
+)
+
+
+def _log_scene_layout() -> None:
+    """启动就把实际生效的布局和坐标打出来。
+
+    PowerShell 下 `set X=0` 是 cmd 语法、根本设不上环境变量（要 `$env:X="0"`），
+    没有这行只能靠看筐在哪来猜开关有没有吃到。
+    """
+
+    tag = "[locomanipulation_g1_env_cfg]"
+    if TOTES_ON_CONVEYOR:
+        print(f"{tag} 场景布局: 流水线（两筐缩半在传送带上流动） [ISAACLAB_TOTES_ON_CONVEYOR=1]")
+    else:
+        print(f"{tag} 场景布局: 原布局（两筐原尺寸叠在拖车上） [ISAACLAB_TOTES_ON_CONVEYOR=0]")
+    print(
+        f"{tag}   拖车/筐 x={PUSHCART_2_POS[0]:.3f} y={PUSHCART_2_POS[1]:.3f}"
+        f" | robot_1 x={ROBOT_1_X:.3f} robot_2 x={ROBOT_2_X:.3f} y={ROBOT_WORKSTATION_Y:.3f}"
+        f" | 流水线中线 x=-5.620 入料端 y=18.222"
+    )
+
+
+_log_scene_layout()
 
 
 @configclass
@@ -1035,7 +1101,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     # pushcart_2 + cart2_tote1/2 三件仍进 scene_state 同步（订阅端切 kinematic 跟随发布端位姿）。
     pushcart_2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Pushcart2",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[-5.4, 19.39363, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=PUSHCART_2_POS, rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=_make_pushcart_spawn_cfg(syncable=True),
     )
     # ------------------------------------------------------------------
@@ -1107,7 +1173,7 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(-4.75, ROBOT_WORKSTATION_Y, 0.78),
+            pos=(ROBOT_1_X, ROBOT_WORKSTATION_Y, 0.78),
             rot=(0.0, 0.0, 0.0, 1.0),
         ),
     )
