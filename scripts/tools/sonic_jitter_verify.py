@@ -438,21 +438,128 @@ def main() -> int:
     wall_dts: list[float] = []
     last_step_wall = time.monotonic()
 
+    # ---- 锁相/测量节拍（SONIC_ENV_PHASE_LOCK，sim2sim 桥 3.4Hz 环路延迟共振治理）----
+    # off：原始固定墙钟栅格（基线，默认）。
+    # measure：栅格不变，只把整段睡眠切成 ≤1ms 片轮询目标 socket，记录 deploy
+    #   目标包到达时刻（验证相位抽签+拍频、env.step slack、每拍包数三个前提）。
+    # lock：睡到新目标包到达+δ 再步进，栅格重锚到包到达时刻——把 deploy→Isaac
+    #   下半环相位抽签(0~20ms)钉成 ~δ 常数；超时(max_slip)回退原栅格并计 miss，
+    #   任何时刻不劣于基线。仍是严格 1.0× 实时（deploy tick 本身就是 50Hz 墙钟）。
+    phase_lock_mode = os.environ.get("SONIC_ENV_PHASE_LOCK", "0").strip().lower()
+    if phase_lock_mode in ("", "0", "false", "no", "off"):
+        phase_lock_mode = "off"
+    elif phase_lock_mode in ("1", "true", "yes", "on", "lock"):
+        phase_lock_mode = "lock"
+    elif phase_lock_mode != "measure":
+        raise SystemExit(f"invalid SONIC_ENV_PHASE_LOCK={phase_lock_mode!r} (expect 0/1/measure)")
+    _PHASE_POLL_SLICE_S = 0.001
+    _PHASE_LOCK_DELTA_S = float(os.environ.get("SONIC_ENV_PHASE_LOCK_DELTA_S", "0.002"))
+    _PHASE_LOCK_MAX_SLIP_S = float(os.environ.get("SONIC_ENV_PHASE_LOCK_MAX_SLIP_S", "0.005"))
+    phase_step_count = 0
+    phase_arrival_step: list[int] = []
+    phase_arrival_t: list[float] = []
+    phase_step_compute_s: list[float] = []
+    phase_lock_wait_s: list[float] = []
+    phase_lock_hits = 0
+    phase_lock_miss = 0
+    if phase_lock_mode != "off":
+        _log(
+            f"env phase-lock mode={phase_lock_mode} "
+            f"delta={_PHASE_LOCK_DELTA_S * 1000:.1f}ms max_slip={_PHASE_LOCK_MAX_SLIP_S * 1000:.1f}ms"
+        )
+
     def paced_step() -> None:
-        nonlocal next_tick, last_step_wall
+        nonlocal next_tick, last_step_wall, phase_step_count, phase_lock_hits, phase_lock_miss
         next_tick += step_dt
-        now = time.monotonic()
-        sleep_s = next_tick - now
-        if sleep_s > 0:
-            time.sleep(sleep_s)
-        elif sleep_s < -1.0:
-            # 长停顿（场景加载等）后重新对表，不追帧
-            next_tick = time.monotonic()
+        if phase_lock_mode == "off":
+            now = time.monotonic()
+            sleep_s = next_tick - now
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            elif sleep_s < -1.0:
+                # 长停顿（场景加载等）后重新对表，不追帧
+                next_tick = time.monotonic()
+        elif phase_lock_mode == "measure":
+            # 栅格与基线完全一致；睡眠切片轮询仅提高到达时刻观测精度（~1ms）。
+            while True:
+                arrival = term.poll_fresh_target()
+                if arrival is not None:
+                    phase_arrival_step.append(phase_step_count)
+                    phase_arrival_t.append(arrival)
+                now = time.monotonic()
+                remaining = next_tick - now
+                if remaining <= 0.0:
+                    if remaining < -1.0:
+                        next_tick = now
+                    break
+                time.sleep(min(_PHASE_POLL_SLICE_S, remaining))
+        else:  # lock
+            wait_start = time.monotonic()
+            deadline = next_tick + _PHASE_LOCK_MAX_SLIP_S
+            while True:
+                arrival = term.poll_fresh_target()
+                now = time.monotonic()
+                if arrival is not None:
+                    phase_arrival_step.append(phase_step_count)
+                    phase_arrival_t.append(arrival)
+                    # 重锚：本步起点钉在包到达+δ，消灭消费时刻的相位抽签。
+                    next_tick = arrival + _PHASE_LOCK_DELTA_S
+                    if next_tick > now:
+                        time.sleep(next_tick - now)
+                    phase_lock_hits += 1
+                    phase_lock_wait_s.append(time.monotonic() - wait_start)
+                    break
+                if now >= deadline:
+                    # 超时兜底：按原栅格推进（+max_slip 恒定偏移，不累积）。
+                    phase_lock_miss += 1
+                    if next_tick - now < -1.0:
+                        next_tick = now
+                    break
+                time.sleep(min(_PHASE_POLL_SLICE_S, max(deadline - now, 0.0)))
+        compute_start = time.monotonic()
         with torch.inference_mode():
             env.step(zero_actions)
         now = time.monotonic()
+        phase_step_compute_s.append(now - compute_start)
         wall_dts.append(now - last_step_wall)
         last_step_wall = now
+        phase_step_count += 1
+        if phase_lock_mode != "off" and phase_step_count % 500 == 0:
+            recent = np.asarray(phase_arrival_t[-250:], dtype=np.float64)
+            if recent.size:
+                offsets_ms = np.mod(recent, step_dt) * 1000.0
+                offset_text = (
+                    f"arrival_mod20ms recent min/med/max="
+                    f"{offsets_ms.min():.1f}/{np.median(offsets_ms):.1f}/{offsets_ms.max():.1f}ms"
+                )
+            else:
+                offset_text = "arrival_mod20ms recent n=0"
+            compute_ms = np.asarray(phase_step_compute_s[-500:], dtype=np.float64) * 1000.0
+            _log(
+                f"phase[{phase_lock_mode}] step={phase_step_count} {offset_text} "
+                f"compute p50/p95={np.percentile(compute_ms, 50):.1f}/{np.percentile(compute_ms, 95):.1f}ms "
+                f"hits={phase_lock_hits} miss={phase_lock_miss}"
+            )
+
+    def save_phase_telemetry() -> None:
+        if phase_lock_mode == "off":
+            return
+        base, _ = os.path.splitext(os.path.abspath(args_cli.out))
+        phase_path = base + ".phase.npz"
+        np.savez_compressed(
+            phase_path,
+            mode=np.asarray(phase_lock_mode),
+            step_dt=np.float64(step_dt),
+            lock_delta_s=np.float64(_PHASE_LOCK_DELTA_S),
+            lock_max_slip_s=np.float64(_PHASE_LOCK_MAX_SLIP_S),
+            arrival_step=np.asarray(phase_arrival_step, dtype=np.int64),
+            arrival_t=np.asarray(phase_arrival_t, dtype=np.float64),
+            step_compute_s=np.asarray(phase_step_compute_s, dtype=np.float64),
+            lock_wait_s=np.asarray(phase_lock_wait_s, dtype=np.float64),
+            lock_hits=np.int64(phase_lock_hits),
+            lock_miss=np.int64(phase_lock_miss),
+        )
+        _log(f"phase telemetry saved: {phase_path}")
 
     target_gates_enabled = not bool(args_cli.disable_target_gates)
     _log(
@@ -516,6 +623,14 @@ def main() -> int:
                 "recovery": 3,
             },
             "target_gate": target_gate,
+            "phase_lock": {
+                "mode": phase_lock_mode,
+                "delta_s": _PHASE_LOCK_DELTA_S,
+                "max_slip_s": _PHASE_LOCK_MAX_SLIP_S,
+                "hits": int(phase_lock_hits),
+                "misses": int(phase_lock_miss),
+                "arrivals_recorded": len(phase_arrival_t),
+            },
             "run_manifest_path": _RUN_MANIFEST_PATH,
             "run_manifest": _RUN_MANIFEST,
             "runtime_manifest_path": _RUNTIME_MANIFEST_PATH,
@@ -588,6 +703,7 @@ def main() -> int:
         if wait_recorder.wall_t:
             meta = build_meta(status="invalid_no_target", unlocked=False, target_gate=target_gate)
             wait_recorder.save(args_cli.out, joint_names, meta)
+        save_phase_telemetry()
         env.close()
         return 3
 
@@ -814,6 +930,7 @@ def main() -> int:
     else:
         _log("ERROR measurement produced no frames; no NPZ could be saved")
         failures.append("measurement produced no frames")
+    save_phase_telemetry()
     env.close()
     return 0 if not failures else 5
 

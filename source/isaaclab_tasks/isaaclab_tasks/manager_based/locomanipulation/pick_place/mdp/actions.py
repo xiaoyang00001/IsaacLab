@@ -1372,6 +1372,10 @@ class SonicDeployTargetAction(ActionTerm):
         self._receiver_ready = False
         self._last_packet_time = 0.0
         self._packet_count = 0
+        # 锁相/测量模式（SONIC_ENV_PHASE_LOCK）：节拍循环在步间轮询到的包暂存于此，
+        # 下一次 process_actions 优先消费——与基线 drain 语义等价，仅提高到达时刻观测精度。
+        self._pending_packet: dict | None = None
+        self._pending_packet_arrival = 0.0
         # Evaluation-only input health counters. These are cumulative for the
         # lifetime of the action term (including automatic recovery cycles) and
         # never participate in target selection or control.
@@ -1616,6 +1620,28 @@ class SonicDeployTargetAction(ActionTerm):
                 f"payload_fields={len(payload)}"
             )
         return payload
+
+    def poll_fresh_target(self) -> float | None:
+        """步间轮询接口（SONIC_ENV_PHASE_LOCK 节拍循环专用）。
+
+        非阻塞收一次 socket；收到则暂存为 pending 并返回到达时刻（monotonic），
+        供节拍循环记录到达相位或触发锁相重锚。暂存的包由下一次
+        process_actions 经 _consume_latest_packet 消费，控制行为与基线
+        drain 完全等价（同为"取最新"）。
+        """
+        payload = self._drain_latest_packet()
+        if payload is None:
+            return None
+        self._pending_packet = payload
+        self._pending_packet_arrival = time.monotonic()
+        return self._pending_packet_arrival
+
+    def _consume_latest_packet(self) -> dict | None:
+        """取 {步间暂存包, socket 残留包} 中最新者；无轮询时等价于纯 drain。"""
+        pending = self._pending_packet
+        self._pending_packet = None
+        payload = self._drain_latest_packet()
+        return payload if payload is not None else pending
 
     @staticmethod
     def _append_field_name(field_names: list[str], field_name: str) -> None:
@@ -2448,6 +2474,7 @@ class SonicDeployTargetAction(ActionTerm):
             # Startup/post-unlock settle: gradually transition joints to default
             # standing pose and drain stale deploy packets. Each step moves one
             # rate-limited increment towards default so the transition is smooth.
+            self._pending_packet = None
             self._drain_latest_packet()
             default_target = self._default_joint_pos.clone()
             self._processed_actions = self._apply_target_rate_limit(default_target)
@@ -2468,13 +2495,14 @@ class SonicDeployTargetAction(ActionTerm):
         # standing — with soft SONIC gains it is expected to fall (ankle stiffness ≪ mgh);
         # use only as a diagnostic. Drain packets to avoid queue buildup.
         if self._root_pose_unlocked and self.cfg.hold_after_unlock:
+            self._pending_packet = None
             self._drain_latest_packet()
             self._processed_actions = self._apply_target_rate_limit(self._default_joint_pos.clone())
             return
         if self._drain_steps_remaining > 0:
             # 解锁前排空阶段：root 仍锁定，用快限速把 processed 追到最新目标。
             # 无新包的帧继续向最近一次目标收敛（50Hz 双端偶发空帧不该停住排空）。
-            payload = self._drain_latest_packet()
+            payload = self._consume_latest_packet()
             if payload is not None:
                 target = self._extract_target(payload)
                 if target is not None:
@@ -2495,7 +2523,7 @@ class SonicDeployTargetAction(ActionTerm):
                 )
                 self._begin_unlock_release()
             return
-        payload = self._drain_latest_packet()
+        payload = self._consume_latest_packet()
         if payload is not None:
             target = self._extract_target(payload)
             if target is not None:
@@ -2558,7 +2586,7 @@ class SonicDeployTargetAction(ActionTerm):
         if self._substep_consume_ready():
             # 子步消费（200Hz）：deploy tick 与 env step 异步，包可能落在子步之间；
             # 稳态直通条件下即时吃掉，砍掉 0~20ms 的相位抽签（#8 回灌延迟治理）。
-            payload = self._drain_latest_packet()
+            payload = self._consume_latest_packet()
             if payload is not None:
                 target = self._extract_target(payload)
                 if target is not None:
