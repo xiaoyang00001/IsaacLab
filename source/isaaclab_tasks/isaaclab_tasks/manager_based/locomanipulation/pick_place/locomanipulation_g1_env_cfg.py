@@ -941,13 +941,16 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
 #              ——顶面高度与筐的落点 0.3774 对得上，可反证资产/缩放无误。
 #              车中心放 18.75 → 前缘 18.338，离带端留 0.116 m 间隙；双机中心离带端
 #              0.53 m，在臂展内。想更贴就调小，**下限 18.634**（再小车头就插进流水线）。
-#   双机 ±0.65：沿用原布局的夹抬间距（robot_1 -4.97 / robot_2 -6.27），推车半宽 0.234、
-#              机器人半宽约 0.22，两侧各留约 0.2 m。
+#   双机 ±0.80（robot_1 -4.82 / robot_2 -6.42）：**取的是"身体完全脱出流水线结构"的临界值**
+#              ——机器人半宽约 0.22，robot_1 左缘正好 -5.04、robot_2 右缘 -6.20，贴着结构
+#              x[-6.19,-5.04] 的两侧边缘擦过去。原来的 0.65 会让双机 x 区间与结构交叠约
+#              0.15 m，遥操往 -Y 走两步就撞流水线侧面；拉到 0.80 后这条隐患消失。
+#              代价是离筐中心 0.80 m（筐 X 半宽 0.30 → 手要侧伸约 0.5 m 够到筐边），
+#              接近 G1 侧向可达上限，再拉开就该抓不到了。
 #
 # 注意三点：
-#   * 机器人 y=18.75 与流水线 y[10.19,18.22] 不重叠才不碰——**站位安全靠的是 Y 而不是 X**
-#     （robot_1 的 x 区间和流水线结构 x[-6.19,-5.04] 本来就有约 0.15 m 交叠），遥操时
-#     往 -Y 走两步就会撞上流水线侧面。
+#   * 机器人 y=18.75 落在流水线 y[10.19,18.22] 之外，加上上面的 ±0.80，Y 和 X 两个方向
+#     都不与流水线干涉了。
 #   * 机器人朝向没动（仍面对面夹着推车，robot_1 朝 -X / robot_2 朝 +X），搬到流水线
 #     是侧向动作。真要改朝向得连带 deploy 的 relative root 前进方向一起改，未做。
 #   * 纸箱推车组（x=-6.8, y=19.39363）没跟着挪，现在位于 robot_2 斜后方；y 相差 0.64 m
@@ -958,7 +961,7 @@ def _make_cart2_tote_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
 # ------------------------------------------------------------------
 CART_GROUP_X = _runtime_cfg_float("ISAACLAB_CART_GROUP_X", -5.62)
 CART_GROUP_Y = _runtime_cfg_float("ISAACLAB_CART_GROUP_Y", 18.75)
-ROBOT_SIDE_OFFSET = _runtime_cfg_float("ISAACLAB_ROBOT_SIDE_OFFSET", 0.65)
+ROBOT_SIDE_OFFSET = _runtime_cfg_float("ISAACLAB_ROBOT_SIDE_OFFSET", 0.80)
 
 ROBOT_WORKSTATION_Y = (
     _cfg_float("ISAACLAB_ROBOT_WORKSTATION_Y", 14.148)
@@ -1163,13 +1166,15 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # 双机站位：面对面（robot_1 在 +X 侧 x=-4.75 朝 -X，robot_2 在 -X 侧 x=ROBOT_2_X 朝 +X），
-    # y=ROBOT_WORKSTATION_Y，两者都随 TOTES_ON_CONVEYOR 切换。
+    # 双机站位：面对面（robot_1 在 +X 侧 x=ROBOT_1_X 朝 -X，robot_2 在 -X 侧 x=ROBOT_2_X 朝 +X），
+    # y=ROBOT_WORKSTATION_Y，三个量都随 TOTES_ON_CONVEYOR 切换（取值见上方工位常量段）。
     # 流水线布局：立在流水线两侧、y 为第二段中心 14.148。流水线(结构占 x[-6.19,-5.04])比原
     #   推车宽，robot_2 拉到 x=-6.7 越过 -X 侧外缘避免重叠；代价是离箱(x=-5.62)约 1.1 m 够不到，
     #   此侧为布局/展示站位（robot_1 侧 x=-4.75 仍贴近 +X 边缘）。
-    # 原布局：拖车 (x=-5.4, y=19.39363) 两侧各 ~0.65 m 对称站位（robot_2 x=-6.05），
-    #   与纸箱推车 (x=-6.8) 之间仍留约 0.45 m 间隙。
+    # 原布局：站在拖车 (x=-5.62, y=18.75) 两侧各 0.80 m（-4.82 / -6.42），身体正好擦着流水线
+    #   结构两侧边缘之外。⚠️ robot_2 与纸箱推车 (x=-6.8, y=19.39363，同款车半宽 0.234/半长 0.412)
+    #   的 X 已交叠 0.074 m，只靠 Y 方向 **0.082 m** 的间隙错开——机器人往 +Y 后退一步就会
+    #   顶到纸箱推车。要给 robot_2 留活动余量，就把纸箱推车组也往 +Y/-X 挪（本次未动）。
     robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
         init_state=G1_43DOF_GR00T_CFG.init_state.replace(
