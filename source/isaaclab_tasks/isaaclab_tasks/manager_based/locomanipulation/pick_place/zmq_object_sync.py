@@ -21,6 +21,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _spawn_is_kinematic(rigid_object) -> bool:
+    """Whether this scene object was spawned as a kinematic body.
+
+    跟随端（subscriber）的同步物体在 spawn cfg 里被翻成 kinematic，此时不能再写速度。
+    发布端同名物体是普通动态刚体，仍然要写完整 root state。
+    """
+
+    rigid_props = getattr(getattr(rigid_object.cfg, "spawn", None), "rigid_props", None)
+    return bool(getattr(rigid_props, "kinematic_enabled", False))
+
+
 class ZmqPubSocketManager:
     """Share one PUB socket across the scene-state and reset topics."""
 
@@ -392,6 +403,9 @@ class ZmqSceneStateSyncAction(ActionTerm):
         self._socket = None
         self._robots = {name: self._env.scene[name] for name in cfg.robot_names}
         self._objects = {name: self._env.scene[name] for name in cfg.object_names}
+        self._object_is_kinematic = {
+            name: _spawn_is_kinematic(rigid_object) for name, rigid_object in self._objects.items()
+        }
 
         self._publisher_session = uuid.uuid4().hex
         self._publisher_frame_id = 0
@@ -676,7 +690,20 @@ class ZmqSceneStateSyncAction(ActionTerm):
             robot.set_joint_velocity_target(joint_vel)
 
         for name, root_state in object_states.items():
-            self._objects[name].write_root_state_to_sim(root_state)
+            if self._object_is_kinematic[name]:
+                # 跟随端的同步物体 spawn 时就被翻成 kinematic，而 write_root_state_to_sim
+                # 会把速度一并写下去。**CPU pipeline**（--device cpu）下这个写入会落到逐
+                # body 的 PhysX C++ 调用上，而 PhysX 拒绝给 kinematic 刚体设速度：
+                #     PxRigidDynamic::setLinearVelocity: Body must be non-kinematic!
+                # 每帧每个物体刷一对 linear/angular，几十秒就撞满 PhysX 的 1000 条错误上限，
+                # 于是 "PhysX has reported too many errors, simulation has been stopped"
+                # —— 跟随端整个仿真被掐停，箱子和机器人一起僵住，看着就像同步断了。
+                # GPU pipeline（--device cuda:0）走的是 tensor API 批量写入，不经过这条
+                # 逐 body 路径，所以同样的代码在 GPU 上没有症状，只有 CPU 上会炸。
+                # kinematic 体的运动完全由位姿决定，速度写入本来就没有意义，直接跳过。
+                self._objects[name].write_root_pose_to_sim(root_state[:, :7])
+            else:
+                self._objects[name].write_root_state_to_sim(root_state)
 
     def _warn_if_stale(self, now: float) -> None:
         timeout = max(0.0, float(self.cfg.stale_timeout_s))
