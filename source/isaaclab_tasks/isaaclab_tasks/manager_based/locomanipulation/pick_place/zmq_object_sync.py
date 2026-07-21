@@ -684,10 +684,29 @@ class ZmqSceneStateSyncAction(ActionTerm):
     ) -> None:
         for name, (root_state, joint_pos, joint_vel) in robot_states.items():
             robot = self._robots[name]
-            robot.write_root_state_to_sim(root_state)
-            robot.write_joint_state_to_sim(joint_pos, joint_vel)
+            # 跟随端只写位姿、**不写速度**（发布端的 joint_vel/root 速度整组丢弃）。
+            #
+            # 这一侧的 G1 是 disable_gravity + linear/angular_damping=0 + collision 关闭的
+            # 自由体（见 _g1_robot_rigid_props 的 subscriber 分支），没有重力、阻尼或接触
+            # 能耗散速度。而本函数只在收到新帧时才被调用，两帧之间（>= 一个发布周期）机器人
+            # 是自由演化的：把发布端的瞬时速度硬写进来，它就会匀速漂到下一帧，然后被下一次
+            # 硬写拉回原位。发布端"看起来静止"时关节仍带高频速度噪声，这些噪声在发布端被 PD、
+            # 接触和重力约束住、积不出位移，到了跟随端却被直接积分成比原抖动更大的位移——
+            # 结果就是发布端静止、跟随端持续抖动。
+            #
+            # 位置每帧硬写就足以完全确定姿态，速度对纯跟随端没有物理意义。同一个道理已经
+            # 在 kinematic 物体上修过一次（下方 write_root_pose_to_sim 分支，14f087ce8），
+            # 当时漏了机器人这条路径。
+            #
+            # ⚠️ 速度 target 必须跟着一起清零：若留着非零的 velocity target 而实际速度为 0，
+            # PD 的阻尼项 damping*(target_vel - 0) 会持续输出力矩推关节，比不改更糟。
+            frozen_root = root_state.clone()
+            frozen_root[:, 7:] = 0.0
+            zero_joint_vel = torch.zeros_like(joint_vel)
+            robot.write_root_state_to_sim(frozen_root)
+            robot.write_joint_state_to_sim(joint_pos, zero_joint_vel)
             robot.set_joint_position_target(joint_pos)
-            robot.set_joint_velocity_target(joint_vel)
+            robot.set_joint_velocity_target(zero_joint_vel)
 
         for name, root_state in object_states.items():
             if self._object_is_kinematic[name]:
