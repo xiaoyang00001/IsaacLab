@@ -106,6 +106,13 @@ class MuJoCoG1MirrorActionCfg(ActionTermCfg):
     body_joint_target_max_delta: float = 0.08
     """Maximum per-step body target change in radians when body joints are not hard-written."""
 
+    body_joint_target_alpha: float = 1.0
+    """Low-pass factor for target-only body joints.
+
+    ``1.0`` disables filtering. Values in ``(0, 1)`` suppress packet-to-packet
+    target jitter before the position target is sent to the actuator.
+    """
+
     zero_target_only_body_velocity: bool = False
     """Whether to zero velocity targets for mirrored body joints that are driven only by actuator targets."""
 

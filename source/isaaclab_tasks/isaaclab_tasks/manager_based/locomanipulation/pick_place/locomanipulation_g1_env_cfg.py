@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
@@ -19,12 +18,19 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdF
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import MuJoCoG1MirrorActionCfg
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+    G1GripperSyncActionCfg,
+    MuJoCoG1MirrorActionCfg,
+)
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.g1_openxr_gripper_retargeter import (
+    G1OpenXRGripperRetargeterCfg,
+)
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.box_drop_reset import BoxDropResetActionCfg
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import (
     ZmqEnvResetSyncActionCfg,
     ZmqSceneStateSyncActionCfg,
 )
+from isaaclab_assets.robots.unitree import G1_29DOF_CFG
 
 _ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -441,187 +447,6 @@ G1_BODY_STATE_WRITE_JOINT_NAMES = [
 ]
 """Mirrored joints that are allowed to be hard-written into PhysX for stable walking."""
 
-def _g1_robot_rigid_props() -> sim_utils.RigidBodyPropertiesCfg | None:
-    if not _SCENE_PHYSICS_AUTHORITY:
-        return sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=True,
-            retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
-            max_linear_velocity=1000.0,
-            max_angular_velocity=1000.0,
-            max_depenetration_velocity=0.0,
-        )
-    if _cfg_bool("ISAACLAB_G1_USE_USD_RIGID_PROPS", True):
-        return None
-    return sim_utils.RigidBodyPropertiesCfg(
-        disable_gravity=False,
-        retain_accelerations=False,
-        linear_damping=0.0,
-        angular_damping=0.0,
-        max_linear_velocity=1000.0,
-        max_angular_velocity=1000.0,
-        max_depenetration_velocity=_cfg_float("ISAACLAB_G1_RIGID_MAX_DEPENETRATION_VELOCITY", 1.0),
-    )
-
-
-G1_43DOF_GR00T_CFG = ArticulationCfg(
-    prim_path="/World/envs/env_.*/Robot",
-    spawn=UsdFileCfg(
-        usd_path=_find_gr00t_g1_43dof_usd(),
-        activate_contact_sensors=False,
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.72, 0.72, 0.70), roughness=0.55),
-        rigid_props=_g1_robot_rigid_props(),
-        collision_props=(
-            None
-            if _SCENE_PHYSICS_AUTHORITY
-            else sim_utils.CollisionPropertiesCfg(collision_enabled=False)
-        ),
-        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
-            fix_root_link=False,
-            solver_position_iteration_count=8,
-            solver_velocity_iteration_count=4,
-        ),
-    ),
-    init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.78),
-        rot=(0.7071, 0.0, 0.0, 0.7071),
-        joint_pos={
-            ".*_hip_pitch_joint": -0.10,
-            ".*_knee_joint": 0.30,
-            ".*_ankle_pitch_joint": -0.20,
-            "left_shoulder_pitch_joint": 0.0,
-            "right_shoulder_pitch_joint": 0.0,
-            "left_shoulder_roll_joint": 0.3,
-            "right_shoulder_roll_joint": -0.3,
-            "left_shoulder_yaw_joint": 0.0,
-            "right_shoulder_yaw_joint": 0.0,
-            "left_elbow_joint": 1.0,
-            "right_elbow_joint": 1.0,
-            "left_wrist_roll_joint": 0.0,
-            "right_wrist_roll_joint": 0.0,
-            "left_wrist_pitch_joint": 0.0,
-            "right_wrist_pitch_joint": 0.0,
-            "left_wrist_yaw_joint": 0.0,
-            "right_wrist_yaw_joint": 0.0,
-        },
-        joint_vel={".*": 0.0},
-    ),
-    soft_joint_pos_limit_factor=0.9,
-    actuators={
-        "legs": DCMotorCfg(
-            joint_names_expr=[
-                ".*_hip_yaw_joint",
-                ".*_hip_roll_joint",
-                ".*_hip_pitch_joint",
-                ".*_knee_joint",
-            ],
-            effort_limit={
-                ".*_hip_yaw_joint": 88.0,
-                ".*_hip_roll_joint": 88.0,
-                ".*_hip_pitch_joint": 88.0,
-                ".*_knee_joint": 139.0,
-            },
-            velocity_limit={
-                ".*_hip_yaw_joint": 32.0,
-                ".*_hip_roll_joint": 32.0,
-                ".*_hip_pitch_joint": 32.0,
-                ".*_knee_joint": 20.0,
-            },
-            stiffness={
-                ".*_hip_yaw_joint": 100.0,
-                ".*_hip_roll_joint": 100.0,
-                ".*_hip_pitch_joint": 100.0,
-                ".*_knee_joint": 200.0,
-            },
-            damping={
-                ".*_hip_yaw_joint": 2.5,
-                ".*_hip_roll_joint": 2.5,
-                ".*_hip_pitch_joint": 2.5,
-                ".*_knee_joint": 5.0,
-            },
-            armature={
-                ".*_hip_.*": 0.03,
-                ".*_knee_joint": 0.03,
-            },
-            saturation_effort=180.0,
-        ),
-        "feet": DCMotorCfg(
-            joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
-            stiffness={
-                ".*_ankle_pitch_joint": 20.0,
-                ".*_ankle_roll_joint": 20.0,
-            },
-            damping={
-                ".*_ankle_pitch_joint": 0.2,
-                ".*_ankle_roll_joint": 0.1,
-            },
-            effort_limit={
-                ".*_ankle_pitch_joint": 50.0,
-                ".*_ankle_roll_joint": 50.0,
-            },
-            velocity_limit={
-                ".*_ankle_pitch_joint": 37.0,
-                ".*_ankle_roll_joint": 37.0,
-            },
-            armature=0.03,
-            saturation_effort=80.0,
-        ),
-        "waist": ImplicitActuatorCfg(
-            joint_names_expr=["waist_.*_joint"],
-            effort_limit_sim={
-                "waist_yaw_joint": 88.0,
-                "waist_roll_joint": 50.0,
-                "waist_pitch_joint": 50.0,
-            },
-            velocity_limit_sim={
-                "waist_yaw_joint": 32.0,
-                "waist_roll_joint": 37.0,
-                "waist_pitch_joint": 37.0,
-            },
-            stiffness={
-                "waist_yaw_joint": 5000.0,
-                "waist_roll_joint": 5000.0,
-                "waist_pitch_joint": 5000.0,
-            },
-            damping={
-                "waist_yaw_joint": 5.0,
-                "waist_roll_joint": 5.0,
-                "waist_pitch_joint": 5.0,
-            },
-            armature=0.001,
-        ),
-        "arms": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_shoulder_pitch_joint",
-                ".*_shoulder_roll_joint",
-                ".*_shoulder_yaw_joint",
-                ".*_elbow_joint",
-                ".*_wrist_.*_joint",
-            ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_ARM_EFFORT_LIMIT", 60.0),
-            velocity_limit_sim=_cfg_float("ISAACLAB_G1_ARM_VELOCITY_LIMIT", 12.0),
-            stiffness=_cfg_float("ISAACLAB_G1_ARM_STIFFNESS", 700.0),
-            damping=_cfg_float("ISAACLAB_G1_ARM_DAMPING", 20.0),
-            armature=_cfg_float("ISAACLAB_G1_ARM_ARMATURE", 0.01),
-        ),
-        "hands": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_hand_index_.*",
-                ".*_hand_middle_.*",
-                ".*_hand_thumb_.*",
-            ],
-            effort_limit_sim=_cfg_float("ISAACLAB_G1_HAND_EFFORT_LIMIT", 25.0),
-            velocity_limit_sim=_cfg_float("ISAACLAB_G1_HAND_VELOCITY_LIMIT", 6.0),
-            stiffness=_cfg_float("ISAACLAB_G1_HAND_STIFFNESS", 80.0),
-            damping=_cfg_float("ISAACLAB_G1_HAND_DAMPING", 8.0),
-            armature=_cfg_float("ISAACLAB_G1_HAND_ARMATURE", 0.02),
-        ),
-    },
-)
-
-
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """PC1 authoritative or PC2 mirrored fixed dual-G1/three-box scene."""
@@ -644,15 +469,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #         usd_path=os.path.join(os.path.dirname(__file__), "warehouse.usd"),
     #     ),
     # )
-    # Two independent humanoids instantiated from the same GR00T G1 asset.
-    robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+    # Two independent humanoids instantiated from Isaac Lab's official G1
+    # locomanipulation configuration (29 body DoF + 14 TriHand joints).
+    robot_1: ArticulationCfg = G1_29DOF_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_1",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(pos=(0.0, 0.0, 0.78)),
+        init_state=G1_29DOF_CFG.init_state.replace(pos=(0.0, 0.0, 0.75)),
     )
-    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+    robot_2: ArticulationCfg = G1_29DOF_CFG.replace(
         prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(0.0, 1.23134, 0.78),
+        init_state=G1_29DOF_CFG.init_state.replace(
+            pos=(0.0, 1.23134, 0.75),
             rot=(0.70710678, 0.0, 0.0, -0.70710678),
         ),
     )
@@ -711,7 +537,10 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         zmq_joint_order=_isaac_robot_cfg(robot_id, "JOINT_ORDER", "mujoco"),
         zmq_pose_source=_isaac_robot_cfg(robot_id, "POSE_SOURCE", "target"),
         state_write_pose_source=_isaac_robot_cfg(robot_id, "STATE_WRITE_POSE_SOURCE", "measured"),
-        target_only_pose_source=_isaac_robot_cfg(robot_id, "TARGET_ONLY_POSE_SOURCE", "measured"),
+        # ``last_action`` is the final scaled WBC motor-position command. In
+        # this restore step it is used as the source, but Isaac still applies
+        # it exclusively through actuator position targets (no state writes).
+        target_only_pose_source="action",
         hand_pose_source=_isaac_robot_cfg(robot_id, "HAND_POSE_SOURCE", "target"),
         root_zmq_host=_ubuntu_sender_ip(
             robot_id,
@@ -732,18 +561,27 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
         root_udp_topic=_isaac_robot_cfg(robot_id, "ROOT_UDP_TOPIC", f"g1_{robot_id}_root"),
         root_udp_rcvbuf=_isaac_robot_cfg_int(robot_id, "ROOT_UDP_RCVBUF", 262144),
         locomotion_sync_mode=sync_mode,
-        write_root_state=_isaac_robot_write_root_state(robot_id),
-        write_body_joint_state=_isaac_robot_write_body_joint_state(robot_id),
+        write_root_state=False,
+        write_body_joint_state=False,
         write_hand_joint_state=_isaac_robot_write_hand_joint_state(robot_id),
-        use_source_joint_velocity=_isaac_robot_cfg_bool(robot_id, "USE_SOURCE_JOINT_VELOCITY", True),
+        use_source_joint_velocity=False,
         body_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_MAX_DELTA", 0.20),
-        zero_target_only_body_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_BODY_VELOCITY", False),
+        body_joint_target_alpha=_isaac_robot_cfg_float(robot_id, "BODY_JOINT_TARGET_ALPHA", 0.20),
+        zero_target_only_body_velocity=True,
         zero_target_only_hand_velocity=_isaac_robot_cfg_bool(robot_id, "ZERO_TARGET_ONLY_HAND_VELOCITY", False),
         body_joint_target_scale_overrides=_isaac_robot_cfg_pattern_float_dict(
             robot_id,
             "BODY_JOINT_TARGET_SCALE_OVERRIDES",
             {},
         ),
+        # Mirror the waist and bilateral arms through MuJoCo position targets.
+        # Root stays fixed, the lower body has no ActionTerm, and hands use OpenXR.
+        mirror_joint_names=[
+            "waist_.*_joint",
+            ".*_shoulder_.*_joint",
+            ".*_elbow_joint",
+            ".*_wrist_.*_joint",
+        ],
         hand_joint_target_max_delta=_isaac_robot_cfg_float(robot_id, "HAND_JOINT_TARGET_MAX_DELTA", 0.20),
         hold_default_until_first_packet=_isaac_robot_cfg_bool(robot_id, "HOLD_DEFAULT_UNTIL_FIRST_PACKET", True),
         no_packet_debug_interval_s=_isaac_robot_cfg_float(robot_id, "NO_PACKET_DEBUG_INTERVAL_S", 1.0),
@@ -770,12 +608,39 @@ def _mujoco_g1_mirror_cfg(robot_id: int) -> MuJoCoG1MirrorActionCfg:
     )
 
 
+def _g1_gripper_sync_cfg(robot_id: int) -> G1GripperSyncActionCfg:
+    local_robot_id = _local_robot_id()
+    return G1GripperSyncActionCfg(
+        asset_name=_robot_name(robot_id),
+        enabled=True,
+        mode="local_publish" if robot_id == local_robot_id else "remote_subscribe",
+        robot_id=robot_id,
+        transport=_cfg_value("ISAACLAB_G1_GRIPPER_TRANSPORT", "zmq"),
+        zmq_host=_isaac_robot_cfg(robot_id, "GRIPPER_ZMQ_HOST", "127.0.0.1"),
+        zmq_port=_isaac_robot_cfg_int(robot_id, "GRIPPER_ZMQ_PORT", 5570 + robot_id),
+        zmq_topic=_isaac_robot_cfg(robot_id, "GRIPPER_ZMQ_TOPIC", f"g1_{robot_id}_gripper"),
+        timeout=_cfg_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
+        publish_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_PUBLISH_INTERVAL_S", 0.0),
+        controller_gripper_finger_close_angle=1.0,
+        controller_gripper_thumb_yaw_angle=0.5,
+        controller_gripper_thumb_1_angle=0.4,
+        controller_gripper_thumb_2_angle=0.7,
+        controller_gripper_action_alpha=_cfg_float("ISAACLAB_G1_GRIPPER_ACTION_ALPHA", 0.75),
+        controller_gripper_use_soft_limits=_cfg_bool("ISAACLAB_G1_GRIPPER_USE_SOFT_LIMITS", False),
+        write_joint_state=False,
+        target_max_delta=_cfg_float("ISAACLAB_G1_GRIPPER_TARGET_MAX_DELTA", 0.03),
+        debug_interval_s=_cfg_float("ISAACLAB_G1_GRIPPER_DEBUG_INTERVAL_S", 1.0),
+    )
+
+
 @configclass
 class ActionsCfg:
     """PC1 GR00T authority or PC2 fixed-scene follower actions."""
 
     mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
     mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
+    gripper_sync_1 = _g1_gripper_sync_cfg(1)
+    gripper_sync_2 = _g1_gripper_sync_cfg(2)
     box_drop_reset = BoxDropResetActionCfg(
         asset_name="small_box_1",
         enabled=_SCENE_SYNC_ROLE == "publisher",
@@ -846,6 +711,10 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
         self.sim.render_interval = 2
+        # This diagnostic variant has no root synchronization and no lower-body
+        # action. Fix both pelvis roots so gravity/contact cannot move the base.
+        self.scene.robot_1.spawn.articulation_props.fix_root_link = True
+        self.scene.robot_2.spawn.articulation_props.fix_root_link = True
         # The default Isaac Lab GPU PhysX buffers target large batched training scenes.
         # This task is a single-env XR mirror, so smaller buffers avoid VRAM exhaustion on 8 GB GPUs.
         self.sim.physx.gpu_max_rigid_contact_count = 2**20
@@ -885,7 +754,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.teleop_devices = DevicesCfg(
             devices={
                 "motion_controllers": OpenXRDeviceCfg(
-                    retargeters=[],
+                    retargeters=[G1OpenXRGripperRetargeterCfg(sim_device=teleop_device)],
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),

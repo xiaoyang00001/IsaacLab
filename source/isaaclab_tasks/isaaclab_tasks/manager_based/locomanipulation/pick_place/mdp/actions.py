@@ -112,7 +112,6 @@ RIGHT_HAND_JOINT_NAMES = [
     "right_hand_middle_1_joint",
 ]
 
-
 @dataclass
 class _MirrorSample:
     joint_pos_mujoco: np.ndarray | None = None
@@ -404,6 +403,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._subscriber: _ZmqLatestSubscriber | _UdpLatestSubscriber | None = None
         self._root_subscriber: _ZmqLatestSubscriber | _UdpLatestSubscriber | None = None
         self._last_sample: _MirrorSample | None = None
+        self._filtered_body_target: torch.Tensor | None = None
         self._root_pose = self._asset.data.default_root_state[:, :7].clone()
         self._root_velocity = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
         self._source_root_pos0: torch.Tensor | None = None
@@ -498,6 +498,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
         self._raw_actions.zero_()
         self._processed_actions.zero_()
         self._last_sample = None
+        self._filtered_body_target = None
         self._root_pose = self._asset.data.default_root_state[:, :7].clone()
         self._root_velocity.zero_()
         self._source_root_pos0 = None
@@ -635,34 +636,44 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if not self.cfg.use_source_joint_velocity:
                 joint_vel[:, self._all_hand_ids] = 0.0
 
-        body_target = joint_pos[:, self._body_isaac_ids]
-        body_velocity = joint_vel[:, self._body_isaac_ids]
-        body_velocity_target = body_velocity.clone()
-        if self._write_body_joint_state:
-            if self._body_state_write_isaac_ids:
-                self._asset.write_joint_state_to_sim(
-                    body_target[:, self._body_state_write_local_ids],
-                    body_velocity[:, self._body_state_write_local_ids],
-                    joint_ids=self._body_state_write_isaac_ids,
+        if self._body_isaac_ids:
+            body_target = joint_pos[:, self._body_isaac_ids]
+            body_velocity = joint_vel[:, self._body_isaac_ids]
+            body_velocity_target = body_velocity.clone()
+            if self._write_body_joint_state:
+                if self._body_state_write_isaac_ids:
+                    self._asset.write_joint_state_to_sim(
+                        body_target[:, self._body_state_write_local_ids],
+                        body_velocity[:, self._body_state_write_local_ids],
+                        joint_ids=self._body_state_write_isaac_ids,
+                    )
+                if self._body_target_only_local_ids:
+                    body_target[:, self._body_target_only_local_ids] = _limit_joint_position_delta(
+                        self._asset.data.joint_pos[
+                            :, [self._body_isaac_ids[i] for i in self._body_target_only_local_ids]
+                        ],
+                        body_target[:, self._body_target_only_local_ids],
+                        float(self.cfg.body_joint_target_max_delta),
+                    )
+                    if self.cfg.zero_target_only_body_velocity:
+                        body_velocity_target[:, self._body_target_only_local_ids] = 0.0
+            else:
+                alpha = min(max(float(self.cfg.body_joint_target_alpha), 0.0), 1.0)
+                if self._filtered_body_target is None:
+                    self._filtered_body_target = self._asset.data.joint_pos[:, self._body_isaac_ids].clone()
+                self._filtered_body_target = self._filtered_body_target + alpha * (
+                    body_target - self._filtered_body_target
                 )
-            if self._body_target_only_local_ids:
-                body_target[:, self._body_target_only_local_ids] = _limit_joint_position_delta(
-                    self._asset.data.joint_pos[:, [self._body_isaac_ids[i] for i in self._body_target_only_local_ids]],
-                    body_target[:, self._body_target_only_local_ids],
+                body_target = self._filtered_body_target
+                body_target = _limit_joint_position_delta(
+                    self._asset.data.joint_pos[:, self._body_isaac_ids],
+                    body_target,
                     float(self.cfg.body_joint_target_max_delta),
                 )
                 if self.cfg.zero_target_only_body_velocity:
-                    body_velocity_target[:, self._body_target_only_local_ids] = 0.0
-        else:
-            body_target = _limit_joint_position_delta(
-                self._asset.data.joint_pos[:, self._body_isaac_ids],
-                body_target,
-                float(self.cfg.body_joint_target_max_delta),
-            )
-            if self.cfg.zero_target_only_body_velocity:
-                body_velocity_target.zero_()
-        self._asset.set_joint_position_target(body_target, joint_ids=self._body_isaac_ids)
-        self._asset.set_joint_velocity_target(body_velocity_target, joint_ids=self._body_isaac_ids)
+                    body_velocity_target.zero_()
+            self._asset.set_joint_position_target(body_target, joint_ids=self._body_isaac_ids)
+            self._asset.set_joint_velocity_target(body_velocity_target, joint_ids=self._body_isaac_ids)
         if mirror_hands_from_mujoco and self._all_hand_ids:
             hand_target = joint_pos[:, self._all_hand_ids]
             hand_velocity = joint_vel[:, self._all_hand_ids]
@@ -699,6 +710,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
             f"write_hands={self._write_hand_joint_state}, hold_default={self.cfg.hold_default_until_first_packet}, "
             f"state_source={self._state_write_pose_source}, target_source={self._target_only_pose_source}, "
             f"hand_source={self._hand_pose_source}, "
+            f"body_target_alpha={self.cfg.body_joint_target_alpha}, "
             f"zero_target_only_body_velocity={self.cfg.zero_target_only_body_velocity}, "
             f"zero_target_only_hand_velocity={self.cfg.zero_target_only_hand_velocity}, "
             f"body_endpoint={body_endpoint}, root_endpoint={root_endpoint}"
@@ -933,7 +945,7 @@ class MuJoCoG1MirrorAction(ActionTerm):
 
     def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
         target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
-        thumb_close = torch.minimum(index_close, middle_close)
+        thumb_close = torch.maximum(index_close, middle_close)
 
         thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
         thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
@@ -1210,8 +1222,6 @@ class MuJoCoG1MirrorAction(ActionTerm):
             if isaac_id is not None:
                 mujoco_ids.append(mujoco_id)
                 isaac_ids.append(isaac_id)
-        if not isaac_ids:
-            raise RuntimeError("MuJoCo G1 mirror did not match any Isaac Lab joints.")
         return mujoco_ids, isaac_ids
 
     def _build_body_state_write_joint_ids(
@@ -1479,7 +1489,7 @@ class G1GripperSyncAction(ActionTerm):
 
     def _compose_hand_target(self, index_close: torch.Tensor, middle_close: torch.Tensor, is_left: bool) -> torch.Tensor:
         target = torch.zeros((self.num_envs, 7), dtype=torch.float32, device=self.device)
-        thumb_close = torch.minimum(index_close, middle_close)
+        thumb_close = torch.maximum(index_close, middle_close)
 
         thumb_yaw = self.cfg.controller_gripper_thumb_yaw_angle * (middle_close - index_close) * thumb_close
         thumb_1 = self.cfg.controller_gripper_thumb_1_angle * thumb_close
