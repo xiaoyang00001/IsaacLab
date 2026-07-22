@@ -2729,11 +2729,16 @@ class SonicRobotStatePublisherAction(ActionTerm):
         self._publisher_ready = False
         self._packet_count = 0
         self._debug_counter = 0
+        # obs-lead 观测外推（sim2sim 3.4Hz 共振治理，方案 B 的发布端等价实现）：
+        # 把发布的 q/姿态按速度外推 τ 秒，等效相位超前 ≈ 负延迟——时序工程（锁相）
+        # 无法穿越的双 50Hz 结构性延迟下限，只有预测能穿。默认 0=关。
+        # 建议与 SONIC_ENV_PHASE_LOCK=1 配合：锁相把环路延迟钉成常数，τ 才有唯一对症值。
+        self._obs_lead_s = min(max(float(os.environ.get("SONIC_STATE_OBS_LEAD_S", "0") or 0.0), 0.0), 0.1)
         self._connect_publisher()
         self._log_info(
             f"asset={cfg.asset_name} bind={cfg.bind_endpoint} topic={cfg.topic!r} "
             f"target_order={self._target_order} resolved={len(self._joint_ids)} joints "
-            f"publisher_ready={self._publisher_ready}"
+            f"publisher_ready={self._publisher_ready} obs_lead_s={self._obs_lead_s:.3f}"
         )
 
     def __del__(self):
@@ -2832,6 +2837,20 @@ class SonicRobotStatePublisherAction(ActionTerm):
             joint_tau = torque_src[env_idx, self._joint_ids].detach().cpu()
         root_quat = self._asset.data.root_quat_w[env_idx].detach().cpu()
         root_ang_vel = self._asset.data.root_ang_vel_b[env_idx].detach().cpu()
+
+        if self._obs_lead_s > 0.0:
+            # 一阶外推：只动位置量（q、姿态），速度/加速度/力矩保持原样——
+            # 二阶外推要吃加速度噪声，不做。dq 不动则 deploy 侧 dq 安全检查不受影响。
+            joint_pos = joint_pos + joint_vel * self._obs_lead_s
+            theta = root_ang_vel * self._obs_lead_s  # body 系旋转矢量
+            angle = float(torch.linalg.norm(theta))
+            if angle > 1.0e-8:
+                axis = theta / angle
+                half = 0.5 * angle
+                delta_q = torch.cat([torch.tensor([math.cos(half)]), axis * math.sin(half)])
+                # body 系增量 → 右乘；quat 约定 (w,x,y,z)
+                root_quat = quat_mul(root_quat.unsqueeze(0), delta_q.unsqueeze(0)).squeeze(0)
+                root_quat = root_quat / torch.linalg.norm(root_quat)
 
         # IMU accelerometer: specific force = (a_kinematic_w - g_w) in body frame.
         # g_w = [0,0,-9.81], so: a_imu_w = a_kinematic_w + [0,0,9.81].
