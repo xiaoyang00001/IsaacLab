@@ -32,13 +32,25 @@ from isaaclab_tasks.manager_based.locomanipulation.pick_place.box_success_reset 
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
     G1GripperSyncActionCfg,
     MuJoCoG1MirrorActionCfg,
+    SonicDeployTargetActionCfg,
+    SonicRobotStatePublisherActionCfg,
+    UnitreeDdsLowCmdActionCfg,
+    UnitreeLowStatePublisherActionCfg,
 )
 from isaaclab_tasks.manager_based.manipulation.pick_place import mdp as manip_mdp
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
 from isaaclab_tasks.manager_based.locomanipulation.pick_place.zmq_object_sync import (
     ZmqEnvResetSyncActionCfg,
     ZmqObjectSyncActionCfg,
+    ZmqRobotSyncActionCfg,
     ZmqSceneStateSyncActionCfg,
+)
+from copy import deepcopy
+
+from isaaclab_assets.robots.unitree import G1_29DOF_CFG
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.mdp.actions import (
+    SONIC_G1_29DOF_DEFAULT_ANGLES,
+    SONIC_G1_29DOF_JOINT_ORDER,
 )
 
 _ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
@@ -567,6 +579,44 @@ ZMQ_SYNC_ENDPOINT = _cfg_value(
     f"tcp://{_windows_isaaclab_ip(1, '127.0.0.1')}:15555",
 )
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+SONIC_G1_PHYSICS_MODE = _env_flag("SONIC_G1_PHYSICS_MODE", False)
+SONIC_G1_FIX_ROOT = not SONIC_G1_PHYSICS_MODE
+SONIC_G1_VISUAL_SERVO_MODE = _env_flag("SONIC_G1_VISUAL_SERVO_MODE", SONIC_G1_FIX_ROOT)
+SONIC_G1_SELF_COLLISIONS = SONIC_G1_PHYSICS_MODE and _env_flag("SONIC_G1_SELF_COLLISIONS", False)
+ENABLE_WALKER_ROBOT = _env_flag("LOCIMANIP_ENABLE_WALKER_ROBOT", False) and SONIC_G1_PHYSICS_MODE
+# banyun 工位机器人开关：默认（1）SONICRobot 顶替 Robot_1 站工位，Robot_1 及其
+# mirror/gripper 动作项随之下线；设 LOCOMANIP_SONIC_REPLACE_ROBOT1=0 恢复原
+# Robot_1（GR00T 43dof 镜像），SONICRobot 退回南侧 8m 行走通道出生点。
+SONIC_REPLACE_ROBOT1 = _env_flag("LOCOMANIP_SONIC_REPLACE_ROBOT1", True)
+# 对端镜像机开关：LOCOMANIP_ENABLE_ROBOT2=0 时 Robot_2（43dof）连同其镜像流/
+# 夹爪同步整链下线。每台 G1 articulation 约腰斩 env_hz（PhysX 关节解算与它动不动
+# 无关），SONIC 闭环单机调试给不出实时余量时先关它；默认 1 保持双机遥操行为不变。
+ENABLE_ROBOT2 = _env_flag("LOCOMANIP_ENABLE_ROBOT2", True)
+
+
+def _robot_asset_present(robot_id: int) -> bool:
+    """镜像机器人实体是否在场（robot_1 被 SONIC 顶替 / robot_2 被开关下线时缺席）。"""
+    return ENABLE_ROBOT2 if robot_id == 2 else not SONIC_REPLACE_ROBOT1
+print(
+    "[locomanip_cfg] "
+    f"SONIC_G1_FIX_ROOT={SONIC_G1_FIX_ROOT} "
+    f"SONIC_G1_PHYSICS_MODE={SONIC_G1_PHYSICS_MODE} "
+    f"SONIC_G1_VISUAL_SERVO_MODE={SONIC_G1_VISUAL_SERVO_MODE} "
+    f"SONIC_G1_SELF_COLLISIONS={SONIC_G1_SELF_COLLISIONS} "
+    f"ENABLE_WALKER_ROBOT={ENABLE_WALKER_ROBOT} "
+    f"SONIC_REPLACE_ROBOT1={SONIC_REPLACE_ROBOT1} "
+    f"ENABLE_ROBOT2={ENABLE_ROBOT2} "
+    f"legacy_SONIC_G1_FIX_ROOT_env={os.environ.get('SONIC_G1_FIX_ROOT', '<unset>')!r}"
+)
+
 ##
 # Scene definition
 ##
@@ -582,6 +632,7 @@ def _find_gr00t_g1_43dof_usd() -> str:
     candidates.extend(
         [
             Path("F:/ISAACWholeBody/GR00T-WholeBodyControl"),
+            Path.home() / "GR00T-WholeBodyControl",
             Path(__file__).resolve().parents[6] / "GR00T-WholeBodyControl",
             Path.cwd() / "GR00T-WholeBodyControl",
         ]
@@ -796,6 +847,187 @@ G1_43DOF_GR00T_CFG = ArticulationCfg(
     },
 )
 
+
+
+# 第四个机器人：GEAR-SONIC ONNX/Deploy 驱动。
+#
+# 短期目标是先验证 PICO manager -> GR00T/SONIC deploy -> IsaacLab 的目标链路，
+# 等价于 MuJoCo run_sim_loop.py 当前承担的“站稳状态源/可视化机器人”角色；因此默认固定
+# root 并关闭重力，避免没有完整 LowState/平衡闭环时启动即倒。长期做 IsaacLab Unitree DDS
+# 闭环物理验证时，设置 SONIC_G1_PHYSICS_MODE=1 才恢复自由根节点和重力。
+# init_state.pos 与 walker 同 Y（11.008，来自 align_walker_robot_to_conveyor 事件运行时计算），
+# X 错开 3m 便于 GUI 视角同框观察。终极方案应仿照 align_walker_robot_to_conveyor 加一个对齐事件。
+#
+# 阶段 3.3 E3 D：mocap anchor 时变信号已接，解 fix_root_link 再次物理验证
+# 对比 3.1 初次物理验证（立刻摔倒），看 mocap motion 信号是否提供有意义的平衡反馈
+#
+# 阶段 A（gr00t-sonic-actuator-match 分支）：用 SONIC 训练同款 ImplicitActuator + PD 配方
+# 替换默认 G1_29DOF_CFG 的 DCMotor。参考 gear_sonic/envs/manager_env/robots/g1.py:10-358
+# （来自 BeyondMimic / whole_body_tracking）。NATURAL_FREQ=10Hz、DAMPING_RATIO=2.0，
+# 各 actuator armature 配 stiffness=armature×NATURAL_FREQ²、damping=2×DAMPING_RATIO×armature×NATURAL_FREQ。
+# 注意：不动 G1_29DOF_CFG（robot / walker_robot / remote_robot 仍用 IsaacLab DCMotor）。
+# 默认 fixed-root deploy 验证是“目标可视化”，不是完整物理闭环；这里会在定义完训练 PD
+# 后按 SONIC_G1_VISUAL_SERVO_MODE 切回 IsaacLab 原始高刚度位置伺服，让手臂更忠实跟随
+# GR00T/SONIC deploy 的实际 motor target。设置 SONIC_G1_VISUAL_SERVO_MODE=0 可恢复训练 PD。
+from isaaclab.actuators import ImplicitActuatorCfg as _SonicImplicitActuatorCfg
+
+_SONIC_ARMATURE_5020 = 0.003609725
+_SONIC_ARMATURE_7520_14 = 0.010177520
+_SONIC_ARMATURE_7520_22 = 0.025101925
+_SONIC_ARMATURE_4010 = 0.00425
+_SONIC_NATURAL_FREQ = 10.0 * 2.0 * 3.1415926535  # 10Hz
+_SONIC_DAMPING_RATIO = 2.0
+
+_S_5020 = _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ**2
+_S_7520_14 = _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ**2
+_S_7520_22 = _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ**2
+_S_4010 = _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ**2
+
+_D_5020 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_5020 * _SONIC_NATURAL_FREQ
+_D_7520_14 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_14 * _SONIC_NATURAL_FREQ
+_D_7520_22 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_7520_22 * _SONIC_NATURAL_FREQ
+_D_4010 = 2.0 * _SONIC_DAMPING_RATIO * _SONIC_ARMATURE_4010 * _SONIC_NATURAL_FREQ
+
+SONIC_G1_29DOF_CFG = G1_29DOF_CFG.copy()
+SONIC_G1_29DOF_CFG.spawn.activate_contact_sensors = SONIC_G1_PHYSICS_MODE
+SONIC_G1_29DOF_CFG.spawn.articulation_props.fix_root_link = SONIC_G1_FIX_ROOT
+SONIC_G1_29DOF_CFG.spawn.articulation_props.enabled_self_collisions = SONIC_G1_SELF_COLLISIONS
+SONIC_G1_29DOF_CFG.spawn.rigid_props.disable_gravity = _env_flag("SONIC_G1_DISABLE_GRAVITY", SONIC_G1_FIX_ROOT)
+if SONIC_G1_PHYSICS_MODE:
+    # retain_accelerations=True 让 PhysX 在每步结束后保留 link 加速度，
+    # 使 body_com_lin_acc_w 返回真实值（用于 IMU accelerometer 计算）。
+    SONIC_G1_29DOF_CFG.spawn.rigid_props.retain_accelerations = True
+# Z=0.76：脚底在地面上方约 9mm。lock_root_z=False 的物理模式下 root Z 自由，
+# settle 阶段自然落地；若 spawn 时脚穿透地面（如 0.72 → 约 -3cm）会触发 PhysX
+# depenetration 向上弹射冲击。宁高勿低。
+SONIC_G1_29DOF_CFG.init_state.pos = (-2.0, 11.008, 0.76)
+SONIC_G1_29DOF_CFG.init_state.rot = (1.0, 0.0, 0.0, 0.0)
+SONIC_G1_29DOF_CFG.init_state.joint_pos = dict(
+    zip(SONIC_G1_29DOF_JOINT_ORDER, SONIC_G1_29DOF_DEFAULT_ANGLES, strict=True)
+)
+# 整体替换 actuators，与 SONIC 训练完全对齐
+SONIC_G1_29DOF_CFG.actuators = {
+    "legs": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_hip_yaw_joint",
+            ".*_hip_roll_joint",
+            ".*_hip_pitch_joint",
+            ".*_knee_joint",
+        ],
+        effort_limit_sim={
+            ".*_hip_yaw_joint": 88.0,
+            ".*_hip_roll_joint": 139.0,
+            ".*_hip_pitch_joint": 139.0,
+            ".*_knee_joint": 139.0,
+        },
+        velocity_limit_sim={
+            ".*_hip_yaw_joint": 32.0,
+            ".*_hip_roll_joint": 20.0,
+            ".*_hip_pitch_joint": 20.0,
+            ".*_knee_joint": 20.0,
+        },
+        stiffness={
+            ".*_hip_pitch_joint": _S_7520_22,
+            ".*_hip_roll_joint": _S_7520_22,
+            ".*_hip_yaw_joint": _S_7520_14,
+            ".*_knee_joint": _S_7520_22,
+        },
+        damping={
+            ".*_hip_pitch_joint": _D_7520_22,
+            ".*_hip_roll_joint": _D_7520_22,
+            ".*_hip_yaw_joint": _D_7520_14,
+            ".*_knee_joint": _D_7520_22,
+        },
+        armature={
+            ".*_hip_pitch_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_roll_joint": _SONIC_ARMATURE_7520_22,
+            ".*_hip_yaw_joint": _SONIC_ARMATURE_7520_14,
+            ".*_knee_joint": _SONIC_ARMATURE_7520_22,
+        },
+    ),
+    "feet": _SonicImplicitActuatorCfg(
+        joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_roll_joint", "waist_pitch_joint"],
+        effort_limit_sim=50.0,
+        velocity_limit_sim=37.0,
+        stiffness=2.0 * _S_5020,
+        damping=2.0 * _D_5020,
+        armature=2.0 * _SONIC_ARMATURE_5020,
+    ),
+    "waist_yaw": _SonicImplicitActuatorCfg(
+        joint_names_expr=["waist_yaw_joint"],
+        effort_limit_sim=88.0,
+        velocity_limit_sim=32.0,
+        stiffness=_S_7520_14,
+        damping=_D_7520_14,
+        armature=_SONIC_ARMATURE_7520_14,
+    ),
+    "arms": _SonicImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_shoulder_pitch_joint",
+            ".*_shoulder_roll_joint",
+            ".*_shoulder_yaw_joint",
+            ".*_elbow_joint",
+            ".*_wrist_roll_joint",
+            ".*_wrist_pitch_joint",
+            ".*_wrist_yaw_joint",
+        ],
+        effort_limit_sim={
+            ".*_shoulder_pitch_joint": 25.0,
+            ".*_shoulder_roll_joint": 25.0,
+            ".*_shoulder_yaw_joint": 25.0,
+            ".*_elbow_joint": 25.0,
+            ".*_wrist_roll_joint": 25.0,
+            ".*_wrist_pitch_joint": 5.0,
+            ".*_wrist_yaw_joint": 5.0,
+        },
+        velocity_limit_sim={
+            ".*_shoulder_pitch_joint": 37.0,
+            ".*_shoulder_roll_joint": 37.0,
+            ".*_shoulder_yaw_joint": 37.0,
+            ".*_elbow_joint": 37.0,
+            ".*_wrist_roll_joint": 37.0,
+            ".*_wrist_pitch_joint": 22.0,
+            ".*_wrist_yaw_joint": 22.0,
+        },
+        stiffness={
+            ".*_shoulder_pitch_joint": _S_5020,
+            ".*_shoulder_roll_joint": _S_5020,
+            ".*_shoulder_yaw_joint": _S_5020,
+            ".*_elbow_joint": _S_5020,
+            ".*_wrist_roll_joint": _S_5020,
+            ".*_wrist_pitch_joint": _S_4010,
+            ".*_wrist_yaw_joint": _S_4010,
+        },
+        damping={
+            ".*_shoulder_pitch_joint": _D_5020,
+            ".*_shoulder_roll_joint": _D_5020,
+            ".*_shoulder_yaw_joint": _D_5020,
+            ".*_elbow_joint": _D_5020,
+            ".*_wrist_roll_joint": _D_5020,
+            ".*_wrist_pitch_joint": _D_4010,
+            ".*_wrist_yaw_joint": _D_4010,
+        },
+        armature={
+            ".*_shoulder_pitch_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_shoulder_yaw_joint": _SONIC_ARMATURE_5020,
+            ".*_elbow_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_roll_joint": _SONIC_ARMATURE_5020,
+            ".*_wrist_pitch_joint": _SONIC_ARMATURE_4010,
+            ".*_wrist_yaw_joint": _SONIC_ARMATURE_4010,
+        },
+    ),
+}
+if SONIC_G1_VISUAL_SERVO_MODE:
+    SONIC_G1_29DOF_CFG.actuators = deepcopy(G1_29DOF_CFG.actuators)
 
 def _make_graspable_cart_box_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     """Create the warehouse cardboard box with rigid physics available at spawn time.
@@ -1163,37 +1395,56 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     #     ),
     # )
     # Humanoid robots from the GR00T sim2sim viewer asset.
-    # 双机站位：面对面（robot_1 在 +X 侧 x=-4.75 朝 -X，robot_2 在 -X 侧 x=ROBOT_2_X 朝 +X），
-    # y=ROBOT_WORKSTATION_Y，两者都随 TOTES_ON_CONVEYOR 切换。
-    # 流水线布局：立在流水线两侧、y 为第二段中心 14.148。流水线(结构占 x[-6.19,-5.04])比原
-    #   推车宽，robot_2 拉到 x=-6.7 越过 -X 侧外缘避免重叠；代价是离箱(x=-5.62)约 1.1 m 够不到，
-    #   此侧为布局/展示站位（robot_1 侧 x=-4.75 仍贴近 +X 边缘）。
-    # 原布局：拖车 (x=-5.4, y=19.39363) 两侧各 ~0.65 m 对称站位（robot_2 x=-6.05），
-    #   与纸箱推车 (x=-6.8) 之间仍留约 0.45 m 间隙。
-    robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot_1",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(ROBOT_1_X, ROBOT_WORKSTATION_Y, 0.78),
-            rot=(0.0, 0.0, 0.0, 1.0),
-        ),
-    )
+    # 合并说明（SONIC → conveyor）：保留 conveyor 双机面对面工位布局
+    #   （robot_1 在 +X 侧 x=ROBOT_1_X，robot_2 在 -X 侧 x=ROBOT_2_X，y=ROBOT_WORKSTATION_Y，
+    #    随 TOTES_ON_CONVEYOR 切换），叠加 SONIC 的机器人开关：
+    #   - LOCOMANIP_SONIC_REPLACE_ROBOT1=1（默认）：robot_1 由 SONICRobot 顶替，
+    #     其 hand_contact 传感器随之下线（prim 路径 /Robot_1/... 无实体会解析失败）；
+    #     设 0 恢复 robot_1 镜像机 + hand_contact。
+    #   - LOCOMANIP_ENABLE_ROBOT2=0：robot_2 镜像机下线（单机调试省一台 PhysX 解算）。
+    if not SONIC_REPLACE_ROBOT1:
+        robot_1: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+            prim_path="/World/envs/env_.*/Robot_1",
+            init_state=G1_43DOF_GR00T_CFG.init_state.replace(
+                pos=(ROBOT_1_X, ROBOT_WORKSTATION_Y, 0.78),
+                rot=(0.0, 0.0, 0.0, 1.0),
+            ),
+        )
 
-    # Net contact forces on robot_1's hand links: the only contact signal that
-    # works for LIGHT objects (a 0.08 kg box never stalls the fingers, so every
-    # kinematic contact cue -- residual/velocity/progress -- is blind to it).
-    # Drives the adaptive finger-lead shrink in mdp/actions.py.
-    hand_contact = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot_1/.*_hand_.*",
-        update_period=0.0,
-        history_length=1,
-    )
-    robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot_2",
-        init_state=G1_43DOF_GR00T_CFG.init_state.replace(
-            pos=(ROBOT_2_X, ROBOT_WORKSTATION_Y, 0.78),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-    )
+        # Net contact forces on robot_1's hand links: the only contact signal that
+        # works for LIGHT objects (a 0.08 kg box never stalls the fingers, so every
+        # kinematic contact cue -- residual/velocity/progress -- is blind to it).
+        # Drives the adaptive finger-lead shrink in mdp/actions.py.
+        hand_contact = ContactSensorCfg(
+            prim_path="/World/envs/env_.*/Robot_1/.*_hand_.*",
+            update_period=0.0,
+            history_length=1,
+        )
+
+    if ENABLE_ROBOT2:
+        robot_2: ArticulationCfg = G1_43DOF_GR00T_CFG.replace(
+            prim_path="/World/envs/env_.*/Robot_2",
+            init_state=G1_43DOF_GR00T_CFG.init_state.replace(
+                pos=(ROBOT_2_X, ROBOT_WORKSTATION_Y, 0.78),
+                rot=(1.0, 0.0, 0.0, 0.0),
+            ),
+        )
+
+    # SONIC deploy 驱动的 G1（29dof，训练同款 PD/armature）。默认顶替 robot_1，
+    # 站 conveyor 工位（ROBOT_1_X, ROBOT_WORKSTATION_Y）并沿用 robot_1 朝向。
+    # Z=0.76 沿用 SONIC 标定出生高度（脚底离地 ~9mm，勿抄 43dof 的 0.78）。
+    # 默认固定根+关重力（SONIC_G1_PHYSICS_MODE=1 恢复自由根，闭环物理行走）。
+    # 【合并默认，需在 conveyor 布局里跑一遍校位/朝向】开关设 0 时退回 prim 默认出生点。
+    if SONIC_REPLACE_ROBOT1:
+        sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(
+            prim_path="{ENV_REGEX_NS}/SONICRobot",
+            init_state=SONIC_G1_29DOF_CFG.init_state.replace(
+                pos=(ROBOT_1_X, ROBOT_WORKSTATION_Y, 0.76),
+                rot=(0.0, 0.0, 0.0, 1.0),
+            ),
+        )
+    else:
+        sonic_robot: ArticulationCfg = SONIC_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/SONICRobot")
     test_box = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/TestBox",
         # 属性对齐 晓阳全身005 a61191017 的 long_box（尺寸/质量/材质/碰撞参数），
@@ -1241,6 +1492,22 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         mass=0.08,
         color=(0.88, 0.72, 0.40),
         physics_authority=_SCENE_PHYSICS_AUTHORITY,
+    )
+
+    # Ground plane（SONIC 引入）：高摩擦地面 μ=1.0/combine=max，对齐 MuJoCo deploy
+    # 参考环境（与 SonicSolo/SonicFullscene 一致）。默认 GroundPlaneCfg 是
+    # μ=0.5/average，SONIC 物理行走时脚底摩擦减半，蹬地/侧移打滑。与仓库 USD 地砖
+    # 在 z=0 共面叠放，脚下接触落到哪块由 EventsCfg.bind_warehouse_floor_friction 统一补绑。
+    ground = AssetBaseCfg(
+        prim_path="/World/GroundPlane",
+        spawn=GroundPlaneCfg(
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+                friction_combine_mode="max",
+            ),
+        ),
     )
     long_box = _box_cfg(
         prim_name="LongBox",
@@ -1354,12 +1621,222 @@ class ActionsCfg:
     """Action specifications for the MDP."""
 
     # Body/root streams are mirrored independently for both robot IDs.
-    mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
-    mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
-    # 晓阳0007：双机固定场景同步（双 G1 + 推车三箱 + 第二拖车两塑料筐，单帧 scene_state）、
-    # PC1→PC2 复位事件、装箱成功检测复位。
+    # 合并（SONIC → conveyor）：默认 LOCOMANIP_SONIC_REPLACE_ROBOT1=1 时 robot_1 被
+    # SONICRobot 顶替、其镜像流下线（工位关节/根驱动改走下方 sonic_wholebody）；设 0
+    # 恢复镜像流驱动 robot_1。robot_2 镜像流随 LOCOMANIP_ENABLE_ROBOT2 开关。镜像 cfg
+    # 沿用 conveyor 的 _mujoco_g1_mirror_cfg 工厂（含完整调参入口）。
+    if not SONIC_REPLACE_ROBOT1:
+        mujoco_g1_mirror_1 = _mujoco_g1_mirror_cfg(1)
+    if ENABLE_ROBOT2:
+        mujoco_g1_mirror_2 = _mujoco_g1_mirror_cfg(2)
+
+    # 晓阳0007：双机固定场景同步（scene_state 单帧）+ PC1→PC2 复位事件、装箱成功检测复位。
     scene_state_sync = _scene_state_sync_cfg()
     env_reset_sync = _env_reset_sync_cfg()
+
+    # gripper 同步只对在场的镜像机器人挂载：robot_1 被 SONIC 顶替、或 robot_2 被
+    # LOCOMANIP_ENABLE_ROBOT2=0 下线时，实体缺席，挂上即在 asset 解析阶段崩溃；
+    # 在场判定统一走 _robot_asset_present。
+    if _robot_asset_present(ISAACLAB_LOCAL_ROBOT_ID):
+        local_gripper = G1GripperSyncActionCfg(
+            asset_name=ISAACLAB_LOCAL_ROBOT_NAME,
+            mode="local_publish",
+            robot_id=ISAACLAB_LOCAL_ROBOT_ID,
+            transport="zmq",
+            zmq_host=_isaac_robot_env(
+                ISAACLAB_LOCAL_ROBOT_ID,
+                "GRIPPER_ZMQ_HOST",
+                _windows_isaaclab_ip(ISAACLAB_LOCAL_ROBOT_ID, "127.0.0.1"),
+            ),
+            zmq_port=_isaac_robot_env_int(
+                ISAACLAB_LOCAL_ROBOT_ID,
+                "GRIPPER_ZMQ_PORT",
+                5571 if ISAACLAB_LOCAL_ROBOT_ID == 1 else 5572,
+            ),
+            zmq_topic=_isaac_robot_env(
+                ISAACLAB_LOCAL_ROBOT_ID,
+                "GRIPPER_ZMQ_TOPIC",
+                f"g1_{ISAACLAB_LOCAL_ROBOT_ID}_gripper",
+            ),
+            timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
+            controller_gripper_finger_close_angle=1.8,
+            controller_gripper_thumb_1_angle=1.1,
+            controller_gripper_thumb_2_angle=1.8,
+            controller_gripper_action_alpha=1.0,
+            controller_gripper_use_soft_limits=False,
+            write_joint_state=True,
+        )
+    if _robot_asset_present(ISAACLAB_PEER_ROBOT_ID):
+        remote_gripper = G1GripperSyncActionCfg(
+            asset_name=ISAACLAB_PEER_ROBOT_NAME,
+            mode="remote_subscribe",
+            robot_id=ISAACLAB_PEER_ROBOT_ID,
+            transport="zmq",
+            zmq_host=_isaac_robot_env(
+                ISAACLAB_PEER_ROBOT_ID,
+                "GRIPPER_ZMQ_HOST",
+                _windows_isaaclab_ip(ISAACLAB_PEER_ROBOT_ID, "127.0.0.1"),
+            ),
+            zmq_port=_isaac_robot_env_int(
+                ISAACLAB_PEER_ROBOT_ID,
+                "GRIPPER_ZMQ_PORT",
+                5571 if ISAACLAB_PEER_ROBOT_ID == 1 else 5572,
+            ),
+            zmq_topic=_isaac_robot_env(
+                ISAACLAB_PEER_ROBOT_ID,
+                "GRIPPER_ZMQ_TOPIC",
+                f"g1_{ISAACLAB_PEER_ROBOT_ID}_gripper",
+            ),
+            timeout=_env_float("ISAACLAB_G1_GRIPPER_TIMEOUT_S", 0.5),
+            controller_gripper_use_soft_limits=False,
+            write_joint_state=True,
+        )
+    # 注：SONIC 分支的逐物体 object_sync/pushcart_sync/cart_boxN_sync（005 旧架构）
+    # 已由上面的 scene_state_sync（007）统一取代，且 cart_box3/cart_box4 在 conveyor
+    # 场景不存在，保留会在 asset 解析崩溃，合并时丢弃。sonic_robot 跨机同步仍由公共区
+    # 的 sonic_robot_sync（ZmqRobotSyncActionCfg）承担。
+
+    # ------------------------------------------------------------------
+    # SONIC deploy 驱动（sonic_robot）。本类是两个 SONIC 场景的唯一定义来源：
+    # SonicSolo/SonicFullscene 从 ActionsCfg 实例摘取这三项，保证环境变量
+    # 行为（transport 选择、发布开关、全部调参）三个任务永远一致。
+    #
+    # Minimal bridge modes:
+    #   SONIC_DEPLOY_TRANSPORT=zmq (default): GR00T deploy publishes debug body_q_target over ZMQ.
+    #   SONIC_DEPLOY_TRANSPORT=dds: IsaacLab behaves like a virtual G1, subscribing rt/lowcmd
+    #                               and publishing rt/lowstate for GR00T deploy.
+    # ------------------------------------------------------------------
+    if os.environ.get("SONIC_DEPLOY_TRANSPORT", "zmq").lower() == "dds":
+        sonic_wholebody = UnitreeDdsLowCmdActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            domain_id=int(os.environ.get("UNITREE_DDS_DOMAIN_ID", "0")),
+            network_interface=os.environ.get("UNITREE_DDS_INTERFACE", ""),
+            lowcmd_topic=os.environ.get("UNITREE_LOWCMD_TOPIC", "rt/lowcmd"),
+            lowstate_topic=os.environ.get("UNITREE_LOWSTATE_TOPIC", "rt/lowstate"),
+            secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
+            target_order="mujoco",
+            target_rate_limit_rad_per_step=0.08,
+            stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
+            stale_timeout_s=0.5,
+            publish_lowstate_every_apply=True,
+            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
+            debug_log_interval=50,
+        )
+    else:
+        sonic_wholebody = SonicDeployTargetActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            endpoint=os.environ.get("SONIC_DEPLOY_ENDPOINT", "tcp://127.0.0.1:5557"),
+            topic=os.environ.get("SONIC_DEPLOY_TOPIC", "g1_debug"),
+            target_field=os.environ.get("SONIC_DEPLOY_TARGET_FIELD", "last_action"),
+            target_order="mujoco",
+            target_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_TARGET_RATE_LIMIT", "0.16")),
+            # 物理模式：解锁后旁路 rate limiter——软增益 policy 靠快甩目标偏置生成
+            # 扭矩，slew limiter 在平衡环里是 100-250ms 人为迟滞（实测钉死 0.04 摔倒）
+            rate_limit_only_while_root_locked=_env_flag(
+                "SONIC_DEPLOY_RATE_LIMIT_ONLY_LOCKED", not SONIC_G1_FIX_ROOT
+            ),
+            stabilize_root_pose=_env_flag("SONIC_DEPLOY_STABILIZE_ROOT", SONIC_G1_FIX_ROOT),
+            lock_root_z=SONIC_G1_FIX_ROOT,  # 物理模式放 Z 自由，让 PhysX settle 到正确地面高度
+            startup_settle_steps=0 if SONIC_G1_FIX_ROOT else 50,  # 物理模式先 settle 再跟 deploy target
+            # 物理模式 unlock 渐变释放（按物理步计数）。SONIC_DEPLOY_UNLOCK_BLEND_STEPS=0
+            # 可做"瞬时交接"实验（最接近 MuJoCo eval 的自由根起始状态）
+            unlock_blend_steps=int(
+                os.environ.get("SONIC_DEPLOY_UNLOCK_BLEND_STEPS", "0" if SONIC_G1_FIX_ROOT else "50")
+            ),
+            hold_after_unlock=_env_flag("SONIC_DEPLOY_HOLD_AFTER_UNLOCK", False),  # 诊断：设1则unlock后保持站立不跟deploy
+            # 摔倒自动恢复（对齐 MuJoCo base_sim.check_fall：root 高度 <0.2m 即自动
+            # 扶正）。SONIC_DEPLOY_AUTO_RECOVER=0 恢复纯手动（J 键）；settle 后是否
+            # 自动重新解锁由 SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER 控制。
+            # 对象同步订阅端（对端镜像机）默认关闭：root 高度来自 sonic_robot_sync
+            # 同步流，对端机器人摔倒会让本地 recover 状态机 50Hz 空转刷屏（其写入
+            # 随即被同步流覆盖，毫无效果）。显式设环境变量仍可强制打开。
+            auto_recover_on_fall=_env_flag("SONIC_DEPLOY_AUTO_RECOVER", ZMQ_SYNC_ROLE != "subscriber"),
+            fall_root_height_m=float(os.environ.get("SONIC_DEPLOY_FALL_HEIGHT", "0.2")),
+            auto_unlock_after_recover=_env_flag("SONIC_DEPLOY_AUTO_UNLOCK_AFTER_RECOVER", True),
+            # 恢复位置默认对齐 MuJoCo mj_resetData（回出生点位姿，清 odom/yaw 漂移）；
+            # SONIC_DEPLOY_RECOVER_IN_PLACE=1 切回原地扶正（XR 视点连续，07-06 版行为）
+            recover_in_place=_env_flag("SONIC_DEPLOY_RECOVER_IN_PLACE", False),
+            stale_timeout_s=0.5,
+            fallback_to_last_action=True,
+            fallback_to_body_q_target=True,
+            reference_target_field=os.environ.get("SONIC_DEPLOY_REFERENCE_TARGET_FIELD", "body_q_target"),
+            # 物理模式需要 policy 腿部平衡补偿，默认不 blend 掉
+            blend_reference_lower_body=_env_flag("SONIC_DEPLOY_BLEND_REFERENCE_LOWER_BODY", SONIC_G1_FIX_ROOT),
+            hold_last_reference_target=_env_flag("SONIC_DEPLOY_HOLD_LAST_REFERENCE", True),
+            # 物理模式下 deploy base_trans/quat 非物理真实值，默认不跟随
+            follow_base_yaw_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_YAW", SONIC_G1_FIX_ROOT),
+            follow_base_translation_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_TRANSLATION", SONIC_G1_FIX_ROOT),
+            base_quat_target_field=os.environ.get("SONIC_DEPLOY_BASE_QUAT_FIELD", "base_quat_target"),
+            base_trans_target_field=os.environ.get("SONIC_DEPLOY_BASE_TRANS_FIELD", "base_trans_target"),
+            base_yaw_rate_limit_rad_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_YAW_RATE_LIMIT", "0.12")),
+            base_translation_rate_limit_m_per_step=float(
+                os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT", "0.08")
+            ),
+            base_translation_scale=float(os.environ.get("SONIC_DEPLOY_BASE_TRANSLATION_SCALE", "2.0")),
+            follow_base_height_target=_env_flag("SONIC_DEPLOY_FOLLOW_BASE_HEIGHT", False),
+            base_height_rate_limit_m_per_step=float(os.environ.get("SONIC_DEPLOY_BASE_HEIGHT_RATE_LIMIT", "0.05")),
+            base_height_scale=float(os.environ.get("SONIC_DEPLOY_BASE_HEIGHT_SCALE", "1.0")),
+            keep_feet_on_ground=_env_flag("SONIC_DEPLOY_KEEP_FEET_ON_GROUND", False),
+            foot_ground_scale=float(os.environ.get("SONIC_DEPLOY_FOOT_GROUND_SCALE", "0.35")),
+            max_squat_drop_m=float(os.environ.get("SONIC_DEPLOY_MAX_SQUAT_DROP", "0.45")),
+            # Synthetic base motion 是固定根可视化功能；物理模式 root 由 PhysX 驱动，默认关
+            synthetic_base_motion_from_lower_body=_env_flag(
+                "SONIC_DEPLOY_SYNTHETIC_BASE_MOTION", not SONIC_G1_PHYSICS_MODE
+            ),
+            synthetic_base_motion_gain=float(os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_GAIN", "0.35")),
+            synthetic_base_motion_deadzone=float(
+                os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_DEADZONE", "0.002")
+            ),
+            synthetic_base_motion_max_step_m=float(
+                os.environ.get("SONIC_DEPLOY_SYNTHETIC_BASE_MOTION_MAX_STEP", "0.035")
+            ),
+            debug_log_interval=50,
+        )
+
+    # 默认 ZMQ 链路下，关节由 SonicDeployTargetAction 驱动，但不会回传机器人状态。
+    # 设 SONIC_PUBLISH_LOWSTATE=1（或 teleop 的 --publish_lowstate）时额外开一路 DDS，
+    # 把 sonic_robot 的 sim 状态发到 rt/lowstate，供 GR00T/SONIC deploy 当状态源。
+    # DDS 传输模式（SONIC_DEPLOY_TRANSPORT=dds）已由 UnitreeDdsLowCmdAction 发布 lowstate，
+    # 因此这里仅在非 dds 模式下挂载，避免重复发布与 DDS 重复初始化。
+    if os.environ.get("SONIC_DEPLOY_TRANSPORT", "zmq").lower() != "dds" and _env_flag(
+        "SONIC_PUBLISH_LOWSTATE", False
+    ):
+        sonic_lowstate_pub = UnitreeLowStatePublisherActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            domain_id=int(os.environ.get("UNITREE_DDS_DOMAIN_ID", "0")),
+            network_interface=os.environ.get("UNITREE_DDS_INTERFACE", ""),
+            lowstate_topic=os.environ.get("UNITREE_LOWSTATE_TOPIC", "rt/lowstate"),
+            secondary_imu_topic=os.environ.get("UNITREE_SECONDARY_IMU_TOPIC", "rt/secondary_imu"),
+            publish_secondary_imu=_env_flag("SONIC_PUBLISH_SECONDARY_IMU", True),
+            target_order="mujoco",
+            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
+            debug_log_interval=100,
+        )
+
+    # 真实物理闭环桥：IsaacLab 用简单 ZMQ/msgpack 发布 sonic_robot 真实状态，
+    # C++ proxy 再用 Unitree C++ SDK 转成 rt/lowstate，避开 Python DDS 与 C++ deploy 不互通的问题。
+    if _env_flag("SONIC_PUBLISH_STATE_ZMQ", False):
+        sonic_state_pub = SonicRobotStatePublisherActionCfg(
+            asset_name="sonic_robot",
+            joint_names=list(SONIC_G1_29DOF_JOINT_ORDER),
+            bind_endpoint=os.environ.get("SONIC_STATE_ZMQ_BIND", "tcp://127.0.0.1:5560"),
+            topic=os.environ.get("SONIC_STATE_ZMQ_TOPIC", "sonic_state"),
+            target_order="mujoco",
+            mode_machine=int(os.environ.get("UNITREE_G1_MODE_MACHINE", "5")),
+            debug_log_interval=100,
+        )
+
+    # SONIC 行走跨机同步：让对端（ISAACLAB_LOCAL_ROBOT_ID=2）也能看到 SONIC
+    # 机器人行走。ID=1（SONIC 物理行走机）沿对象同步同一 PUB socket 发布
+    # sonic_robot 根位姿+关节角（topic=sonic_robot）；ID=2 订阅并运动学跟随。
+    # 必须声明在 sonic_wholebody 之后：订阅端收不到 deploy 包只会锁根站立，
+    # 本 term 同一步内后写覆盖其根位姿/关节目标（见 ZmqRobotSyncAction 注释）。
+    sonic_robot_sync = ZmqRobotSyncActionCfg(
+        asset_name="sonic_robot", role=ZMQ_SYNC_ROLE, endpoint=ZMQ_SYNC_ENDPOINT
+    )
 
 
 @configclass
@@ -1390,10 +1867,20 @@ class TerminationsCfg:
     #     func=base_mdp.root_height_below_minimum, params={"minimum_height": 0.5, "asset_cfg": SceneEntityCfg("object")}
     # )
 
-    # success = DoneTerm(
-    #     func=manip_mdp.task_done_pick_place,
-    #     params={"task_link_name": "right_wrist_yaw_link", "robot_cfg": SceneEntityCfg(ISAACLAB_LOCAL_ROBOT_NAME)},
-    # )
+    # 默认开关下本机 ID=1 的主角机器人从 robot_1 换成 sonic_robot（29dof 同样有
+    # right_wrist_yaw_link）；本机镜像机器人缺席（被 SONIC 顶替或被
+    # LOCOMANIP_ENABLE_ROBOT2=0 下线）时同样回退 sonic_robot，避免解析崩溃
+    success = DoneTerm(
+        func=manip_mdp.task_done_pick_place,
+        params={
+            "task_link_name": "right_wrist_yaw_link",
+            "robot_cfg": SceneEntityCfg(
+                ISAACLAB_LOCAL_ROBOT_NAME
+                if _robot_asset_present(ISAACLAB_LOCAL_ROBOT_ID)
+                else "sonic_robot"
+            ),
+        },
+    )
 
 
 # ------------------------------------------------------------------
@@ -1430,7 +1917,12 @@ BACKGROUND_LOCK_PRIM_NAMES = ("blue_sorting_bin_02",)
 
 @configclass
 class EventsCfg:
-    """Runtime events：背景料箱锁 kinematic + 流水线送筐到工位停住。"""
+    """Runtime events：默认场景复位 + 背景料箱锁 kinematic + 流水线送筐到工位停住 + 仓库地砖摩擦补绑。"""
+
+    # 基类默认 events=DefaultEventManagerCfg() 仅含此项；本类顶替默认后必须
+    # 自带，否则 env.reset() 不再恢复实体姿态（Articulation.reset() 只清
+    # buffer 不写位姿，见 SonicSolo 同名注释）。
+    reset_scene_to_default = EventTerm(func=base_mdp.reset_scene_to_default, mode="reset")
 
     lock_sorting_bins = EventTerm(
         func=locomanip_mdp.lock_background_rigid_bodies,
@@ -1456,6 +1948,23 @@ class EventsCfg:
         },
     )
 
+    # warehouse-simple6_v48.usd 的 SM_floor* 地砖有碰撞体但未绑物理材质
+    # （PhysX 默认 μ=0.5/average），与 μ=1.0/max 的 GroundPlane 在 z=0 共面叠放；
+    # SONIC 工位脚下正是 SM_floor*——接触分配到哪块摩擦就跟谁，蹬地/侧移随机打滑。
+    # prestartup 按名字补绑对齐（配方同 SonicFullscene 的 bind_warehouse_floor_friction）。
+    bind_warehouse_floor_friction = EventTerm(
+        func=locomanip_mdp.bind_floor_physics_material,
+        mode="prestartup",
+        params={
+            "prim_path_templates": (),
+            "prim_name_regex": r"^SM_floor\d",
+            "static_friction": 1.0,
+            "dynamic_friction": 1.0,
+            "restitution": 0.0,
+            "friction_combine_mode": "max",
+        },
+    )
+
 
 ##
 # MDP settings
@@ -1473,7 +1982,11 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
     """
 
     # Scene settings
-    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
+    # replicate_physics=False：EventsCfg 的 prestartup 地砖摩擦补绑要写 USD，
+    # 框架要求关闭场景复制（teleop 恒 num_envs=1，无复制收益，同 SonicSolo）。
+    scene: LocomanipulationG1SceneCfg = LocomanipulationG1SceneCfg(
+        num_envs=1, env_spacing=2.5, replicate_physics=False
+    )
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -1501,7 +2014,10 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 20.0
         # simulation settings
         self.sim.dt = 1 / 200  # 200Hz
-        self.sim.render_interval = 2
+        # 每 env 步渲染一次（=50Hz，同 SonicSolo，勿设 >decimation）。原值 2 是
+        # 100Hz 渲染目标，XR 下渲染整个 warehouse 直接把 env_hz 拖离 SONIC
+        # 闭环要求的墙钟 50Hz 实时线。
+        self.sim.render_interval = 4
         # The default Isaac Lab GPU PhysX buffers target large batched training scenes.
         # This task is a single-env XR mirror, so smaller buffers avoid VRAM exhaustion on 8 GB GPUs.
         self.sim.physx.gpu_max_rigid_contact_count = 2**22
@@ -1515,9 +2031,16 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
 
         local_robot_id = _local_robot_id()
         self.local_robot_id = local_robot_id
-        local_robot_prim = _robot_prim_name(local_robot_id)
-        self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
-        self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
+        if not _robot_asset_present(ISAACLAB_LOCAL_ROBOT_ID):
+            # 本机镜像机器人缺席（Robot_1 被 SONICRobot 顶替，或 Robot_2 被
+            # LOCOMANIP_ENABLE_ROBOT2=0 下线）→ 锚到 SONICRobot。29dof g1.usd 的
+            # head_link 嵌套在 torso_link 下（GR00T 43dof 是根下 head_link，抄错会静默失效）
+            self.xr.anchor_prim_path = "/World/envs/env_0/SONICRobot/torso_link/head_link"
+            self.xr.anchor_rotation_prim_path = "/World/envs/env_0/SONICRobot/pelvis"
+        else:
+            local_robot_prim = _robot_prim_name(ISAACLAB_LOCAL_ROBOT_ID)
+            self.xr.anchor_prim_path = f"/World/envs/env_0/{local_robot_prim}/head_link"
+            self.xr.anchor_rotation_prim_path = f"/World/envs/env_0/{local_robot_prim}/pelvis"
         print(
             f"[INFO] Isaac Lab local robot ID: {local_robot_id}; "
             f"XR anchor={self.xr.anchor_prim_path}"
@@ -1550,5 +2073,11 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
                     sim_device=teleop_device,
                     xr_cfg=self.xr,
                 ),
+                # 勿加 "handtracking" 键：无 retargeter 的 OpenXRDevice.advance()
+                # 返回 raw dict，动作维度非零的配置（本机 ID=2，或
+                # LOCOMANIP_SONIC_REPLACE_ROBOT1=0 时 local_gripper 在场）下主循环
+                # action.repeat() 直接 AttributeError。teleop_se3_agent 对缺失设备
+                # 名会自动回退到 motion_controllers（teleop_se3_agent.py:350），
+                # XR 锚点同样生效，且 4 维 gripper retargeter 输出与动作空间匹配。
             }
         )

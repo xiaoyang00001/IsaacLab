@@ -17,8 +17,8 @@ from . import (
     sonic_solo_locomanipulation_env_cfg,
 )
 
-# 极简场景（移植自 sonic-windows-xr-ar-anchor 分支，只移植 USD 场景资产；
-# 主环境 + HugBox 抱取演示物体，机器人/动作/观测/XR 原样继承主配置）
+# SONIC 闭环物理调试极简场景（id 含 "Locomanipulation" 以复用 teleop 脚本的
+# deploy_target_mode 判定与 U 键回调；场景只有 sonic_robot + 地面 + 天光）
 gym.register(
     id="Isaac-SonicSolo-Locomanipulation-G1-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
@@ -28,8 +28,8 @@ gym.register(
     disable_env_checker=True,
 )
 
-# 完整仓库场景（主环境 + warehouse 背景 + USD 打包台 + 转向盘 + HugBox；
-# 传送带仅视觉模型，滚轮物理/流水箱驱动等 events 未移植）
+# SONIC 闭环 Phase 1：完整仓库场景（warehouse 背景 + 单台 SONIC G1，陪跑机器人
+# 裁除，物理 200Hz/dec4 对齐闭环七条件；SONIC_FULLSCENE_CONVEYOR=1 加载传送带）
 gym.register(
     id="Isaac-SonicFullscene-Locomanipulation-G1-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",

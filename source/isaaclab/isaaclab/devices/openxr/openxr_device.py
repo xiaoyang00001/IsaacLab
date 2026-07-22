@@ -293,6 +293,7 @@ class OpenXRDevice(DeviceBase):
                     data[DeviceBase.TrackingTarget.CONTROLLER_LEFT] = left_ctrl
                 if right_ctrl.size:
                     data[DeviceBase.TrackingTarget.CONTROLLER_RIGHT] = right_ctrl
+
             except Exception:
                 # Ignore controller data if XRCore/controller APIs are unavailable
                 pass
@@ -405,9 +406,9 @@ class OpenXRDevice(DeviceBase):
             logger.warning("XR core not available; skipping button binding")
             return
 
+        event_phase = event_phase.lower()
         sub_key = f"{device_path}/{button_name}/{event_name}/{event_phase}"
         self.__button_subscriptions[sub_key] = {}
-        event_phase = event_phase.lower()
 
         def try_emit_button_events():
             if self.__button_subscriptions[sub_key].get("generator"):
