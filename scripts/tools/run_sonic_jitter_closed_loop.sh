@@ -138,16 +138,16 @@ fi
 DECODER_MODEL="${POLICY_ROOT}/model_decoder.onnx"
 ENCODER_MODEL="${POLICY_ROOT}/model_encoder.onnx"
 OBS_CONFIG="${POLICY_ROOT}/observation_config.yaml"
-PLANNER_MODEL="${SONY_REPO}/gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx"
+PLANNER_MODEL="${PLANNER_MODEL_OVERRIDE:-${SONY_REPO}/gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx}"
 GR00T_43DOF_USD="${SONY_REPO}/gear_sonic/data/robots/g1/g1_43dof.usd"
 GR00T_43DOF_USD_REALPATH="$(readlink -f -- "$GR00T_43DOF_USD" 2>/dev/null || true)"
 [[ -n "$GR00T_43DOF_USD_REALPATH" ]] && GR00T_43DOF_USD="$GR00T_43DOF_USD_REALPATH"
 export GR00T_WBC_ROOT="$SONY_REPO"
 export SONIC_GR00T_43DOF_USD="$GR00T_43DOF_USD"
 MANIFEST_HELPER="${ISAACLAB_ROOT}/scripts/tools/sonic_run_manifest.py"
-MOCAP_MANAGER="${SONY_REPO}/gear_sonic/scripts/mocap_manager_server.py"
-BVH_SENDER="${SONY_REPO}/gear_sonic/scripts/bvh_stream_sender.py"
-TELEOP_PYTHON="${SONY_REPO}/.venv_teleop/bin/python"
+MOCAP_MANAGER="${MOCAP_MANAGER_OVERRIDE:-${SONY_REPO}/gear_sonic/scripts/mocap_manager_server.py}"
+BVH_SENDER="${BVH_SENDER_OVERRIDE:-${SONY_REPO}/gear_sonic/scripts/bvh_stream_sender.py}"
+TELEOP_PYTHON="${TELEOP_PYTHON_OVERRIDE:-${SONY_REPO}/.venv_teleop/bin/python}"
 DEPLOY_ROOT_INPUT="${DEPLOY_ROOT_OVERRIDE:-${SONY_REPO}/gear_sonic_deploy}"
 DEPLOY_ROOT="$(cd "$DEPLOY_ROOT_INPUT" 2>/dev/null && pwd -P)" || {
     echo "✗ deploy runtime root 不存在或不可访问: $DEPLOY_ROOT_INPUT" >&2
@@ -241,9 +241,16 @@ require_file "$ENCODER_MODEL" "encoder model"
 require_file "$OBS_CONFIG" "observation config"
 require_file "$PLANNER_MODEL" "planner model"
 require_file "$GR00T_43DOF_USD" "GR00T G1 43-DoF import USD"
-require_file "$MOCAP_MANAGER" "mocap manager"
-require_file "$BVH_SENDER" "BVH sender"
-require_executable "$TELEOP_PYTHON" "teleop venv Python"
+if [[ "$JITTER_INPUT" == "bvh" ]]; then
+    require_file "$MOCAP_MANAGER" "mocap manager"
+    require_file "$BVH_SENDER" "BVH sender"
+    require_executable "$TELEOP_PYTHON" "teleop venv Python"
+else
+    # keyboard 模式不启动 mocap/BVH 输入端，manifest 中也不记录无效路径。
+    MOCAP_MANAGER=""
+    BVH_SENDER=""
+    TELEOP_PYTHON=""
+fi
 require_file "$DEPLOY_FASTRTPS_PROFILE" "deploy FastRTPS profile"
 require_file "$DEPLOY_LIBDDSC" "deploy libddsc.so.0"
 require_file "$DEPLOY_LIBDDSCXX" "deploy libddscxx.so.0"
@@ -331,15 +338,15 @@ if [[ "$JITTER_INPUT" == "bvh" ]]; then
     BVH="$(readlink -f -- "$BVH")"
 fi
 
-PORT_PATTERN=':(5557|5560)\b'
+PORT_PATTERN=':(5557|5560)([[:space:]]|$)'
 if [[ "$JITTER_INPUT" == "bvh" ]]; then
-    PORT_PATTERN=':(5556|5557|5560|12352)\b'
+    PORT_PATTERN=':(5556|5557|5560|12352)([[:space:]]|$)'
 fi
 current_port_listeners() {
     {
         ss -H -ltnp 2>/dev/null
         [[ "$JITTER_INPUT" == "bvh" ]] && ss -H -lunp 2>/dev/null
-    } | rg "$PORT_PATTERN" || true
+    } | grep -E "$PORT_PATTERN" || true
 }
 PORT_LISTENERS="$(current_port_listeners)"
 if [[ -n "$PORT_LISTENERS" ]]; then
