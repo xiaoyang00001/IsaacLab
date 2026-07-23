@@ -42,6 +42,11 @@ _SONIC_ENV_DEFAULTS = {
     "SONIC_PUBLISH_STATE_ZMQ": "1",
     "SONIC_STATE_ZMQ_BIND": "tcp://*:5560",
     "SONIC_STATE_ZMQ_TOPIC": "sonic_state",
+    # 评测默认空场景（纯 G1+地面+天光）：SonicSolo 的抱箱台/纸箱在场时，自由根段
+    # 漂移/行走 10m+ 会撞上台座摔倒，污染稳定性判据（实测含台座 3/1/0 摔，
+    # 空场景 0 摔、healthy 0.94→0.99）。场景侧默认仍是「开」，只有本评测运行器
+    # 关掉；想在评测里保留演示物体显式传 SONIC_SOLO_DEMO_OBJECT=1 即可。
+    "SONIC_SOLO_DEMO_OBJECT": "0",
     # headless 严禁静默挂上 SteamVR runtime（env_hz 50→4.7 判例）
     "XR_RUNTIME_JSON": "/nonexistent",
 }
