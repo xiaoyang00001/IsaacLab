@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # ---------- 可按需修改的配置（均可用同名环境变量在外部覆盖） ----------
-ISAACLAB_DIR="${ISAACLAB_DIR:-/home/nolo/xiaoyang_IssacLab/IsaacLab}"
+ISAACLAB_DIR="${ISAACLAB_DIR:-/home/nolovr/IsaacLab}"
 
 # 碰撞可视化测试模式
 _COLLISION_TEST=false
@@ -26,7 +26,7 @@ done
 set -- "${_FILTERED_ARGS[@]}"
 
 # G1 43-DoF USD 所在的 GR00T-WholeBodyControl 仓库（import 阶段就要用，缺了直接报错）
-export GR00T_WBC_ROOT="${GR00T_WBC_ROOT:-/home/nolo/GR00T-WholeBodyControl}"
+export GR00T_WBC_ROOT="${GR00T_WBC_ROOT:-/home/nolovr/GR00T-WholeBodyControl}"
 
 # deploy/MuJoCo 发布端所在机器的 IP：本机跑 deploy 用 127.0.0.1，远程则填其局域网 IP
 export ISAACLAB_G1_ZMQ_HOST="${ISAACLAB_G1_ZMQ_HOST:-127.0.0.1}"
@@ -41,8 +41,8 @@ DEVICE="${DEVICE:-cuda:0}"
 export PYTHONUNBUFFERED=1
 
 # ---------- conda 环境 ----------
-source /home/nolo/miniconda3/etc/profile.d/conda.sh
-conda activate env_isaaclab
+source /home/nolovr/miniconda3/etc/profile.d/conda.sh
+conda activate xiaoyang_isaaclab
 
 # ---------- CUDA 库冲突防护（勿删） ----------
 # ~/.bashrc 把系统 CUDA 12.5 塞进了 LD_LIBRARY_PATH，Isaac Sim (Kit) 启动时会先驻留
