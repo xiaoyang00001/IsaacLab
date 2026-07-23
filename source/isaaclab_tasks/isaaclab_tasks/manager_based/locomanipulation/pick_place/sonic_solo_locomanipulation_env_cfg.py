@@ -298,7 +298,13 @@ class SonicSoloSceneCfg(InteractiveSceneCfg):
 
     if _ENABLE_DEMO_OBJECT:
         hug_box_stand = HUG_BOX_STAND_CFG
-        hug_box = HUG_BOX_CFG
+        if _ENABLE_TABLE_BOXES:
+            # 台座顶面摆三个分拣箱（含 long_box）
+            small_box_1 = SMALL_BOX_1_CFG
+            small_box_2 = SMALL_BOX_2_CFG
+            long_box = LONG_BOX_CFG
+        else:
+            hug_box = HUG_BOX_CFG
 
 
 @configclass
@@ -354,7 +360,8 @@ class SonicSoloEventsCfg:
     # 不用 H：Isaac Sim Edit 菜单 H = Toggle Visibility，会把选中 prim 隐藏）。
     reset_scene_to_default = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
-    if _ENABLE_DEMO_OBJECT:
+    # 仅 HugBox（USD 纸箱）需要 prestartup 补物理；三箱子是 CuboidCfg 自带物理
+    if _ENABLE_DEMO_OBJECT and not _ENABLE_TABLE_BOXES:
         setup_hug_box_physics = SETUP_HUG_BOX_PHYSICS_EVENT
 
 
