@@ -27,6 +27,7 @@ import os
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import OpenXRDeviceCfg, XrCfg
+from isaaclab.devices.openxr.retargeters import G1GripperMotionControllerRetargeterCfg
 from isaaclab.devices.openxr.xr_cfg import XrAnchorRotationMode
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs import mdp
@@ -42,6 +43,9 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 import isaaclab.sim as sim_utils
 from isaaclab_tasks.manager_based.locomanipulation.pick_place import mdp as locomanip_mdp
+from isaaclab_tasks.manager_based.locomanipulation.pick_place.configs.action_cfg import (
+    G1GripperSyncActionCfg,
+)
 
 from . import locomanipulation_g1_env_cfg as _main
 
@@ -169,6 +173,84 @@ def build_sonic_xr_cfg() -> XrCfg:
     )
 
 
+# ---------------------------------------------------------------------------
+# XR 手柄 → 三指手（夹爪）遥操链路
+#
+# 与主任务 Isaac-PickPlace-Locomanipulation-G1-Abs-v0 同一条通路：
+#   OpenXR motion_controllers 设备
+#     → G1GripperMotionControllerRetargeter：扳机/握把（右手另加 A/B 键）
+#       retarget 成 4 维闭合率 [左食指, 左中指, 右食指, 右中指]
+#     → G1GripperSyncAction：展开成 14 个手指关节目标写进 sonic_robot
+#
+# SONIC policy 只驱动 29 个身体关节（腿+腰+臂，见 SONIC_G1_29DOF_JOINT_ORDER），
+# 手指不在其中，两条通路互不干扰。不挂本 term 时手指没有任何驱动源，永远停在
+# 默认张开姿态——这正是 SonicSolo/SonicFullscene 下"夹爪不受遥操作控制"的根因。
+#
+# ⚠️ 动作空间宽度随之从 0 变成 4，teleop_se3_agent.py 主循环不再走零动作分支，
+#    因此 teleop 设备必须带 retargeter（无 retargeter 的 OpenXRDevice.advance()
+#    返回 raw dict，主循环 action.repeat() 直接 AttributeError）——
+#    见 build_sonic_teleop_devices()。
+# ---------------------------------------------------------------------------
+_ENABLE_GRIPPER_TELEOP = _env_flag("SONIC_GRIPPER_TELEOP", True)
+
+
+def build_sonic_gripper_action_cfg() -> G1GripperSyncActionCfg:
+    """构造 sonic_robot 的三指手遥操 action 配置（SonicSolo/SonicFullscene 共用）。
+
+    夹持角度配方与主任务 local_gripper 一致（实测可抓取的档位）。ZMQ 发布端口
+    默认 5573，刻意避开主任务的 5571/5572：同机同时跑主任务与 SONIC 场景时
+    bind 冲突会被 action term 的 try 捕获并静默关掉整个夹爪链路。
+    """
+    return G1GripperSyncActionCfg(
+        asset_name="sonic_robot",
+        mode="local_publish",
+        robot_id=int(os.environ.get("SONIC_GRIPPER_ROBOT_ID", "1")),
+        transport="zmq",
+        zmq_port=int(os.environ.get("SONIC_GRIPPER_ZMQ_PORT", "5573")),
+        zmq_topic=os.environ.get("SONIC_GRIPPER_ZMQ_TOPIC", "sonic_gripper"),
+        controller_gripper_finger_close_angle=1.8,
+        controller_gripper_thumb_1_angle=1.1,
+        controller_gripper_thumb_2_angle=1.8,
+        controller_gripper_action_alpha=1.0,
+        controller_gripper_use_soft_limits=False,
+        write_joint_state=True,
+    )
+
+
+def build_sonic_teleop_devices(xr_cfg: XrCfg) -> DevicesCfg:
+    """构造 SONIC 场景的 teleop 设备表（SonicSolo/SonicFullscene 共用）。
+
+    只有真正构造出 OpenXRDevice 时 XR 锚点才会生效（见 openxr_device.py
+    __init__），所以无论是否用夹爪都必须挂一个 teleop device。
+
+    - 夹爪开启（默认）：挂 ``motion_controllers`` + G1GripperMotionControllerRetargeter，
+      advance() 输出 4 维 tensor，与动作空间宽度匹配。
+    - 夹爪关闭（SONIC_GRIPPER_TELEOP=0）：回到原先的 ``handtracking``（无 retargeter），
+      动作空间宽度 0，主循环走零动作分支。
+
+    右手 B 键归属：B 被 SONIC_XR_ENABLE_B_RECENTER=1 借去做 recenter 时不再兼做
+    右中指闭合，避免一个按键触发两件事。
+    """
+    if not _ENABLE_GRIPPER_TELEOP:
+        return DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg=xr_cfg)})
+
+    sim_device = os.environ.get("SONIC_GRIPPER_RETARGETER_DEVICE", "cpu")
+    return DevicesCfg(
+        devices={
+            "motion_controllers": OpenXRDeviceCfg(
+                retargeters=[
+                    G1GripperMotionControllerRetargeterCfg(
+                        sim_device=sim_device,
+                        use_right_b_button=not _env_flag("SONIC_XR_ENABLE_B_RECENTER", False),
+                    ),
+                ],
+                sim_device=sim_device,
+                xr_cfg=xr_cfg,
+            ),
+        }
+    )
+
+
 def configure_sonic_physx(physx_cfg) -> None:
     """Tune PhysX defaults for the free-root SONIC closed loop.
 
@@ -221,7 +303,11 @@ class SonicSoloSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class SonicSoloActionsCfg:
-    """只保留 SONIC deploy target + 状态发布（与主配置同一来源，见 _main.ActionsCfg）。"""
+    """SONIC deploy target + 状态发布（与主配置同一来源，见 _main.ActionsCfg）+ 夹爪遥操。
+
+    前三项 action_dim 均为 0（自行消费网络包）；local_gripper 是唯一吃 env action
+    的 term，动作空间宽度 = 4 = XR 手柄 retargeter 的输出维度。
+    """
 
     sonic_wholebody = _MAIN_ACTIONS.sonic_wholebody
 
@@ -229,6 +315,10 @@ class SonicSoloActionsCfg:
         sonic_state_pub = _MAIN_ACTIONS.sonic_state_pub
     if hasattr(_MAIN_ACTIONS, "sonic_lowstate_pub"):
         sonic_lowstate_pub = _MAIN_ACTIONS.sonic_lowstate_pub
+
+    # XR 手柄扳机/握把 → 三指手（详见 build_sonic_gripper_action_cfg 上方注释块）
+    if _ENABLE_GRIPPER_TELEOP:
+        local_gripper = build_sonic_gripper_action_cfg()
 
 @configclass
 class SonicSoloObservationsCfg:
@@ -301,7 +391,9 @@ class SonicSoloLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
         # 或 third（pelvis 第三视角），配方细节与真机标定注意事项见
         # build_sonic_xr_cfg 的 docstring。
         # 只有真正构造出 OpenXRDevice 时锚点才会生效（见 openxr_device.py
-        # __init__），所以必须同时挂一个 "handtracking" teleop device；
-        # 启动时还需要 --teleop_device handtracking 才会选中它。
+        # __init__），所以必须同时挂一个 teleop device；默认设备名是
+        # "motion_controllers"（带夹爪 retargeter），见 build_sonic_teleop_devices。
+        # 启动脚本会传 --teleop_device motion_controllers；即便传的是旧的
+        # handtracking，teleop_se3_agent.py 也会自动回退到 motion_controllers。
         self.xr = build_sonic_xr_cfg()
-        self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg=self.xr)})
+        self.teleop_devices = build_sonic_teleop_devices(self.xr)

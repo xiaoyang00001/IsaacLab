@@ -56,8 +56,15 @@ Options:
   --target-rate-limit VALUE  SONIC_DEPLOY_TARGET_RATE_LIMIT. Default: 0.04.
   --headless                 Pass --headless to IsaacLab.
   --xr                       Source CloudXR env, ensure OpenXR runtime, then pass
-                             --xr and --teleop_device handtracking to IsaacLab.
+                             --xr and --teleop_device to IsaacLab (the device key
+                             follows --gripper-teleop).
   --xr-view first|third      SONIC_XR_VIEW. Default: first.
+  --gripper-teleop 0|1       SONIC_GRIPPER_TELEOP. Map the XR controller
+                             trigger/grip (and right A/B) onto the G1 trihand, the
+                             same path the main pick-place task uses. Default: 1.
+                             1: teleop device "motion_controllers", action width 4.
+                             0: teleop device "handtracking", action width 0, and
+                                the fingers stay in their default open pose.
   --xr-runtime steamvr|cloudxr
                              OpenXR runtime used by --xr. Default: steamvr.
                              steamvr: Isaac Sim -> SteamVR -> NOLO driver -> PICO
@@ -335,6 +342,7 @@ auto_recover="1"
 target_rate_limit="0.04"
 xr_view="first"
 xr_runtime="steamvr"
+gripper_teleop="1"
 cloudxr_install_dir="${HOME}/.cloudxr"
 cloudxr_env=""
 cloudxr_python="$(default_cloudxr_python)"
@@ -464,6 +472,11 @@ while [[ $# -gt 0 ]]; do
             xr_runtime="$2"
             shift 2
             ;;
+        --gripper-teleop)
+            need_value "$1" "${2-}"
+            gripper_teleop="$2"
+            shift 2
+            ;;
         --cloudxr-install-dir)
             need_value "$1" "${2-}"
             cloudxr_install_dir="$2"
@@ -527,7 +540,15 @@ validate_01 "--visual-servo-mode" "${visual_servo_mode}"
 validate_01 "--self-collisions" "${self_collisions}"
 validate_01 "--stabilize-root" "${stabilize_root}"
 validate_01 "--auto-recover" "${auto_recover}"
+validate_01 "--gripper-teleop" "${gripper_teleop}"
 validate_positive_int "--cloudxr-timeout" "${cloudxr_timeout}"
+
+# XR teleop device key must match what build_sonic_teleop_devices() registers.
+if (( gripper_teleop )); then
+    xr_teleop_device="motion_controllers"
+else
+    xr_teleop_device="handtracking"
+fi
 
 case "${xr_view}" in
     first|third) ;;
@@ -578,6 +599,7 @@ export SONIC_STATE_ZMQ_BIND="tcp://*:${state_port}"
 export SONIC_STATE_ZMQ_TOPIC="${state_topic}"
 
 export SONIC_XR_VIEW="${xr_view}"
+export SONIC_GRIPPER_TELEOP="${gripper_teleop}"
 
 export SONIC_G1_PHYSICS_MODE="${physics_mode}"
 export SONIC_G1_VISUAL_SERVO_MODE="${visual_servo_mode}"
@@ -602,12 +624,14 @@ if (( headless )); then
 fi
 
 if (( xr )); then
-    # Construct OpenXRDevice so dynamic anchors and optional XRCore button events
-    # are active. "handtracking" is the env_cfg.teleop_devices key; startup yaw
-    # recenter and optional B-button recenter do not require motion-controller
-    # retargeters.
+    # Construct OpenXRDevice so dynamic anchors, XRCore button events and the
+    # trigger/grip -> G1 trihand gripper retargeter are active.
+    # "motion_controllers" is the env_cfg.teleop_devices key built by
+    # build_sonic_teleop_devices(); with SONIC_GRIPPER_TELEOP=0 the env falls back
+    # to a retargeter-less "handtracking" device and teleop_se3_agent.py picks it
+    # up automatically (it also auto-falls-back the other way around).
     isaac_args+=("--xr")
-    isaac_args+=("--teleop_device" "handtracking")
+    isaac_args+=("--teleop_device" "${xr_teleop_device}")
 fi
 
 if (( enable_pinocchio )); then

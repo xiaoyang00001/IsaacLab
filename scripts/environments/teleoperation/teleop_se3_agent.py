@@ -462,8 +462,10 @@ def main() -> None:
     # - 主任务（镜像遥操）宽度 >0——XR 扳机→夹爪命令经设备 advance() 流入
     #   env.step，必须走设备路径；SONIC/镜像/deploy 这类 term 自行消费网络包，
     #   不吃 env action，两者互不干扰。
-    # - SonicSolo/SonicFullscene 宽度 =0，且 handtracking 设备（无 retargeter）
-    #   的 advance() 不产生 action tensor，只能零动作推进。
+    # - SonicSolo/SonicFullscene 默认也挂了夹爪 term（宽度 =4，设备
+    #   motion_controllers 带 retargeter），同样走设备路径；只有
+    #   SONIC_GRIPPER_TELEOP=0 关掉夹爪后才退回宽度 =0 的零动作推进
+    #   （彼时设备是无 retargeter 的 handtracking，advance() 不产生 action tensor）。
     deploy_zero_action_loop = deploy_target_mode and (
         teleop_interface is None or int(env.action_space.shape[-1]) == 0
     )
@@ -479,7 +481,11 @@ def main() -> None:
     # CPU 物理 + 空场景可自由跑到 ~85Hz（1.7× 超实时），policy 等效控制率掉到 ~29Hz
     # 必摔；慢于实时同样畸变（步态相位超前于机器人）。每步睡到墙钟节拍；
     # 落后超过 1s（卡顿/断点）则重新对齐，不补帧。SONIC_REALTIME_PACE=0 可关闭。
-    realtime_pace = deploy_zero_action_loop and os.environ.get("SONIC_REALTIME_PACE", "1").lower() in (
+    #
+    # ⚠️ 条件是 deploy_target_mode 而非 deploy_zero_action_loop：SONIC 场景挂上
+    # 夹爪 action term 后动作宽度 >0，主循环改走设备路径，但闭环对墙钟节拍的
+    # 要求一点没变（挂在零动作分支上会让节拍器随夹爪开关静默失效）。
+    realtime_pace = deploy_target_mode and os.environ.get("SONIC_REALTIME_PACE", "1").lower() in (
         "1",
         "true",
         "yes",
@@ -494,28 +500,38 @@ def main() -> None:
         try:
             # Teleop/deploy 都不需要 autograd；inference_mode 可以减少 tensor bookkeeping 开销。
             with torch.inference_mode():
+                stepped = False
                 if deploy_zero_action_loop:
                     # deploy 模式：零 action 只负责推进 ActionManager/Simulation。
                     # SonicDeployTargetAction 会在 process/apply 阶段自行消费最新 ZMQ/DDS 目标。
                     env.step(deploy_zero_actions)
-                    if realtime_pace:
-                        next_step_due += pace_dt
-                        sleep_s = next_step_due - time.monotonic()
-                        if sleep_s > 0.0:
-                            time.sleep(sleep_s)
-                        elif sleep_s < -1.0:
-                            next_step_due = time.monotonic()
+                    stepped = True
                 else:
-                    # 普通 teleop：设备 advance() 返回一个单环境 action，例如 keyboard 的 7 维 SE(3)。
+                    # 普通 teleop：设备 advance() 返回一个单环境 action，例如 keyboard 的 7 维 SE(3)、
+                    # 或 SONIC/主任务 XR 手柄的 4 维夹爪闭合率。
                     action = teleop_interface.advance()
 
                     # num_envs > 1 时，把同一条设备命令复制到所有并行环境。
                     if teleoperation_active:
                         actions = action.repeat(env.num_envs, 1)
                         env.step(actions)
+                        stepped = True
                     else:
                         # 暂停 teleop 时不推进物理，只保持画面刷新。
                         env.sim.render()
+
+                if realtime_pace:
+                    if stepped:
+                        next_step_due += pace_dt
+                        sleep_s = next_step_due - time.monotonic()
+                        if sleep_s > 0.0:
+                            time.sleep(sleep_s)
+                        elif sleep_s < -1.0:
+                            next_step_due = time.monotonic()
+                    else:
+                        # teleop 暂停期间物理没推进，节拍器重新对齐；否则恢复时
+                        # 会看到一大截"落后"而连续无睡眠狂奔补帧。
+                        next_step_due = time.monotonic()
 
                 if should_reset_recording_instance:
                     # 延迟到主循环中 reset，保证 reset 与 env.step 不会在同一输入回调栈里交错。

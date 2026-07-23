@@ -35,8 +35,6 @@ deploy 看到"冻结-跳变"状态流 → 站立失稳（2026-06-10 实测）。
 import os
 
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
-from isaaclab.devices.device_base import DevicesCfg
-from isaaclab.devices.openxr import OpenXRDeviceCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs import mdp as isaaclab_mdp
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -56,6 +54,7 @@ from .sonic_solo_locomanipulation_env_cfg import (
     SonicSoloActionsCfg,
     SonicSoloObservationsCfg,
     SonicSoloTerminationsCfg,
+    build_sonic_teleop_devices,
     build_sonic_xr_cfg,
     configure_sonic_physx,
 )
@@ -349,5 +348,7 @@ class SonicFullsceneLocomanipulationEnvCfg(ManagerBasedRLEnvCfg):
         # 场景里是同一个 SONIC_G1_29DOF_CFG，prim_path 同为
         # {ENV_REGEX_NS}/SONICRobot）。SONIC_XR_VIEW=first|third 切换第一/第三
         # 视角，配方细节见该函数 docstring。
+        # teleop 设备表与 SonicSolo 同源（默认 motion_controllers + 夹爪 retargeter，
+        # SONIC_GRIPPER_TELEOP=0 回退到无 retargeter 的 handtracking）。
         self.xr = build_sonic_xr_cfg()
-        self.teleop_devices = DevicesCfg(devices={"handtracking": OpenXRDeviceCfg(xr_cfg=self.xr)})
+        self.teleop_devices = build_sonic_teleop_devices(self.xr)
