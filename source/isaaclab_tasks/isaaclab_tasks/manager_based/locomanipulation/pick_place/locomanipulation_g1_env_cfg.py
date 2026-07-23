@@ -667,6 +667,62 @@ def _make_pushcart_spawn_cfg(syncable: bool = False) -> UsdFileCfg:
     )
 
 
+# ---------------------------------------------------------------------------
+# 桌面分拣小箱子（移植自晓阳 a61191017「提交添加三个小箱子」，2026-07-16）。
+# 两个 5cm 立方 small_box_1/2 + 一个 20x5x10cm 长条箱 long_box，放在还原后的
+# 打包桌面上。原提交还附带 success/box_dropped 训练式终止判定，这里只挪箱子
+# 实体，不动当前 XR teleop 场景的 TerminationsCfg。
+# ---------------------------------------------------------------------------
+# 官方 packing_table.usd 摆在 z=0 时顶面世界高 ≈0.9996。
+_TABLE_TOP_Z = 0.9996
+_SMALL_BOX_HEIGHT = 0.05
+_LONG_BOX_HEIGHT = 0.10
+_SMALL_BOX_INITIAL_Z = _TABLE_TOP_Z + 0.5 * _SMALL_BOX_HEIGHT + 0.002
+_LONG_BOX_INITIAL_Z = _TABLE_TOP_Z + 0.5 * _LONG_BOX_HEIGHT + 0.002
+_SMALL_BOX_SIZE = (0.05, 0.05, _SMALL_BOX_HEIGHT)
+# 长边沿 X
+_LONG_BOX_SIZE = (0.20, 0.05, _LONG_BOX_HEIGHT)
+
+
+def _table_box_cfg(
+    prim_name: str,
+    size: tuple[float, float, float],
+    initial_pos: tuple[float, float, float],
+    mass: float,
+    color: tuple[float, float, float],
+) -> RigidObjectCfg:
+    """还原晓阳 a61191017 的桌面可抓取箱子（CuboidCfg + 高摩擦材质）。"""
+
+    return RigidObjectCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/{prim_name}",
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=initial_pos,
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+        spawn=sim_utils.CuboidCfg(
+            size=size,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                max_depenetration_velocity=3.0,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.003,
+                rest_offset=0.0,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=color,
+                roughness=0.70,
+            ),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=1.2,
+                dynamic_friction=0.9,
+                restitution=0.0,
+            ),
+        ),
+    )
+
+
 @configclass
 class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
     """Scene configuration for locomanipulation environment with G1 robot.
@@ -684,20 +740,16 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
         ),
     )
     
-    # Table
+    # Table —— 还原正常桌面（官方 packing_table.usd @ z=0，顶面≈0.9996），
+    # 供移植自晓阳 a61191017 的三个桌面箱子（small_box_1/2 + long_box）落座。
+    # 原下陷布局（z=-1000.66）是 XR teleop 规避 object_dropping 的手法；抬回后
+    # object_dropping 仍为注释状态（见 TerminationsCfg），不会误触发复位。
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, -1000.66], rot=[1.0, 0.0, 0.0, 0.0]),
-        spawn=sim_utils.CuboidCfg(
-            size=(1.2, 0.8, 0.08),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, 0.0], rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.2,
-                dynamic_friction=1.0,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.58, 0.54), roughness=0.65),
         ),
     )
 
@@ -723,6 +775,30 @@ class LocomanipulationG1SceneCfg(InteractiveSceneCfg):
             ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.08, 0.32, 0.78), roughness=0.4),
         ),
+    )
+
+    # 桌面分拣三箱子（移植自晓阳 a61191017），坐标沿用其参考截图实测值，
+    # z 由 _TABLE_TOP_Z 依箱高重算，贴合还原后的官方桌面。
+    small_box_1 = _table_box_cfg(
+        prim_name="SmallBox1",
+        size=_SMALL_BOX_SIZE,
+        initial_pos=(0.00553, 0.31243, _SMALL_BOX_INITIAL_Z),
+        mass=0.08,
+        color=(0.82, 0.66, 0.36),
+    )
+    small_box_2 = _table_box_cfg(
+        prim_name="SmallBox2",
+        size=_SMALL_BOX_SIZE,
+        initial_pos=(-0.10565, 0.31397, _SMALL_BOX_INITIAL_Z),
+        mass=0.08,
+        color=(0.88, 0.72, 0.40),
+    )
+    long_box = _table_box_cfg(
+        prim_name="LongBox",
+        size=_LONG_BOX_SIZE,
+        initial_pos=(-0.04810, 0.41625, _LONG_BOX_INITIAL_Z),
+        mass=0.25,
+        color=(0.76, 0.56, 0.28),
     )
     # ------------------------------------------------------------------
     # 从 warehouse-simple6_v48.usd 搬出的道具。
