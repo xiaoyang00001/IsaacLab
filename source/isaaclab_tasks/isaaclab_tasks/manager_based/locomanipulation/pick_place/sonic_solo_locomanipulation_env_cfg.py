@@ -59,8 +59,8 @@ _MAIN_ACTIONS = _main.ActionsCfg()
 # 中该点位于行走通道，距传送带 y 向 4m+，无碰撞）。
 # ---------------------------------------------------------------------------
 _ENABLE_DEMO_OBJECT = _env_flag("SONIC_SOLO_DEMO_OBJECT", True)
-_DEMO_OBJECT_POS = (-0.95, 11.008, 0.72)
-_DEMO_STAND_POS = (-0.95, 11.008, 0.25)
+_DEMO_OBJECT_POS = (-0.95, 11.008, 0.92)
+_DEMO_STAND_POS = (-0.95, 11.008, 0.45)
 
 # 台座：kinematic 深色方块，把纸箱垫到胸腰高度，机器人撞不动
 HUG_BOX_STAND_CFG = RigidObjectCfg(
