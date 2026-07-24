@@ -53,8 +53,11 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 from isaaclab.utils import configclass
+from isaaclab.actuators import ImplicitActuatorCfg
+from copy import deepcopy
 
 from . import locomanipulation_g1_env_cfg as _main
+from .configs.action_cfg import G1GripperSyncActionCfg
 
 # ---------------------------------------------------------------------------
 # 操作位锚点：0716 机器人基座 (0,0) → 本分支操作位机器人基座 (-3.8, 19.008)。
@@ -124,6 +127,34 @@ def _box_cfg(
 _MAIN_ACTIONS = _main.ActionsCfg()
 
 
+# ---------------------------------------------------------------------------
+# SONIC 机器人换 43-DoF USD（带三指手）：SONIC deploy 照常驱动 29 个身体关节
+# （关节名与 g1_43dof.usd 逐字一致，pxr 已核对），多出的 14 个手指关节由 sonic_gripper
+# 手柄遥操 → 边走边抓。用户选型 B（physics_mode=1 自由根走路 + 抓取）。
+# ⚠️ SONIC 走路策略是在 29-DoF stock g1.usd 上训练的；换 43-DoF GR00T 身体（不同资产、
+# 质量/惯量可能不同）的走路稳定性未测，实机验证，必要时调 SONIC_* 参数。
+# 仅本任务用；不改 _main.SONIC_G1_29DOF_CFG（SonicSolo/Fullscene 仍用 29dof）。
+# ---------------------------------------------------------------------------
+SONIC_G1_43DOF_CFG = deepcopy(_main.SONIC_G1_29DOF_CFG)
+# 换 43dof USD（沿用 _find_gr00t_g1_43dof_usd 已解析好的绝对路径，与 robot_1 同一文件）
+SONIC_G1_43DOF_CFG.spawn.usd_path = _main.G1_43DOF_GR00T_CFG.spawn.usd_path
+# 身体沿用 SONIC 训练 PD（deepcopy 已带 legs/feet/waist/waist_yaw/arms）；补三指手执行器组
+# （配方同 G1_43DOF_GR00T_CFG.hands，否则 14 个手指关节无执行器覆盖，IsaacLab 会报错）
+SONIC_G1_43DOF_CFG.actuators["hands"] = ImplicitActuatorCfg(
+    joint_names_expr=[".*_hand_index_.*", ".*_hand_middle_.*", ".*_hand_thumb_.*"],
+    effort_limit_sim=60.0,
+    velocity_limit_sim=20.0,
+    stiffness=80.0,
+    damping=4.0,
+    armature=0.001,
+)
+# 29 身体关节初始角沿用 SONIC 默认；14 个手指补 0.0（张开）
+SONIC_G1_43DOF_CFG.init_state.joint_pos = {
+    **SONIC_G1_43DOF_CFG.init_state.joint_pos,
+    ".*_hand_.*": 0.0,
+}
+
+
 @configclass
 class PickPlaceRefSceneCfg(InteractiveSceneCfg):
     """0716 参考布局：机器人栈（沿用主配置）+ 打包桌 + 3 箱 + 高摩擦地面 + 灯光。"""
@@ -140,16 +171,17 @@ class PickPlaceRefSceneCfg(InteractiveSceneCfg):
             prim_path="/World/envs/env_.*/Robot_2",
             init_state=_main.G1_43DOF_GR00T_CFG.init_state.replace(pos=(-2.3, 19.008, 0.78)),
         )
+    # sonic_robot 用 43-DoF USD（带三指手，能抓）——见文件顶部 SONIC_G1_43DOF_CFG。
     if _main.SONIC_REPLACE_ROBOT1:
-        sonic_robot: ArticulationCfg = _main.SONIC_G1_29DOF_CFG.replace(
+        sonic_robot: ArticulationCfg = SONIC_G1_43DOF_CFG.replace(
             prim_path="{ENV_REGEX_NS}/SONICRobot",
-            init_state=_main.SONIC_G1_29DOF_CFG.init_state.replace(
+            init_state=SONIC_G1_43DOF_CFG.init_state.replace(
                 pos=(-3.8, 19.008, 0.76),
                 rot=(0.7071, 0.0, 0.0, 0.7071),
             ),
         )
     else:
-        sonic_robot: ArticulationCfg = _main.SONIC_G1_29DOF_CFG.replace(
+        sonic_robot: ArticulationCfg = SONIC_G1_43DOF_CFG.replace(
             prim_path="{ENV_REGEX_NS}/SONICRobot"
         )
 
@@ -260,6 +292,28 @@ class PickPlaceRefActionsCfg:
     if hasattr(_MAIN_ACTIONS, "remote_gripper"):
         remote_gripper = _MAIN_ACTIONS.remote_gripper
 
+    # SONIC 机器人(43dof)三指手夹爪：手柄扳机 → motion_controllers 的
+    # G1GripperMotionControllerRetargeter(4维) → 本项(mode=local_publish → action_dim=4)
+    # → 驱动 sonic_robot 手指。仅 REPLACE_ROBOT1=1(sonic 上工位)时挂载；=0 时操作机是
+    # robot_1(自带 local_gripper)，本项不挂避免动作维度冲突。ZMQ 端口 5573(避开 deploy
+    # 5557/58、state 5560、robot_2 5567/68、镜像夹爪 5571/72)。夹持角度同 robot_1 proven 配方。
+    if _main.SONIC_REPLACE_ROBOT1:
+        sonic_gripper = G1GripperSyncActionCfg(
+            asset_name="sonic_robot",
+            mode="local_publish",
+            robot_id=1,
+            transport="zmq",
+            zmq_host="127.0.0.1",
+            zmq_port=5573,
+            zmq_topic="sonic_gripper",
+            controller_gripper_finger_close_angle=1.8,
+            controller_gripper_thumb_1_angle=1.1,
+            controller_gripper_thumb_2_angle=1.8,
+            controller_gripper_action_alpha=1.0,
+            controller_gripper_use_soft_limits=False,
+            write_joint_state=True,
+        )
+
 
 @configclass
 class PickPlaceRefTerminationsCfg:
@@ -296,3 +350,14 @@ class SonicPickPlaceRefLocomanipulationEnvCfg(_main.LocomanipulationG1EnvCfg):
     actions: PickPlaceRefActionsCfg = PickPlaceRefActionsCfg()
     terminations: PickPlaceRefTerminationsCfg = PickPlaceRefTerminationsCfg()
     events: PickPlaceRefEventsCfg = PickPlaceRefEventsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        # sonic_robot 现在是 43-DoF GR00T USD：head_link 在根级
+        # (/World/envs/env_0/SONICRobot/head_link)，不是 29dof g1.usd 的
+        # torso_link/head_link（父类按 29dof 设的路径在 43dof 上不存在 → XR 锚点静默失效）。
+        # 仅 REPLACE_ROBOT1=1(sonic 上工位)时需修；=0 时操作机是 robot_1，父类已锚到
+        # /Robot_1/head_link（43dof 同结构），不动。
+        if _main.SONIC_REPLACE_ROBOT1:
+            self.xr.anchor_prim_path = "/World/envs/env_0/SONICRobot/head_link"
+            self.xr.anchor_rotation_prim_path = "/World/envs/env_0/SONICRobot/pelvis"
