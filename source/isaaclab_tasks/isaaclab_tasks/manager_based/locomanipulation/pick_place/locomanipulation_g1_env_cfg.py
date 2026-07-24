@@ -227,10 +227,10 @@ def _find_gr00t_g1_43dof_usd() -> str:
     )
     for root in candidates:
         for usd_name in (
+            "g1_43dof_s3.usda",
             "g1_43dof.usd",
             "g1_43dof_isaaclab_no_material.usda",
             "g1_43dof_isaaclab_nomdl.usda",
-            "g1_43dof_s3.usda",
         ):
             usd_path = root / "gear_sonic/data/robots/g1" / usd_name
             if usd_path.exists():
