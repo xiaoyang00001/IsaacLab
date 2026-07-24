@@ -176,11 +176,14 @@ SONIC_G1_43DOF_CFG = deepcopy(_main.SONIC_G1_29DOF_CFG)
 SONIC_G1_43DOF_CFG.spawn.usd_path = _main.G1_43DOF_GR00T_CFG.spawn.usd_path
 # 身体沿用 SONIC 训练 PD（deepcopy 已带 legs/feet/waist/waist_yaw/arms）；补三指手执行器组
 # （配方同 G1_43DOF_GR00T_CFG.hands，否则 14 个手指关节无执行器覆盖，IsaacLab 会报错）
+# 手指执行器：抓取用低刚度/低力矩预算(连续柔顺方向，见 grasp-tune 参数档案)。
+# effort_limit_sim=10 是关键——它封顶手指接触力，避免 N9"满闭深压把箱顶飞"。
+# stiffness 40 配 write_joint_state=False(PD 力控，非硬写 teleport)让手指压到箱面即停。
 SONIC_G1_43DOF_CFG.actuators["hands"] = ImplicitActuatorCfg(
     joint_names_expr=[".*_hand_index_.*", ".*_hand_middle_.*", ".*_hand_thumb_.*"],
-    effort_limit_sim=60.0,
+    effort_limit_sim=10.0,
     velocity_limit_sim=20.0,
-    stiffness=80.0,
+    stiffness=40.0,
     damping=4.0,
     armature=0.001,
 )
@@ -345,12 +348,16 @@ class PickPlaceRefActionsCfg:
             zmq_host="127.0.0.1",
             zmq_port=5573,
             zmq_topic="sonic_gripper",
-            controller_gripper_finger_close_angle=1.8,
+            # 夹持目标角降到 1.2(index/middle)/1.4(thumb_2)：不设满闭(1.8)，避免 N9
+            # "满闭深压把箱顶飞"；手指压到箱面靠接触力停，不必闭到底。
+            controller_gripper_finger_close_angle=1.2,
             controller_gripper_thumb_1_angle=1.1,
-            controller_gripper_thumb_2_angle=1.8,
+            controller_gripper_thumb_2_angle=1.4,
             controller_gripper_action_alpha=1.0,
             controller_gripper_use_soft_limits=False,
-            write_joint_state=True,
+            # ⚠️ write_joint_state=False：手指走执行器 PD 力控（压到箱面即停、施加连续接触
+            # 力），而非硬写 teleport（会把手指瞬移到目标角、穿过/顶飞箱子=你看到的"穿透"）。
+            write_joint_state=False,
         )
 
 
