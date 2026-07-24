@@ -63,6 +63,9 @@ from . import locomanipulation_g1_env_cfg as _main
 # ---------------------------------------------------------------------------
 _ANCHOR_X = -3.8
 _ANCHOR_Y = 19.008
+# 桌+箱整体相对机器人再往正前方(+Y)推远的距离，避免机器人贴着桌子。桌子和 3 个箱子
+# 共用这一个偏移，相对摆放不变（箱子仍在桌面上），只调这一个数即可改远近。
+_FWD = 0.20
 
 # ---- 以下常量/工厂函数逐字移植自 origin/0716-校验 的 locomanipulation_g1_env_cfg.py ----
 # packing_table.usd 顶面：桌子 spawn 在 z=0 时顶面世界高度 = 0.9996。
@@ -160,7 +163,7 @@ class PickPlaceRefSceneCfg(InteractiveSceneCfg):
     packing_table = AssetBaseCfg(
         prim_path="/World/envs/env_.*/PackingTable",
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=[_ANCHOR_X + 0.0, _ANCHOR_Y + 0.55, TABLE_TOP_Z / 2.0],
+            pos=[_ANCHOR_X + 0.0, _ANCHOR_Y + 0.55 + _FWD, TABLE_TOP_Z / 2.0],
             rot=[1.0, 0.0, 0.0, 0.0],
         ),
         spawn=sim_utils.CuboidCfg(
@@ -180,21 +183,21 @@ class PickPlaceRefSceneCfg(InteractiveSceneCfg):
     small_box_1 = _box_cfg(
         prim_name="SmallBox1",
         size=SMALL_BOX_SIZE,
-        initial_pos=(_ANCHOR_X + 0.00553, _ANCHOR_Y + 0.31243, SMALL_BOX_INITIAL_Z),
+        initial_pos=(_ANCHOR_X + 0.00553, _ANCHOR_Y + 0.31243 + _FWD, SMALL_BOX_INITIAL_Z),
         mass=0.08,
         color=(0.82, 0.66, 0.36),
     )
     small_box_2 = _box_cfg(
         prim_name="SmallBox2",
         size=SMALL_BOX_SIZE,
-        initial_pos=(_ANCHOR_X - 0.10565, _ANCHOR_Y + 0.31397, SMALL_BOX_INITIAL_Z),
+        initial_pos=(_ANCHOR_X - 0.10565, _ANCHOR_Y + 0.31397 + _FWD, SMALL_BOX_INITIAL_Z),
         mass=0.08,
         color=(0.88, 0.72, 0.40),
     )
     long_box = _box_cfg(
         prim_name="LongBox",
         size=LONG_BOX_SIZE,
-        initial_pos=(_ANCHOR_X - 0.04810, _ANCHOR_Y + 0.41625, LONG_BOX_INITIAL_Z),
+        initial_pos=(_ANCHOR_X - 0.04810, _ANCHOR_Y + 0.41625 + _FWD, LONG_BOX_INITIAL_Z),
         mass=0.25,
         color=(0.76, 0.56, 0.28),
     )
