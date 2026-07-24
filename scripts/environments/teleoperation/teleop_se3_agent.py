@@ -97,6 +97,12 @@ if (
     _is_g1_locomanip_task(args_cli.task)
     and not _cli_flag_present("--teleop_device")
     and args_cli.teleop_device == "keyboard"
+    # 只有真正请求 XR（--xr）时才自动选 motion_controllers（OpenXR 设备）。否则保持
+    # keyboard，避免"不带 --xr 也被 motion_controllers 拉进 XR 模式"（L115-117 会因
+    # 设备是 XR 类而强制 xr=True）。这样这些任务默认窗口模式，带 --xr 才进 XR。
+    # 显式传 --teleop_device 的启动（Windows 主 pickplace、sonic 脚本 --xr 传 handtracking）
+    # 不走本分支，行为不变。
+    and args_cli.xr
 ):
     args_cli.teleop_device = "motion_controllers"
 
