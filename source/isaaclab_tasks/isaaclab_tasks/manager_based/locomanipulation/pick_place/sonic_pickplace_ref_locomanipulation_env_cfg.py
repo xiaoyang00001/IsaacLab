@@ -70,16 +70,26 @@ _ANCHOR_Y = 19.008
 # 共用这一个偏移，相对摆放不变（箱子仍在桌面上），只调这一个数即可改远近。
 _FWD = 0.20
 
-# ---- 以下常量/工厂函数逐字移植自 origin/0716-校验 的 locomanipulation_g1_env_cfg.py ----
-# packing_table.usd 顶面：桌子 spawn 在 z=0 时顶面世界高度 = 0.9996。
-TABLE_TOP_Z = 0.9996
+# 打包桌桌面世界高度。0716 原为 0.9996(≈1.0m)偏高、机器人够桌上物体费劲；降到 0.80m
+# 便于 43dof 手够取(桌面在机器人 pelvis 略上方，手前伸下压即可抓)。只调这一个数即可改
+# 高度，桌腿高度与 3 个箱子的初始高度都由它推导。
+TABLE_TOP_Z = 0.80
 SMALL_BOX_HEIGHT = 0.05
 LONG_BOX_HEIGHT = 0.10
-SMALL_BOX_INITIAL_Z = TABLE_TOP_Z + 0.5 * SMALL_BOX_HEIGHT + 0.002  # 1.0266
-LONG_BOX_INITIAL_Z = TABLE_TOP_Z + 0.5 * LONG_BOX_HEIGHT + 0.002    # 1.0516
+SMALL_BOX_INITIAL_Z = TABLE_TOP_Z + 0.5 * SMALL_BOX_HEIGHT + 0.002  # 箱底贴桌面 + 2mm 间隙
+LONG_BOX_INITIAL_Z = TABLE_TOP_Z + 0.5 * LONG_BOX_HEIGHT + 0.002
 
 SMALL_BOX_SIZE = (0.05, 0.05, SMALL_BOX_HEIGHT)
 LONG_BOX_SIZE = (0.20, 0.05, LONG_BOX_HEIGHT)  # 长边沿 X
+
+# 打包桌几何（桌面板 + 4 腿，自包含 Cuboid，仿真桌形；无外部 Nucleus 资产 → 跨机器安全）。
+_TABLE_CX = _ANCHOR_X + 0.0            # 桌中心 X = 机器人正前
+_TABLE_CY = _ANCHOR_Y + 0.55 + _FWD   # 桌中心 Y = 机器人前方(含 _FWD 推远)
+_TABLE_SIZE_XY = (1.2, 0.8)           # 桌面板 X×Y
+_TABLE_TOP_THK = 0.05                 # 桌面板厚
+_TABLE_LEG_H = TABLE_TOP_Z - _TABLE_TOP_THK  # 桌腿高(地面→板底)
+_TABLE_TOP_COLOR = (0.72, 0.74, 0.78)  # 浅灰蓝桌面（换色）
+_TABLE_LEG_COLOR = (0.28, 0.28, 0.30)  # 深灰桌腿
 
 
 def _box_cfg(
@@ -117,6 +127,32 @@ def _box_cfg(
                 dynamic_friction=0.9,
                 restitution=0.0,
             ),
+        ),
+    )
+
+
+def _table_part_cfg(
+    prim_name: str,
+    size: tuple[float, float, float],
+    pos: tuple[float, float, float],
+    color: tuple[float, float, float],
+    friction: float = 1.0,
+) -> AssetBaseCfg:
+    """桌子的一块（桌面板或桌腿）：kinematic Cuboid，自带碰撞，无外部资产。"""
+
+    return AssetBaseCfg(
+        prim_path=f"/World/envs/env_.*/{prim_name}",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=list(pos), rot=[1.0, 0.0, 0.0, 0.0]),
+        spawn=sim_utils.CuboidCfg(
+            size=size,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=friction,
+                dynamic_friction=friction,
+                restitution=0.0,
+            ),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color, roughness=0.55),
         ),
     )
 
@@ -186,29 +222,32 @@ class PickPlaceRefSceneCfg(InteractiveSceneCfg):
         )
 
     # -------------------- 0716 参考场景几何（按锚点平移，朝向不变） --------------------
-    # 打包桌：自包含 Cuboid 实体桌（顶面对齐 0716 的 TABLE_TOP_Z=0.9996）。
-    # ⚠️不用 0716 的 Nucleus packing_table.usd——那是外部资产引用，在部分机器上
-    # （Nucleus 本地缓存缺该资产/版本不一致）加载不出来，会导致"桌子不可见 + 箱子
-    # 掉地上"（本机能加载但另一台 nolovr-MS-7D99 复现该故障）。改用 kinematic 实体
-    # Cuboid，自带碰撞、无外部依赖，与 sonic 分支主场景的 packing_table 同款做法。
-    # size Z = TABLE_TOP_Z、中心 z = TABLE_TOP_Z/2 → 台体自地面 z=0 顶到 0.9996。
-    packing_table = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=[_ANCHOR_X + 0.0, _ANCHOR_Y + 0.55 + _FWD, TABLE_TOP_Z / 2.0],
-            rot=[1.0, 0.0, 0.0, 0.0],
-        ),
-        spawn=sim_utils.CuboidCfg(
-            size=(1.2, 0.8, TABLE_TOP_Z),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.2,
-                dynamic_friction=1.0,
-                restitution=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.45, 0.35), roughness=0.6),
-        ),
+    # 打包桌 = 桌面板 + 4 条腿（仿真真实 pickTable 桌形，桌下留空、机器人能贴近够取）。
+    # 全部自包含 kinematic Cuboid，无外部 Nucleus 资产（0716 的 packing_table.usd 在部分
+    # 机器上加载不出来 → 桌子不可见+箱掉地，故不用）。桌面顶 = TABLE_TOP_Z（可调）。
+    # 桌面板友好摩擦 1.2 防箱打滑；桌腿 4 角内缩，避开机器人正前够取路径。
+    packing_table = _table_part_cfg(
+        "PackingTable",
+        (_TABLE_SIZE_XY[0], _TABLE_SIZE_XY[1], _TABLE_TOP_THK),
+        (_TABLE_CX, _TABLE_CY, TABLE_TOP_Z - _TABLE_TOP_THK / 2.0),
+        _TABLE_TOP_COLOR,
+        friction=1.2,
+    )
+    table_leg_fl = _table_part_cfg(
+        "TableLegFL", (0.06, 0.06, _TABLE_LEG_H),
+        (_TABLE_CX - 0.52, _TABLE_CY - 0.32, _TABLE_LEG_H / 2.0), _TABLE_LEG_COLOR,
+    )
+    table_leg_fr = _table_part_cfg(
+        "TableLegFR", (0.06, 0.06, _TABLE_LEG_H),
+        (_TABLE_CX + 0.52, _TABLE_CY - 0.32, _TABLE_LEG_H / 2.0), _TABLE_LEG_COLOR,
+    )
+    table_leg_bl = _table_part_cfg(
+        "TableLegBL", (0.06, 0.06, _TABLE_LEG_H),
+        (_TABLE_CX - 0.52, _TABLE_CY + 0.32, _TABLE_LEG_H / 2.0), _TABLE_LEG_COLOR,
+    )
+    table_leg_br = _table_part_cfg(
+        "TableLegBR", (0.06, 0.06, _TABLE_LEG_H),
+        (_TABLE_CX + 0.52, _TABLE_CY + 0.32, _TABLE_LEG_H / 2.0), _TABLE_LEG_COLOR,
     )
 
     # 桌面上两个 5cm 立方 + 一个 20×5×10cm 长箱（位姿取自 0716 参考截图标定）
