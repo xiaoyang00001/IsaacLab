@@ -14,6 +14,7 @@ from . import (
     fixed_base_upper_body_ik_g1_env_cfg,
     locomanipulation_g1_env_cfg,
     sonic_fullscene_locomanipulation_env_cfg,
+    sonic_pickplace_ref_locomanipulation_env_cfg,
     sonic_solo_locomanipulation_env_cfg,
 )
 
@@ -35,6 +36,19 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
         "env_cfg_entry_point": sonic_fullscene_locomanipulation_env_cfg.SonicFullsceneLocomanipulationEnvCfg,
+    },
+    disable_env_checker=True,
+)
+
+# 跟踪 origin/0716-校验 的 pickplace 参考场景（打包桌 + 3 箱），机器人栈沿用本分支
+# 主配置（robot_1 43dof 镜像 / robot_2 / sonic_robot，靠 LOCOMANIP_SONIC_REPLACE_ROBOT1
+# 与 LOCOMANIP_ENABLE_ROBOT2 切换）。id 含 "Locomanipulation-G1" 以复用 teleop 脚本的
+# motion_controllers 默认 + 强制 pinocchio + deploy/U 键回调链路。
+gym.register(
+    id="Isaac-PickPlaceRef-Locomanipulation-G1-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": sonic_pickplace_ref_locomanipulation_env_cfg.SonicPickPlaceRefLocomanipulationEnvCfg,
     },
     disable_env_checker=True,
 )
